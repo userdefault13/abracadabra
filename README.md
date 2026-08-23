@@ -31,7 +31,32 @@ Requires Node 20+ and macOS (Touch ID).
 npm install
 npm run build
 npm run setup   # compiles the Touch ID helper (swiftc → vendor/auth-helper)
-npm link        # optional: installs `abra` on your PATH
+npm link        # installs `abra` on your PATH
+```
+
+## Quick start
+
+**Terminal:**
+
+```sh
+abra project new myproj        # create a project
+abra set myproj MY_API_KEY     # hidden input — stored AES-256-GCM encrypted
+abra ls myproj                 # list vars (secrets masked)
+abra get myproj MY_API_KEY     # reveal value → approve Touch ID
+abra run myproj -- ./deploy.sh # inject all vars into any command
+```
+
+**Interactive TUI:**
+
+```sh
+abra                           # arrow keys, enter to select; full var editor
+```
+
+**Web dashboard:**
+
+```sh
+npm run web:build              # one-time build of the Svelte UI
+abra serve --open              # serves API + dash at http://127.0.0.1:7331/
 ```
 
 ## CLI
@@ -42,12 +67,13 @@ npm link        # optional: installs `abra` on your PATH
 | `abra project new <name>` | Create a project |
 | `abra project rm <name>` / `project ls` | Delete / list projects |
 | `abra ls [project]` | List projects, or vars in a project (secrets masked) |
-| `abra set <proj> <KEY>` | Add/update a var — hidden input by default; `--visible`, `--no-secret` flags available |
+| `abra set <proj> <KEY>` | Add/update a var — hidden input by default; `--visible`, `--no-secret`, `--stdin` flags available |
 | `abra get <proj> <KEY>` | Print value to stdout (**Touch ID required**) |
 | `abra rm <proj> <KEY>` | Delete a var |
+| `abra keygen foundry <proj>` | Generate EVM wallet(s) via Foundry (`--pay-to`, `-n`) |
 | `abra run [-p proj] [-k K1,K2] -- <cmd…>` | Run command with vars injected into env |
 | `abra env <proj> [-k K1,K2]` | Print `export` lines for `eval $(…)` — Touch ID gated |
-| `abra serve [--port 7331]` | Start the local biometric-gated API |
+| `abra serve [--port 7331] [--open]` | Start the local biometric-gated API + web dash |
 
 ### Injecting secrets into a deploy
 
@@ -245,9 +271,11 @@ projects also return structured errors — agents should parse
 ## Development
 
 ```sh
-npm run dev          # tsx src/index.ts …
+npm run dev          # tsx src/index.ts … (no build step)
 npm run typecheck    # tsc --noEmit
-npm test             # demo/ smoke scripts
+npm run web:build    # build the Svelte dash into web/dist
+npm run web:dev      # Vite dev server for the dash on :5173 (proxies to :7331)
+node demo/demo.sh    # end-to-end demo: vault → API → dapp client → run injection
 ```
 
 ## Roadmap
