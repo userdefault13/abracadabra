@@ -1,0 +1,33 @@
+{
+  "name": "abracadabra",
+  "version": "0.1.0",
+  "description": "Terminal vault for env vars & passwords with biometric-gated local API",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "abra": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "setup": "mkdir -p vendor && swiftc -O src/auth/auth-helper.swift -o vendor/auth-helper",
+    "web:build": "npm install --prefix web && npm run build --prefix web",
+    "web:dev": "npm run dev --prefix web",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "commander": "^12.1.0",
+    "ink": "^7.1.1",
+    "react": "^19.2.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.18",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

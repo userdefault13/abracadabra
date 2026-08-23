@@ -1,0 +1,133 @@
+:root {
+  --bg: #12101a;
+  --bg2: #1a1725;
+  --bg3: #221e30;
+  --border: #322c45;
+  --text: #e8e5f2;
+  --dim: #8f89a6;
+  --accent: #d24df0;
+  --accent-dim: #7a2b8a;
+  --green: #4dc97a;
+  --red: #ef5350;
+  --yellow: #f0c04d;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+#app {
+  display: flex;
+  min-height: 100vh;
+}
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+button:hover {
+  border-color: var(--accent);
+}
+button.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+button.danger:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+input[type="text"],
+input[type="password"],
+select {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+}
+input:focus {
+  border-color: var(--accent);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: normal;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--bg3);
+}
+tr:hover td {
+  background: rgba(210, 77, 240, 0.05);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--dim);
+}
+.badge.secret {
+  color: var(--yellow);
+  border-color: rgba(240, 192, 77, 0.4);
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  max-width: 420px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.toast.error {
+  border-color: var(--red);
+  color: var(--red);
+}
+.toast.ok {
+  border-color: var(--green);
+}
+
+h2.panel-title {
+  margin: 0 0 16px;
+  font-size: 16px;
+}
