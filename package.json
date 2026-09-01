@@ -1,8 +1,8 @@
 {
   "name": "@userdefault/abracadabra",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Terminal vault for env vars & passwords with biometric-gated local API",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/userdefault13/abracadabra.git"
@@ -21,7 +21,8 @@
     "skills",
     "README.md",
     "AGENTS.md",
-    "LICENSE"
+    "LICENSE",
+    "COMMERCIAL.md"
   ],
   "scripts": {
     "build": "tsc",
