@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { vaultFile } from "../core/paths.js";
 import { platformHealth, platformInfo } from "../platform/index.js";
+import { getLicenseStatus, licenseContractAddress } from "../license/index.js";
 
 const ok = (msg: string) => console.log(`ok    ${msg}`);
 const warn = (msg: string) => console.log(`warn  ${msg}`);
@@ -44,6 +45,21 @@ export async function cmdDoctor(): Promise<void> {
   if (info.keystore === "macos-keychain" && process.platform !== "darwin") {
     fail("macos-keychain selected on non-macOS");
     fails++;
+  }
+
+  const licContract = licenseContractAddress();
+  if (licContract) {
+    ok(`license contract ${licContract}`);
+    const lic = await getLicenseStatus();
+    if (lic.skip) warn("ABRA_SKIP_LICENSE=1 — NFT gate disabled");
+    else if (!lic.activated) warn("license not activated — run: abra activate <wallet>");
+    else if (lic.onChainOk) ok(`license activated ${lic.wallet}`);
+    else if (lic.onChainOk === false) {
+      warn(`license invalid on-chain for ${lic.wallet}`);
+      fails++;
+    } else warn("license on-chain check failed (RPC)");
+  } else {
+    warn("ABRA_LICENSE_NFT unset — commercial license gate off");
   }
 
   if (fails > 0) process.exit(1);

@@ -7,6 +7,8 @@ import { send } from "./http-utils.js";
 import * as dash from "./dash.js";
 import * as session from "./session.js";
 import * as passkeys from "./passkeys.js";
+import * as licenseDash from "./license-dash.js";
+import { isLicensed, licenseEnforcementEnabled } from "../license/index.js";
 
 const MAX_BODY = 64 * 1024;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
@@ -105,6 +107,21 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
             send(res, 404, { error: "not found" });
             return;
           }
+          if (parts[1] === "license") {
+            if (method === "GET" && parts[2] === "status" && parts.length === 3)
+              return await licenseDash.licenseStatus(res);
+            if (method === "POST" && parts[2] === "activate" && parts.length === 3)
+              return await licenseDash.licenseActivate(await readJson(), res);
+            send(res, 404, { error: "not found" });
+            return;
+          }
+          if (licenseEnforcementEnabled() && !(await isLicensed())) {
+            send(res, 403, {
+              error: "license_required",
+              message: "Abra License NFT required — activate via abra activate or the web dash",
+            });
+            return;
+          }
           // everything else requires an authenticated dash session
           if (!session.isAuthed(req)) {
             send(res, 401, { error: "2FA login required" });
@@ -166,6 +183,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           const remote = req.socket.remoteAddress ?? "";
           if (!/^127\.0\.0\.1$|^::1$|^::ffff:127\.0\.0\.1$/.test(remote)) {
             send(res, 403, { error: "loopback connections only" });
+            return;
+          }
+
+          if (licenseEnforcementEnabled() && !(await isLicensed())) {
+            send(res, 403, { error: "license_required" });
             return;
           }
 

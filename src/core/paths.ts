@@ -26,6 +26,10 @@ export function syncStateFile(): string {
   return path.join(resolveAbraDir(), "sync-state.json");
 }
 
+export function licenseFile(): string {
+  return path.join(resolveAbraDir(), "license.json");
+}
+
 /** @deprecated use abraDir() */
 export const ABRA_DIR = resolveAbraDir();
 

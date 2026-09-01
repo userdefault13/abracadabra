@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { getProjects, createProject, getSession, logout, type VarInfo } from "./lib/api";
+  import { getProjects, createProject, getSession, logout, getLicenseStatus, type VarInfo } from "./lib/api";
   import ProjectView from "./lib/ProjectView.svelte";
   import ConnectionsPanel from "./lib/ConnectionsPanel.svelte";
   import GrantsPanel from "./lib/GrantsPanel.svelte";
   import AuthGate from "./lib/AuthGate.svelte";
+  import ActivateGate from "./lib/ActivateGate.svelte";
   import UsbPanel from "./lib/UsbPanel.svelte";
   import KeysPanel from "./lib/KeysPanel.svelte";
 
@@ -12,7 +13,9 @@
   let toast = $state<{ text: string; kind: "ok" | "error" } | null>(null);
   let newProjectName = $state("");
   let creating = $state(false);
-  // null = checking session, true = unlocked, false = locked (gate shown)
+  // null = checking, true = licensed or gate off, false = need ActivateGate
+  let licensed = $state<boolean | null>(null);
+  // null = checking session, true = unlocked, false = locked (passkey gate)
   let authed = $state<boolean | null>(null);
   let projectsLoaded = $state(false);
   let locking = $state(false);
@@ -31,6 +34,16 @@
     }
   }
 
+  async function checkLicense() {
+    try {
+      const st = await getLicenseStatus();
+      licensed = !st.enforcement || (st.activated && st.onChainOk !== false);
+    } catch {
+      licensed = true;
+    }
+    if (licensed) void checkSession();
+  }
+
   async function checkSession() {
     try {
       authed = (await getSession()).authenticated;
@@ -39,13 +52,17 @@
     }
     if (authed) void refresh();
   }
-  checkSession();
+  checkLicense();
 
   // any 401 from an API call re-locks the UI
   window.addEventListener("abra:unauthorized", () => (authed = false));
+  window.addEventListener("abra:license-required", () => {
+    licensed = false;
+    authed = false;
+  });
 
   // poll lightly so grants panel stays fresh
-  const timer = setInterval(() => authed && refresh(), 15000);
+  const timer = setInterval(() => licensed && authed && refresh(), 15000);
 
   window.addEventListener("hashchange", () => (route = location.hash));
 
@@ -81,11 +98,11 @@
   }
 </script>
 
-{#if authed === null}
+{#if licensed === null || (licensed && authed === null)}
   <div class="session-loading" aria-live="polite">checking session…</div>
 {/if}
 
-<aside class:dimmed={authed === null}>
+<aside class:dimmed={licensed === null || licensed === false || authed === null}>
   <div class="brand"><img src="/logo.svg" alt="" class="brand-logo" /> abracadabra</div>
 
   <div class="new-project">
@@ -123,7 +140,7 @@
   </div>
 </aside>
 
-<main class:dimmed={authed === null}>
+<main class:dimmed={licensed === null || licensed === false || authed === null}>
   {#if route.startsWith("#/project/")}
     {@const name = decodeURIComponent(route.slice("#/project/".length))}
     {#if projects[name]}
@@ -165,7 +182,15 @@
   <div class="toast {toast.kind}">{toast.text}</div>
 {/if}
 
-{#if authed === false}
+{#if licensed === false}
+  <ActivateGate
+    onactivated={() => {
+      licensed = true;
+      void checkSession();
+      showToast("license activated");
+    }}
+  />
+{:else if authed === false}
   <AuthGate onunlocked={() => { authed = true; void refresh(); }} />
 {/if}
 

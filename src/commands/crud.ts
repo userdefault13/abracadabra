@@ -3,6 +3,7 @@ import { loadVault, saveVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { prompt, promptHidden } from "../core/prompt.js";
 import { authenticate, biometricsSkipped } from "../platform/index.js";
+import { assertLicensed } from "../license/index.js";
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -154,6 +155,7 @@ export async function getVar(projectName: string, key: string): Promise<void> {
     const project = assertProject(vault, projectName);
     const entry = project.vars[key];
     if (!entry) fail(`Var not found: ${key} in ${projectName}`);
+    await assertLicensed();
     await authenticate(`abracadabra: reveal ${projectName}/${key}`);
     process.stdout.write(entry.value);
   } catch (err) {

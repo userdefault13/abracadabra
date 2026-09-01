@@ -1,5 +1,6 @@
 import { loadVault, assertProject } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
+import { assertLicensed } from "../license/index.js";
 
 function shQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -28,6 +29,7 @@ export async function printEnv(
     if (selected.length === 0) return;
 
     // dumping secrets into the shell deserves the same gate as `get`
+    await assertLicensed();
     await authenticate(`abracadabra: export ${selected.length} var(s) from "${projectName}"`);
 
     for (const key of selected) {

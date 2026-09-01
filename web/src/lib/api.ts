@@ -23,11 +23,31 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
-    // session expired / locked — let the app re-show the login gate
     window.dispatchEvent(new CustomEvent("abra:unauthorized"));
+  }
+  if (res.status === 403 && (data as ApiError).error === "license_required") {
+    window.dispatchEvent(new CustomEvent("abra:license-required"));
   }
   if (!res.ok) throw new Error((data as ApiError).error ?? `HTTP ${res.status}`);
   return data as T;
+}
+
+export interface LicenseStatus {
+  enforcement: boolean;
+  contract: string | null;
+  activated: boolean;
+  wallet: string | null;
+  onChainOk: boolean | null;
+  activatedAt: string | null;
+  skip: boolean;
+}
+
+export function getLicenseStatus() {
+  return request<LicenseStatus>("GET", "/api/license/status");
+}
+
+export function activateLicense(wallet: string) {
+  return request<{ ok: boolean; balance: string }>("POST", "/api/license/activate", { wallet });
 }
 
 export function getSession() {

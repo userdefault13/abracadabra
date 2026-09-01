@@ -9,6 +9,7 @@ import { registerKeyCommands } from "./commands/keys.js";
 import { keygen } from "./commands/keygen.js";
 import { updateCommand } from "./commands/update.js";
 import { cmdDoctor } from "./commands/doctor.js";
+import { cmdActivate, cmdLicenseStatus, cmdLicenseClear } from "./commands/activate.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
@@ -74,6 +75,8 @@ program
   .option("--open", "open the web dash in your browser")
   .action(async (opts: { port: string; open?: boolean }) => {
     await maybePromptForUpdate(version);
+    const { assertLicensed } = await import("./license/index.js");
+    await assertLicensed();
     const { startServer } = await import("./api/server.js");
     await startServer(Number(opts.port), opts.open);
   });
@@ -99,9 +102,34 @@ program
   .command("mcp")
   .description("Run the abracadabra MCP server (stdio) for AI agents")
   .action(async () => {
+    const { assertLicensed } = await import("./license/index.js");
+    await assertLicensed();
     const { startMcpServer } = await import("./mcp/server.js");
     await startMcpServer();
   });
+
+program
+  .command("activate [wallet]")
+  .description("Activate abracadabra with a wallet holding an Abra License NFT on Base")
+  .option("--challenge", "print a sign-in message for future wallet-proof flow")
+  .action(async (wallet: string | undefined, opts: { challenge?: boolean }) => {
+    await cmdActivate(wallet, opts);
+  });
+
+const license = program.command("license").description("Abra License NFT activation status");
+
+license
+  .command("status")
+  .description("Show license activation and on-chain verification")
+  .option("--json", "JSON output")
+  .action(async (opts: { json?: boolean }) => {
+    await cmdLicenseStatus(opts.json);
+  });
+
+license
+  .command("clear")
+  .description("Remove local activation (requires ABRA_SKIP_LICENSE=1)")
+  .action(cmdLicenseClear);
 
 program
   .command("doctor")
@@ -142,6 +170,8 @@ if (process.argv.length <= 2) {
     await startServer();
   } else {
     await maybePromptForUpdate(version);
+    const { assertLicensed } = await import("./license/index.js");
+    await assertLicensed();
     const { startTui } = await import("./tui/start.js");
     startTui();
   }
