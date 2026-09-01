@@ -8,7 +8,7 @@ import { prompt } from "./prompt.js";
 const DEFAULT_CDN_LATEST =
   process.env.ABRA_CDN_LATEST ?? "https://cdn.aarcadeghst.com/releases/abracadabra/latest.json";
 const DEFAULT_WWW_LATEST =
-  process.env.ABRA_WWW_LATEST ?? "https://www.aarcadeghst.com/releases/abracadabra/latest.json";
+  process.env.ABRA_WWW_LATEST ?? "https://www.aarcadeghst.com/api/release-manifest?product=abracadabra";
 const DEFAULT_GITHUB_LATEST =
   process.env.ABRA_GITHUB_LATEST ??
   "https://raw.githubusercontent.com/userdefault13/abracadabra/main/releases/latest.json";
