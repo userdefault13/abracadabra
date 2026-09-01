@@ -4,7 +4,11 @@ import { registerProjectCommands, listProjects, listVars, setVar, getVar, remove
 import { runCommand } from "./commands/run.js";
 import { printEnv } from "./commands/env.js";
 import { registerConnectCommands } from "./commands/connect.js";
+import { registerUsbCommands } from "./commands/usb.js";
+import { registerKeyCommands } from "./commands/keys.js";
 import { keygen } from "./commands/keygen.js";
+import { updateCommand } from "./commands/update.js";
+import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { name: pkgName, version } = require("../package.json") as {
@@ -21,6 +25,8 @@ program
 
 registerProjectCommands(program);
 registerConnectCommands(program);
+registerUsbCommands(program);
+registerKeyCommands(program);
 
 program
   .command("ls [project]")
@@ -65,6 +71,7 @@ program
   .option("--port <number>", "port to listen on", "7331")
   .option("--open", "open the web dash in your browser")
   .action(async (opts: { port: string; open?: boolean }) => {
+    await maybePromptForUpdate(version);
     const { startServer } = await import("./api/server.js");
     await startServer(Number(opts.port), opts.open);
   });
@@ -77,9 +84,13 @@ program
 
 program
   .command("keygen <provider> <project>")
-  .description("Generate credentials locally (providers: foundry); stores them in the project")
+  .description("Generate credentials locally (providers: foundry, cloudflare, ssh); stores them in the project")
   .option("--pay-to", "also set PAY_TO_ADDRESS to the first generated address")
-  .option("-n, --count <number>", "number of wallets to generate", "1")
+  .option("-n, --count <number>", "number of wallets/keys to generate", "1")
+  .option("--comment <text>", "ssh: key comment (default: project@hostname)")
+  .option("--perms <list>", "cloudflare: comma-separated permission groups", "Workers Scripts Edit,Account Settings Read")
+  .option("--expires-in <days>", "cloudflare: expire the token after N days", "0")
+  .option("--account <id>", "cloudflare: account ID (default: from connection)")
   .action(keygen);
 
 program
@@ -90,10 +101,28 @@ program
     await startMcpServer();
   });
 
-// no subcommand → launch TUI
+program
+  .command("update")
+  .description("Check for or install abracadabra updates (CDN or npm)")
+  .option("--check", "print current vs latest only")
+  .option("--apply", "install without prompting")
+  .option("--force", "bypass the 24h update cache")
+  .action(async (opts: { check?: boolean; apply?: boolean; force?: boolean }) => {
+    await updateCommand(opts, version);
+  });
+
+// no subcommand → launch TUI (fall back to the API server when stdin
+// isn't a terminal, e.g. backgrounded via `npm run dev:all` or piped)
 if (process.argv.length <= 2) {
-  const { startTui } = await import("./tui/start.js");
-  startTui();
+  if (!process.stdin.isTTY) {
+    console.error("⚠ no TTY — skipping interactive TUI, starting the API server instead");
+    const { startServer } = await import("./api/server.js");
+    await startServer();
+  } else {
+    await maybePromptForUpdate(version);
+    const { startTui } = await import("./tui/start.js");
+    startTui();
+  }
 } else {
   await program.parseAsync().catch((err: unknown) => {
     console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);

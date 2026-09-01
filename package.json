@@ -1,7 +1,12 @@
 {
-  "name": "abracadabra",
-  "version": "0.1.0",
+  "name": "@userdefault/abracadabra",
+  "version": "1.0.1",
   "description": "Terminal vault for env vars & passwords with biometric-gated local API",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/userdefault13/abracadabra.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -9,16 +14,31 @@
   "bin": {
     "abra": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "web/dist",
+    "assets",
+    "skills",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
+    "dev:server": "tsx src/index.ts serve",
+    "dev:all": "npm run dev:server & npm run web:dev & wait",
     "setup": "mkdir -p vendor && swiftc -O src/auth/auth-helper.swift -o vendor/auth-helper",
     "web:build": "npm install --prefix web && npm run build --prefix web",
     "web:dev": "npm run dev --prefix web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm run web:build && node scripts/ensure-macos.js",
+    "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@simplewebauthn/server": "^13.3.2",
     "commander": "^12.1.0",
     "ink": "^7.1.1",
     "react": "^19.2.8",
@@ -28,6 +48,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.18",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.4"
   }
 }

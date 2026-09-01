@@ -1,0 +1,7 @@
+{
+  "version": "1.0.1",
+  "publishedAt": "2026-09-01T07:25:27.854Z",
+  "product": "abracadabra",
+  "url": "https://cdn.aarcadeghst.com/releases/abracadabra/1.0.1/abracadabra-1.0.1-macos.pkg",
+  "notes": "Launch-time updater; npm or CDN .pkg install"
+}
