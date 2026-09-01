@@ -6,6 +6,10 @@ Terminal vault for env vars & passwords, with a biometric-gated local API so
 dapps and scripts can pull secrets on demand — and a subprocess wrapper that
 injects them invisibly into any command.
 
+**npm:** [`@userdefault/abracadabra`](https://www.npmjs.com/package/@userdefault/abracadabra) ·
+**Source:** [github.com/userdefault13/abracadabra](https://github.com/userdefault13/abracadabra) (public) ·
+**Site:** [aarcadeghst.com](https://www.aarcadeghst.com)
+
 **macOS only** · Node 20+ · loopback API on `127.0.0.1:7331`
 
 ```sh
@@ -15,10 +19,6 @@ abra serve                   # local API + web dash
 ```
 
 See **[AGENTS.md](AGENTS.md)** for AI agent integration (API keys, MCP, session grants).
-
-**License:** [PolyForm Noncommercial 1.0.0](LICENSE) — public source for trust. Commercial use
-and full product activation require an **Abra License NFT** or separate agreement.
-See [COMMERCIAL.md](COMMERCIAL.md).
 
 ```
 ┌─────────────┐     ┌──────────────────────────────────┐
@@ -39,6 +39,19 @@ See [COMMERCIAL.md](COMMERCIAL.md).
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Trust & licensing
+
+Source is **public** so you can inspect crypto, Touch ID gating, and API behavior before
+trusting the vault with secrets. Licensed under [PolyForm Noncommercial 1.0.0](LICENSE) —
+free for personal and noncommercial use.
+
+| Entitlement | What it unlocks |
+|---|---|
+| **Abra License NFT** (Base) | Full product activation; sold via [AarcadeGh$t](https://www.aarcadeghst.com) |
+| **Separate commercial agreement** | Paid hosting, white-label, or other commercial use of the code |
+
+Details: [COMMERCIAL.md](COMMERCIAL.md). Trademarks (`abracadabra`, `AarcadeGh$t`) are not licensed.
+
 ## Setup
 
 Requires **Node 20+**, **macOS** (Touch ID + Keychain), and **Xcode Command Line Tools** (for the Touch ID helper).
@@ -57,6 +70,16 @@ npm install
 npm run build
 npm run setup   # compiles the Touch ID helper (swiftc → vendor/auth-helper)
 npm link        # installs `abra` on your PATH
+```
+
+## Updates
+
+`abra` (TUI) and `abra serve` check for newer releases on launch (CDN → www API → GitHub → npm).
+Skip with `ABRA_SKIP_UPDATE_CHECK=1`; force every launch with `ABRA_UPDATE_CHECK=always`.
+
+```sh
+abra update --check    # compare installed vs latest
+abra update --apply    # npm install -g @userdefault/abracadabra@latest
 ```
 
 ## Quick start
@@ -127,6 +150,7 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra usb backup [-v vol] [-f dir]` | Write a passphrase-encrypted bundle (vault + master key) to USB |
 | `abra usb restore [target]` | Restore vault + master key from a bundle |
 | `abra usb sync [-v vol] [--dry-run] [--theirs/--ours]` | Two-way 3-way-merge sync with the USB copy |
+| `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
 
 ### Injecting secrets into a deploy
 
