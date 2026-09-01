@@ -1,10 +1,12 @@
 import http from "node:http";
 import { loadVault, assertProject } from "../core/vault.js";
-import { authenticate } from "../auth/touchid.js";
+import { authenticate } from "../platform/index.js";
 import { identifyPeer } from "./identify.js";
 import { findGrant, issueGrant, listGrants, revokeAll } from "./grants.js";
 import { send } from "./http-utils.js";
 import * as dash from "./dash.js";
+import * as session from "./session.js";
+import * as passkeys from "./passkeys.js";
 
 const MAX_BODY = 64 * 1024;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
@@ -43,26 +45,30 @@ interface SecretRequest {
   ttl?: number;
 }
 
-export async function startServer(port = 7331, open = false): Promise<void> {
-  const server = http.createServer((req, res) => {
-    void (async () => {
-      try {
-        const url = new URL(req.url ?? "/", "http://127.0.0.1");
-        const pathname = url.pathname;
-        const method = req.method ?? "GET";
+export function createApiServer(): http.Server {
+  return http.createServer((req, res) => {
+    void handleRequest(req, res);
+  });
+}
 
-        if (method === "OPTIONS") {
-          send(res, 204, {});
-          return;
-        }
+async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const pathname = url.pathname;
+    const method = req.method ?? "GET";
 
-        if (method === "GET" && pathname === "/health") {
-          send(res, 200, { ok: true, service: "abracadabra" });
-          return;
-        }
+    if (method === "OPTIONS") {
+      send(res, 204, {});
+      return;
+    }
 
-        // ── web dash API ──────────────────────────────────────────────
-        if (pathname.startsWith("/api/")) {
+    if (method === "GET" && pathname === "/health") {
+      send(res, 200, { ok: true, service: "abracadabra" });
+      return;
+    }
+
+    // ── web dash API ──────────────────────────────────────────────
+    if (pathname.startsWith("/api/")) {
           const parts = pathname.split("/").filter(Boolean); // ["api", ...]
           const readJson = async (): Promise<Record<string, unknown>> => {
             try {
@@ -71,6 +77,39 @@ export async function startServer(port = 7331, open = false): Promise<void> {
               return { __invalid: true };
             }
           };
+          // dash auth: passkey (WebAuthn) login + session status/logout —
+          // the only /api routes reachable pre-auth
+          if (parts[1] === "session") {
+            if (method === "GET" && parts.length === 2) {
+              const vault = await loadVault();
+              send(res, 200, {
+                authenticated: session.isAuthed(req),
+                passkeys: vault.passkeys?.length ?? 0,
+              });
+              return;
+            }
+            if (method === "DELETE" && parts.length === 2) return session.logout(res);
+            send(res, 404, { error: "not found" });
+            return;
+          }
+          if (parts[1] === "passkey") {
+            const sub = parts[2];
+            if (method === "POST" && sub === "register" && parts[3] === "options")
+              return await passkeys.registerOptions(req, res);
+            if (method === "POST" && sub === "register" && parts[3] === "verify")
+              return await passkeys.registerVerify(req, await readJson(), res);
+            if (method === "POST" && sub === "auth" && parts[3] === "options")
+              return await passkeys.authOptions(req, res);
+            if (method === "POST" && sub === "auth" && parts[3] === "verify")
+              return await passkeys.authVerify(req, await readJson(), res);
+            send(res, 404, { error: "not found" });
+            return;
+          }
+          // everything else requires an authenticated dash session
+          if (!session.isAuthed(req)) {
+            send(res, 401, { error: "2FA login required" });
+            return;
+          }
           // /api/projects[...]
           if (parts[1] === "projects") {
             const project = decodeURIComponent(parts[2] ?? "");
@@ -90,6 +129,20 @@ export async function startServer(port = 7331, open = false): Promise<void> {
             if (method === "GET" && parts.length === 2) return await dash.listConnections(res);
             if (method === "DELETE" && parts.length === 3)
               return await dash.deleteConnection(decodeURIComponent(parts[2]), res);
+          }
+          if (parts[1] === "usb") {
+            if (method === "GET" && parts.length === 2) return await dash.listUsb(res);
+            if (method === "POST" && parts[2] === "backup" && parts.length === 3)
+              return await dash.usbBackup(await readJson(), res);
+            if (method === "POST" && parts[2] === "sync" && parts.length === 3)
+              return await dash.usbSync(await readJson(), res);
+          }
+          if (parts[1] === "keys") {
+            if (method === "GET" && parts.length === 2) return await dash.listApiKeys(res);
+            if (method === "POST" && parts.length === 2)
+              return await dash.createApiKey(await readJson(), res);
+            if (method === "DELETE" && parts.length === 3)
+              return await dash.revokeApiKey(decodeURIComponent(parts[2]), res);
           }
           send(res, 404, { error: "not found" });
           return;
@@ -149,6 +202,30 @@ export async function startServer(port = 7331, open = false): Promise<void> {
             return;
           }
 
+          // ── API key auth (skips Touch ID — meant for AI agents/scripts) ──
+          const authHeader = req.headers.authorization;
+          if (authHeader?.startsWith("Bearer ")) {
+            const { findValidApiKey, apiKeyHasAccess } = await import("../core/apikeys.js");
+            const record = findValidApiKey(vault, authHeader.slice(7).trim());
+            if (!record) {
+              send(res, 401, { error: "invalid or expired API key" });
+              return;
+            }
+            if (!apiKeyHasAccess(record, project)) {
+              send(res, 403, {
+                error: `API key "${record.name}" has no access to project "${project}"`,
+              });
+              return;
+            }
+            const values: Record<string, string> = {};
+            for (const k of keys) values[k] = proj.vars[k].value;
+            console.log(
+              `✓ served ${keys.length} var(s) from "${project}" to API key "${record.name}" (${record.id})`,
+            );
+            send(res, 200, values);
+            return;
+          }
+
           const clientPort = req.socket.remotePort ?? 0;
           const requester = await identifyPeer(clientPort);
 
@@ -199,18 +276,30 @@ export async function startServer(port = 7331, open = false): Promise<void> {
         if (method === "GET" && dash.serveStatic(res, pathname)) return;
 
         send(res, 404, { error: "not found" });
-      } catch (err) {
-        send(res, 500, {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    })();
-  });
+  } catch (err) {
+    send(res, 500, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+export async function startServer(port = 7331, open = false): Promise<void> {
+  const server = createApiServer();
 
   await new Promise<void>((resolve) => {
     server.listen(port, "127.0.0.1", () => resolve());
   });
   console.log(`✦ abracadabra API listening on http://127.0.0.1:${port}`);
+  {
+    const vault = await loadVault();
+    if (!vault.passkeys?.length) {
+      console.log("\n  ✦ web dash: no passkey registered yet.");
+      console.log("    Open the dash in your browser and follow the passkey setup —");
+      console.log("    it will fire a Touch ID prompt, then save a biometric passkey");
+      console.log("    (Chrome can sync it to your Google Password Manager).\n");
+    }
+  }
+
   if (dash.webDistMissing()) {
     console.log("⚠ web dash not built — run: npm run web:build");
   } else {

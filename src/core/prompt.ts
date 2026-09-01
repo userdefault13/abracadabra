@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { headlessPassphrase } from "../platform/env.js";
 
 export function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -14,6 +15,8 @@ export function prompt(question: string): Promise<string> {
 }
 
 export async function promptHidden(question: string): Promise<string> {
+  const headless = headlessPassphrase();
+  if (headless) return headless;
   const rl = readline.createInterface({ input: process.stdin, output: undefined });
   process.stdout.write(question);
   return new Promise((resolve) => {

@@ -2,9 +2,42 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-export const ABRA_DIR = path.join(os.homedir(), ".abracadabra");
-export const VAULT_FILE = path.join(ABRA_DIR, "vault.enc");
+function resolveAbraDir(): string {
+  return (
+    (process.env.ABRA_DIR && process.env.ABRA_DIR.trim()) ||
+    path.join(os.homedir(), ".abracadabra")
+  );
+}
+
+export function abraDir(): string {
+  return resolveAbraDir();
+}
+
+export function vaultFile(): string {
+  return path.join(resolveAbraDir(), "vault.enc");
+}
+
+export function masterKeyFile(): string {
+  return path.join(resolveAbraDir(), "master.key.enc");
+}
+
+/** Snapshot of the vault as-of-last-successful-sync — enables 3-way merges. */
+export function syncStateFile(): string {
+  return path.join(resolveAbraDir(), "sync-state.json");
+}
+
+/** @deprecated use abraDir() */
+export const ABRA_DIR = resolveAbraDir();
+
+/** @deprecated use vaultFile() */
+export const VAULT_FILE = vaultFile();
+
+/** @deprecated use masterKeyFile() */
+export const MASTER_KEY_FILE = masterKeyFile();
+
+/** @deprecated use syncStateFile() */
+export const SYNC_STATE_FILE = syncStateFile();
 
 export function ensureDir(): void {
-  fs.mkdirSync(ABRA_DIR, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(resolveAbraDir(), { recursive: true, mode: 0o700 });
 }

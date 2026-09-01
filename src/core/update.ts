@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { ABRA_DIR } from "./paths.js";
+import { abraDir } from "./paths.js";
 import { isNewerSemver } from "./semver.js";
 import { prompt } from "./prompt.js";
 
@@ -13,7 +13,7 @@ const DEFAULT_GITHUB_LATEST =
   process.env.ABRA_GITHUB_LATEST ??
   "https://raw.githubusercontent.com/userdefault13/abracadabra/main/releases/latest.json";
 const NPM_PACKAGE = "@userdefault/abracadabra";
-const CACHE_FILE = path.join(ABRA_DIR, "update-cache.json");
+const cacheFile = () => path.join(abraDir(), "update-cache.json");
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export type ReleaseManifest = {
@@ -31,15 +31,15 @@ type UpdateCache = {
 
 function readCache(): UpdateCache | null {
   try {
-    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")) as UpdateCache;
+    return JSON.parse(fs.readFileSync(cacheFile(), "utf8")) as UpdateCache;
   } catch {
     return null;
   }
 }
 
 function writeCache(data: UpdateCache): void {
-  fs.mkdirSync(ABRA_DIR, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(CACHE_FILE, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  fs.mkdirSync(abraDir(), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(cacheFile(), `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
 }
 
 async function fetchJson(url: string, timeoutMs = 5000): Promise<unknown | null> {

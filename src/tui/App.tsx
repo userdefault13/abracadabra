@@ -5,7 +5,7 @@ import {
   saveVault,
   type Vault,
 } from "../core/vault.js";
-import { authenticate } from "../auth/touchid.js";
+import { authenticate } from "../platform/index.js";
 import { ConfirmView, Header, InputView, SelectList } from "./components.js";
 import type { InputRequest } from "./components.js";
 

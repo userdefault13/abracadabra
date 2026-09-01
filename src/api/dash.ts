@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadVault, saveVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
-import { authenticate } from "../auth/touchid.js";
+import { authenticate } from "../platform/index.js";
 import { send } from "./http-utils.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -227,6 +227,145 @@ export async function deleteConnection(provider: string, res: ServerResponse): P
   delete vault.connections[provider];
   await saveVault(vault);
   console.log(`✓ dash: disconnected ${provider}`);
+  send(res, 200, { ok: true });
+}
+
+// ─── USB backup & sync ──────────────────────────────────────────────────
+
+/** GET /api/usb */
+export async function listUsb(res: ServerResponse): Promise<void> {
+  const { listVolumes } = await import("../commands/usb.js");
+  send(res, 200, { volumes: listVolumes() });
+}
+
+interface UsbBackupBody {
+  volume?: string;
+  passphrase?: string;
+}
+
+/** POST /api/usb/backup {volume, passphrase} — Touch ID gated */
+export async function usbBackup(body: UsbBackupBody, res: ServerResponse): Promise<void> {
+  const volume = body.volume?.trim();
+  if (!volume || !body.passphrase || body.passphrase.length < 8) {
+    send(res, 400, { error: "expected {volume, passphrase (min 8 chars)}" });
+    return;
+  }
+  const { createBackup } = await import("../commands/usb.js");
+  try {
+    const file = await createBackup(volume, body.passphrase);
+    console.log(`✓ dash: wrote USB backup ${file}`);
+    send(res, 200, { ok: true, file });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    send(res, /biometric/i.test(msg) ? 403 : 400, { error: msg });
+  }
+}
+
+interface UsbSyncBody extends UsbBackupBody {
+  target?: string;
+  apply?: boolean;
+  force?: "ours" | "theirs";
+}
+
+/**
+ * POST /api/usb/sync
+ *  - apply=false → dry-run preview {report, conflicts, needsResolution}
+ *  - apply=true  → merge + write; 409 with conflicts[] when unresolved
+ */
+export async function usbSync(body: UsbSyncBody, res: ServerResponse): Promise<void> {
+  if (!body.passphrase || body.passphrase.length < 8) {
+    send(res, 400, { error: "expected {passphrase, target?, apply?, force?}" });
+    return;
+  }
+  const { previewSync, applySync } = await import("../commands/usb.js");
+  try {
+    if (body.apply) {
+      if (body.force && body.force !== "ours" && body.force !== "theirs") {
+        send(res, 400, { error: 'force must be "ours" or "theirs"' });
+        return;
+      }
+      const result = await applySync(body.target?.trim() || undefined, body.passphrase, body.force);
+      send(res, 200, { ok: true, ...result, report: result.report, conflicts: [] });
+    } else {
+      const preview = await previewSync(body.target?.trim() || undefined, body.passphrase);
+      send(res, 200, { ok: true, ...preview });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if ((err as { conflicts?: unknown })?.conflicts) {
+      const conflictErr = err as Error & { conflicts: { scope: string; key: string; newest: string; ours?: string; theirs?: string }[] };
+      send(res, 409, { error: msg, conflicts: conflictErr.conflicts });
+      return;
+    }
+    send(res, /biometric/i.test(msg) ? 403 : 400, { error: msg });
+  }
+}
+
+// ─── API keys (bearer tokens for POST /secret) ──────────────────────────
+
+/** GET /api/keys — metadata only, never full keys */
+export async function listApiKeys(res: ServerResponse): Promise<void> {
+  const vault = await loadVault();
+  const keys = Object.values(vault.apiKeys ?? {})
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((k) => ({
+      id: k.id,
+      name: k.name,
+      prefix: k.prefix,
+      projects: k.projects,
+      createdAt: k.createdAt,
+      expiresAt: k.expiresAt,
+    }));
+  send(res, 200, { keys });
+}
+
+/** POST /api/keys {name, projects?, expiresInDays?} — returns the full key ONCE (Touch ID gated) */
+export async function createApiKey(body: { name?: string; projects?: unknown; expiresInDays?: number }, res: ServerResponse): Promise<void> {
+  const name = body.name?.trim() ?? "";
+  if (!/^[\w.-]{2,64}$/.test(name)) {
+    send(res, 400, { error: "name must be 2-64 chars: letters, digits, . _ -" });
+    return;
+  }
+  let projects: string[] | null = null;
+  if (Array.isArray(body.projects) && body.projects.length > 0) {
+    projects = body.projects.map(String);
+  }
+  const expiresInDays = Number.isFinite(body.expiresInDays) ? Number(body.expiresInDays) : 0;
+  if (!(await gate(`abracadabra: browser issues API key "${name}"`))) {
+    send(res, 403, { error: "biometric approval denied" });
+    return;
+  }
+  const vault = await loadVault();
+  for (const p of projects ?? []) {
+    if (!vault.projects[p]) {
+      send(res, 404, { error: `project not found: ${p}` });
+      return;
+    }
+  }
+  const { generateApiKey } = await import("../core/apikeys.js");
+  const { record, fullKey } = generateApiKey(name, projects, {
+    expiresInDays: expiresInDays > 0 ? expiresInDays : undefined,
+  });
+  vault.apiKeys![record.id] = record;
+  await saveVault(vault);
+  console.log(`✓ dash: issued API key "${name}" (${record.id})`);
+  send(res, 200, { ok: true, key: { ...record }, fullKey }); // fullKey shown exactly once
+}
+
+/** DELETE /api/keys/:id — Touch ID gated */
+export async function revokeApiKey(id: string, res: ServerResponse): Promise<void> {
+  const vault = await loadVault();
+  if (!vault.apiKeys?.[id]) {
+    send(res, 404, { error: `no API key with id ${id}` });
+    return;
+  }
+  if (!(await gate(`abracadabra: browser REVOKES API key "${vault.apiKeys[id].name}"`))) {
+    send(res, 403, { error: "biometric approval denied" });
+    return;
+  }
+  delete vault.apiKeys[id];
+  await saveVault(vault);
+  console.log(`✓ dash: revoked API key ${id}`);
   send(res, 200, { ok: true });
 }
 

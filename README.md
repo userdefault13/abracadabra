@@ -10,7 +10,15 @@ injects them invisibly into any command.
 **Source:** [github.com/userdefault13/abracadabra](https://github.com/userdefault13/abracadabra) (public) ·
 **Site:** [aarcadeghst.com](https://www.aarcadeghst.com)
 
-**macOS only** · Node 20+ · loopback API on `127.0.0.1:7331`
+**macOS** (full) · **Linux / Windows** (Tier 1 — keytar or passphrase-file) · Node 20+ · loopback API on `127.0.0.1:7331`
+
+| OS | Default keystore | Default auth | Notes |
+|----|------------------|--------------|-------|
+| macOS | Keychain | Touch ID | unchanged |
+| Linux | keytar (Secret Service) | password prompt | `libsecret-1-dev` for builds; fallback: `ABRA_KEYSTORE=passphrase-file` |
+| Windows | keytar (Credential Vault) | password prompt | fallback: `ABRA_KEYSTORE=passphrase-file` |
+
+> Design + task list: [docs/CROSS-PLATFORM.md](docs/CROSS-PLATFORM.md).
 
 ```sh
 npm install -g @userdefault/abracadabra   # compiles Touch ID helper on first install (Xcode CLT required)

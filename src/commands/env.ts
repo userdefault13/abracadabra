@@ -1,5 +1,5 @@
 import { loadVault, assertProject } from "../core/vault.js";
-import { authenticate } from "../auth/touchid.js";
+import { authenticate } from "../platform/index.js";
 
 function shQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;

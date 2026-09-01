@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { loadVault, saveVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { prompt, promptHidden } from "../core/prompt.js";
-import { authenticate, biometricsSkipped } from "../auth/touchid.js";
+import { authenticate, biometricsSkipped } from "../platform/index.js";
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;

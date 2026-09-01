@@ -34,7 +34,8 @@
     "web:dev": "npm run dev --prefix web",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm run web:build && node scripts/ensure-macos.js",
+    "smoke": "npm run build && node scripts/smoke-headless.mjs",
+    "prepublishOnly": "npm run build && npm run web:build && node scripts/ensure-platform.js",
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
@@ -43,6 +44,7 @@
     "commander": "^12.1.0",
     "ink": "^7.1.1",
     "react": "^19.2.8",
+    "keytar": "^7.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

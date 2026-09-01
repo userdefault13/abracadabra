@@ -1,3 +1,10 @@
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+} from "@simplewebauthn/browser";
+
 export interface VarInfo {
   masked: string;
   secret: boolean;
@@ -15,8 +22,40 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // session expired / locked — let the app re-show the login gate
+    window.dispatchEvent(new CustomEvent("abra:unauthorized"));
+  }
   if (!res.ok) throw new Error((data as ApiError).error ?? `HTTP ${res.status}`);
   return data as T;
+}
+
+export function getSession() {
+  return request<{ authenticated: boolean; passkeys: number }>("GET", "/api/session");
+}
+
+export function logout() {
+  return request<{ ok: boolean }>("DELETE", "/api/session");
+}
+
+export function passkeyRegisterOptions() {
+  return request<PublicKeyCredentialCreationOptionsJSON>(
+    "POST",
+    "/api/passkey/register/options",
+    {},
+  );
+}
+
+export function passkeyRegisterVerify(response: RegistrationResponseJSON) {
+  return request<{ ok: boolean }>("POST", "/api/passkey/register/verify", response);
+}
+
+export function passkeyAuthOptions() {
+  return request<PublicKeyCredentialRequestOptionsJSON>("POST", "/api/passkey/auth/options", {});
+}
+
+export function passkeyAuthVerify(response: AuthenticationResponseJSON) {
+  return request<{ ok: boolean }>("POST", "/api/passkey/auth/verify", response);
 }
 
 export function getProjects() {
@@ -83,4 +122,73 @@ export function getGrants() {
 
 export function revokeGrants() {
   return request<{ revoked: number }>("DELETE", "/grants");
+}
+
+// ── USB backup & sync ─────────────────────────────────────────────────────
+
+export interface UsbVolume {
+  name: string;
+  mount: string;
+  backupFile?: string;
+  backupAt?: number;
+}
+
+export interface UsbConflict {
+  scope: string;
+  key: string;
+  newest: "ours" | "theirs";
+  ours?: string;
+  theirs?: string;
+}
+
+export interface UsbSyncResponse {
+  ok: boolean;
+  report?: string[];
+  conflicts?: UsbConflict[];
+  needsResolution?: boolean;
+  changed?: boolean;
+  file?: string;
+}
+
+export function listUsb() {
+  return request<{ volumes: UsbVolume[] }>("GET", "/api/usb");
+}
+
+export function usbBackup(volume: string, passphrase: string) {
+  return request<{ ok: true; file: string }>("POST", "/api/usb/backup", {
+    volume,
+    passphrase,
+  });
+}
+
+export function usbSync(body: {
+  target?: string;
+  passphrase: string;
+  apply: boolean;
+  force?: "ours" | "theirs";
+}) {
+  return request<UsbSyncResponse>("POST", "/api/usb/sync", body);
+}
+
+// ── API keys (bearer tokens for POST /secret) ─────────────────────────────
+
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  projects: string[] | null;
+  createdAt: number;
+  expiresAt?: number;
+}
+
+export function listApiKeys() {
+  return request<{ keys: ApiKeyInfo[] }>("GET", "/api/keys");
+}
+
+export function createApiKey(body: { name: string; projects?: string[]; expiresInDays?: number }) {
+  return request<{ ok: true; key: ApiKeyInfo; fullKey: string }>("POST", "/api/keys", body);
+}
+
+export function revokeApiKey(id: string) {
+  return request<{ ok: true }>("DELETE", `/api/keys/${encodeURIComponent(id)}`);
 }

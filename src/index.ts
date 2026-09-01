@@ -8,6 +8,8 @@ import { registerUsbCommands } from "./commands/usb.js";
 import { registerKeyCommands } from "./commands/keys.js";
 import { keygen } from "./commands/keygen.js";
 import { updateCommand } from "./commands/update.js";
+import { cmdDoctor } from "./commands/doctor.js";
+import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
@@ -100,6 +102,26 @@ program
     const { startMcpServer } = await import("./mcp/server.js");
     await startMcpServer();
   });
+
+program
+  .command("doctor")
+  .description("Environment checklist (platform, keystore, vault)")
+  .action(cmdDoctor);
+
+program
+  .command("unlock")
+  .description("Unlock passphrase-file keystore (ABRA_KEYSTORE=passphrase-file)")
+  .action(cmdUnlock);
+
+program
+  .command("lock")
+  .description("Clear in-memory unlock session (passphrase-file keystore)")
+  .action(cmdLock);
+
+program
+  .command("unlock-status")
+  .description("Exit 0 if passphrase vault session is active")
+  .action(cmdUnlockStatus);
 
 program
   .command("update")

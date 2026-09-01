@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { loadVault, saveVault, assertProject, assertConnection } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { prompt, promptHidden } from "../core/prompt.js";
-import { authenticate } from "../auth/touchid.js";
+import { authenticate } from "../platform/index.js";
 import { getProvider, providers } from "../connectors/providers.js";
 import type { Provider } from "../connectors/providers.js";
 

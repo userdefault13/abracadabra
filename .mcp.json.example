@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "abracadabra": {
+      "command": "abra",
+      "args": ["mcp"]
+    }
+  }
+}

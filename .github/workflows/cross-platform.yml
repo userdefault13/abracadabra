@@ -1,0 +1,30 @@
+name: cross-platform
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Linux keytar deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          ABRA_SKIP_BIOMETRICS: "1"
+      - run: npm run smoke
+        env:
+          ABRA_SKIP_BIOMETRICS: "1"

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { VAULT_FILE, ensureDir } from "./paths.js";
-import { getMasterKey } from "./keychain.js";
+import { vaultFile, ensureDir } from "./paths.js";
+import { getKeystore } from "../platform/index.js";
 
 export interface VarEntry {
   value: string;
@@ -24,21 +24,50 @@ export interface Connection {
   vars: Record<string, VarEntry>;
 }
 
+/** A registered WebAuthn passkey for unlocking the web dash. */
+export interface PasskeyCredential {
+  /** base64url credential ID */
+  id: string;
+  /** COSE public key, base64 */
+  publicKey: string;
+  counter: number;
+  /** rpID the credential was registered under (e.g. "localhost") */
+  rpId: string;
+  label?: string;
+  createdAt: number;
+}
+
+/**
+ * A bearer token for the local HTTP API (POST /secret). Requests carrying a
+ * valid key skip the per-use Touch ID prompt — meant for AI agents and
+ * long-running scripts. Only a hash is stored; the full key is shown once.
+ */
+export interface ApiKey {
+  id: string; // short hex id, part of the full key
+  name: string; // human label, e.g. "opencode-agent"
+  keyHash: string; // sha256 hex of the full secret
+  prefix: string; // display-safe prefix of the full key
+  /** projects this key may read; null = all projects */
+  projects: string[] | null;
+  createdAt: number;
+  expiresAt?: number;
+}
+
 export interface Vault {
   version: 1;
   projects: Record<string, Project>;
   connections?: Record<string, Connection>;
+  passkeys?: PasskeyCredential[];
+  apiKeys?: Record<string, ApiKey>;
 }
 
-interface EncryptedFile {
+export interface EncryptedFile {
   format: "abracadabra-vault";
   version: 1;
   iv: string;
   tag: string;
   data: string;
-}
-
-export function emptyVault(): Vault {
+}export function emptyVault(): Vault {
   return { version: 1, projects: {}, connections: {} };
 }
 
@@ -79,25 +108,53 @@ function decrypt(file: unknown, key: Buffer): Vault {
 }
 
 export async function loadVault(): Promise<Vault> {
-  const key = await getMasterKey();
-  if (!fs.existsSync(VAULT_FILE)) return emptyVault();
-  const raw = JSON.parse(fs.readFileSync(VAULT_FILE, "utf8"));
+  const key = await getKeystore().getOrCreateMasterKey();
+  if (!fs.existsSync(vaultFile())) return emptyVault();
+  const raw = JSON.parse(fs.readFileSync(vaultFile(), "utf8"));
   const vault = decrypt(raw, key);
   vault.connections ??= {};
+  vault.apiKeys ??= {};
   return vault;
 }
 
 export async function saveVault(vault: Vault): Promise<void> {
   ensureDir();
-  const key = await getMasterKey();
+  const key = await getKeystore().getOrCreateMasterKey();
   const enc = encrypt(vault, key);
-  const tmp = `${VAULT_FILE}.tmp`;
+  const file = vaultFile();
+  const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(enc, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, VAULT_FILE);
+  fs.renameSync(tmp, file);
 }
 
 export function assertProject(vault: Vault, name: string): Project {
   const project = vault.projects[name];
   if (!project) throw new Error(`Project not found: ${name}`);
   return project;
+}
+
+/** Encrypt a vault into the portable envelope shape (usb backup). */
+export function encryptVault(vault: Vault, key: Buffer): EncryptedFile {
+  return encrypt(vault, key);
+}
+
+/** Decrypt an envelope that came from outside this machine (usb restore/sync). */
+export function decryptEnvelope(
+  env: { iv: string; tag: string; data: string },
+  key: Buffer,
+): Vault {
+  return decrypt({ format: "abracadabra-vault", version: 1, ...env }, key);
+}
+
+/** Atomically persist an envelope to VAULT_FILE (usb restore). */
+export function writeEncryptedFile(enc: {
+  iv: string;
+  tag: string;
+  data: string;
+}): void {
+  ensureDir();
+  const file = vaultFile();
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(enc, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
 }

@@ -126,6 +126,173 @@ export const providers: Record<string, Provider> = {
     },
   },
 
+  nvidia: {
+    id: "nvidia",
+    label: "NVIDIA NIM / Nemotron",
+    portalUrl: "https://build.nvidia.com/settings/api-keys",
+    fields: [
+      {
+        varName: "NVIDIA_API_KEY",
+        prompt:
+          'API Key ("Get API Key" at build.nvidia.com — starts with nvapi-)',
+        secret: true,
+        required: true,
+      },
+      {
+        varName: "NVIDIA_BASE_URL",
+        prompt:
+          "Base URL (optional — enter to default to https://integrate.api.nvidia.com/v1; set for self-hosted NIM)",
+        secret: false,
+      },
+    ],
+    issueVars: (conn) => {
+      const vars: Record<string, string> = {
+        NVIDIA_API_KEY: conn.vars.NVIDIA_API_KEY.value,
+      };
+      if (conn.vars.NVIDIA_BASE_URL?.value) vars.NVIDIA_BASE_URL = conn.vars.NVIDIA_BASE_URL.value;
+      return vars;
+    },
+    importFromFile: async (raw) => {
+      const token =
+        raw.NVIDIA_API_KEY ?? raw.apiKey ?? raw.api_key ?? raw.token ?? raw.nvapi;
+      if (!token) throw new Error("No API key found in file (looked for NVIDIA_API_KEY/apiKey/token)");
+      if (!token.startsWith("nvapi-")) console.error("  note: NVIDIA keys usually start with nvapi-");
+      // validate against the models listing and confirm the account works
+      const res = await fetch("https://integrate.api.nvidia.com/v1/models", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        throw new Error(`Token rejected by NVIDIA: HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { data?: { id: string }[] };
+      const models = data.data?.length ?? 0;
+      if (models > 0) console.error(`  verified — ${models} model(s) available (incl. nemotron family)`);
+      const vars: Record<string, { value: string; secret: boolean }> = {
+        NVIDIA_API_KEY: { value: token, secret: true },
+      };
+      return vars;
+    },
+  },
+
+  openrouter: {
+    id: "openrouter",
+    label: "OpenRouter",
+    portalUrl: "https://openrouter.ai/settings/keys",
+    fields: [
+      {
+        varName: "OPENROUTER_API_KEY",
+        prompt:
+          'API Key (openrouter.ai/settings/keys — starts with sk-or-)',
+        secret: true,
+        required: true,
+      },
+      {
+        varName: "OPENROUTER_BASE_URL",
+        prompt:
+          "Base URL (optional — enter to default to https://openrouter.ai/api/v1)",
+        secret: false,
+      },
+    ],
+    issueVars: (conn) => {
+      const vars: Record<string, string> = {
+        OPENROUTER_API_KEY: conn.vars.OPENROUTER_API_KEY.value,
+      };
+      if (conn.vars.OPENROUTER_BASE_URL?.value)
+        vars.OPENROUTER_BASE_URL = conn.vars.OPENROUTER_BASE_URL.value;
+      return vars;
+    },
+    importFromFile: async (raw) => {
+      const token =
+        raw.OPENROUTER_API_KEY ?? raw.apiKey ?? raw.api_key ?? raw.token ?? raw.key;
+      if (!token)
+        throw new Error("No API key found in file (looked for OPENROUTER_API_KEY/apiKey/token)");
+      if (!token.startsWith("sk-or-")) console.error("  note: OpenRouter keys usually start with sk-or-");
+      // validate against the auth/key endpoint and pick up the label
+      const res = await fetch("https://openrouter.ai/api/v1/auth/key", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await res.json()) as {
+        data?: { label?: string; usage?: number; limit?: number | null; is_free_tier?: boolean };
+        error?: { message?: string };
+      };
+      if (!res.ok || !data.data) {
+        throw new Error(`Token rejected by OpenRouter: ${data.error?.message ?? res.status}`);
+      }
+      const { label, usage, limit } = data.data;
+      const usageInfo =
+        limit == null ? "no spend limit" : `${usage ?? 0}/${limit} used`;
+      console.error(`  verified${label ? ` as "${label}"` : ""} — ${usageInfo}`);
+      return {
+        OPENROUTER_API_KEY: { value: token, secret: true },
+      };
+    },
+  },
+
+  digitalocean: {
+    id: "digitalocean",
+    label: "DigitalOcean",
+    portalUrl: "https://cloud.digitalocean.com/account/api/tokens",
+    fields: [
+      {
+        varName: "DIGITALOCEAN_TOKEN",
+        prompt:
+          "Personal Access Token — create at cloud.digitalocean.com/account/api/tokens (full access recommended)",
+        secret: true,
+        required: true,
+      },
+      {
+        varName: "DIGITALOCEAN_SPACES_ACCESS_KEY",
+        prompt:
+          "Spaces access key (optional, S3-compatible — API → Spaces Keys — enter to skip)",
+        secret: false,
+      },
+      {
+        varName: "DIGITALOCEAN_SPACES_SECRET_KEY",
+        prompt: "Spaces secret key (optional — enter to skip)",
+        secret: true,
+      },
+    ],
+    issueVars: (conn) => {
+      const vars: Record<string, string> = {
+        DIGITALOCEAN_TOKEN: conn.vars.DIGITALOCEAN_TOKEN.value,
+      };
+      for (const opt of [
+        "DIGITALOCEAN_SPACES_ACCESS_KEY",
+        "DIGITALOCEAN_SPACES_SECRET_KEY",
+      ] as const) {
+        if (conn.vars[opt]?.value) vars[opt] = conn.vars[opt].value;
+      }
+      return vars;
+    },
+    importFromFile: async (raw) => {
+      const token =
+        raw.ApiKey ?? raw.apiKey ?? raw.token ?? raw.access_token ?? raw.DIGITALOCEAN_TOKEN;
+      if (!token) throw new Error("No token found in file (looked for ApiKey/apiKey/token)");
+      // validate against the DO API and pick up the account email for the label
+      const res = await fetch("https://api.digitalocean.com/v2/account", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await res.json()) as {
+        account?: { email?: string; status?: string };
+        message?: string;
+      };
+      if (!res.ok || !data.account) {
+        throw new Error(`Token rejected by DigitalOcean: ${data.message ?? res.status}`);
+      }
+      console.error(`  verified as ${data.account.email} (${data.account.status})`);
+      const vars: Record<string, { value: string; secret: boolean }> = {
+        DIGITALOCEAN_TOKEN: { value: token, secret: true },
+      };
+      const spacesKey =
+        raw.SpacesAccessKey ?? raw.spaces_access_key ?? raw.spacesAccessKey;
+      if (spacesKey) vars.DIGITALOCEAN_SPACES_ACCESS_KEY = { value: spacesKey, secret: false };
+      const spacesSecret =
+        raw.SpacesSecretKey ?? raw.spaces_secret_key ?? raw.spacesSecretKey;
+      if (spacesSecret) vars.DIGITALOCEAN_SPACES_SECRET_KEY = { value: spacesSecret, secret: true };
+      return vars;
+    },
+  },
+
   vercel: {
     id: "vercel",
     label: "Vercel",
