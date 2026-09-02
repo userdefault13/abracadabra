@@ -1,7 +1,7 @@
 {
   "version": "1.0.2",
-  "publishedAt": "2026-09-01T08:05:02.251Z",
+  "publishedAt": "2026-09-02T18:00:00.000Z",
   "product": "abracadabra",
   "url": "https://cdn.aarcadeghst.com/releases/abracadabra/1.0.2/abracadabra-1.0.2-macos.pkg",
-  "notes": "Launch-time updater; npm or CDN .pkg install"
+  "notes": "LAN vault sync (usb host/peers), serve --lan with TLS pin, encrypted sync-state, stronger cartridge --full passphrases, agent-first docs"
 }
