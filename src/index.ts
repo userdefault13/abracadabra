@@ -15,6 +15,7 @@ import {
   cmdCartridgeStatus,
   cmdCartridgeCheckpoint,
   cmdCartridgeRules,
+  cmdCartridgeRestore,
 } from "./commands/cartridge.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
 import { maybePromptForUpdate } from "./core/update.js";
@@ -79,13 +80,30 @@ program
   .description("Start the local biometric-gated API server + web dash")
   .option("--port <number>", "port to listen on", "7331")
   .option("--open", "open the web dash in your browser")
-  .action(async (opts: { port: string; open?: boolean }) => {
-    await maybePromptForUpdate(version);
-    const { assertLicensed } = await import("./license/index.js");
-    await assertLicensed();
-    const { startServer } = await import("./api/server.js");
-    await startServer(Number(opts.port), opts.open);
-  });
+  .option("--lan", "bind 0.0.0.0 with TLS (LAN access; /secret needs API key off-loopback)")
+  .option("--tls-cert <path>", "TLS cert PEM for --lan (default: ephemeral)")
+  .option("--tls-key <path>", "TLS key PEM for --lan (default: ephemeral)")
+  .action(
+    async (opts: {
+      port: string;
+      open?: boolean;
+      lan?: boolean;
+      tlsCert?: string;
+      tlsKey?: string;
+    }) => {
+      await maybePromptForUpdate(version);
+      const { assertLicensed } = await import("./license/index.js");
+      await assertLicensed();
+      const { startServer } = await import("./api/server.js");
+      await startServer({
+        port: Number(opts.port),
+        open: opts.open,
+        lan: opts.lan,
+        tlsCert: opts.tlsCert,
+        tlsKey: opts.tlsKey,
+      });
+    },
+  );
 
 program
   .command("env <project>")
@@ -137,7 +155,9 @@ license
   .description("Remove local activation (requires ABRA_SKIP_LICENSE=1)")
   .action(cmdLicenseClear);
 
-const cartridge = program.command("cartridge").description("Aarcade cartridge — cloud metadata checkpoints");
+const cartridge = program
+  .command("cartridge")
+  .description("Aarcade cartridge — cloud checkpoints (metadata or sealed full vault)");
 
 cartridge
   .command("rules")
@@ -158,15 +178,31 @@ cartridge
 
 cartridge
   .command("checkpoint")
-  .description("Sign and save a vault metadata checkpoint (no secret values)")
+  .description("Sign and save a checkpoint (metadata by default; --full adds sealed vault)")
   .option("--wallet <0x>", "license wallet (default: activated wallet)")
   .option("--label <text>", "checkpoint label")
   .option("--signature <0x>", "pre-signed checkpoint message")
+  .option("--full", "include passphrase-sealed BackupBundle (full vault)")
   .option("--dry-run", "print gameState + sign message only")
-  .action(async (opts: { wallet?: string; label?: string; signature?: string; dryRun?: boolean }) => {
-    await cmdCartridgeCheckpoint(opts);
-  });
+  .action(
+    async (opts: {
+      wallet?: string;
+      label?: string;
+      signature?: string;
+      dryRun?: boolean;
+      full?: boolean;
+    }) => {
+      await cmdCartridgeCheckpoint(opts);
+    },
+  );
 
+cartridge
+  .command("restore")
+  .description("Restore vault + master key from the latest full (--full) cartridge checkpoint")
+  .option("--wallet <0x>", "license wallet (default: activated wallet)")
+  .action(async (opts: { wallet?: string }) => {
+    await cmdCartridgeRestore(opts);
+  });
 program
   .command("doctor")
   .description("Environment checklist (platform, keystore, vault)")

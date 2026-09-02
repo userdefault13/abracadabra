@@ -2,12 +2,13 @@
 
 `gameId`: **`abracadabra`**
 
-Cloud checkpoints carry **vault metadata only** (project names, var counts, license wallet) — never secret values. USB backup remains the path for full vault portability.
+Cloud checkpoints carry **vault metadata** by default (project names, var counts, license wallet). With `abra cartridge checkpoint --full`, a **passphrase-sealed** `BackupBundle` (vault + master key) is included — same crypto as USB backup. Plaintext secrets are never uploaded.
 
 ## Why
 
 - Bind your Abra License wallet to an Aarcade memory card
-- Sync project index across machines without exposing secrets
+- Sync project index across machines without exposing secrets (default)
+- Optionally port the full vault through a sealed checkpoint (`--full` / `restore`)
 - Same cartridge platform as GotchiBot / Gotchiverse (SIM today, on-chain later)
 
 ## CLI
@@ -19,15 +20,30 @@ abra cartridge rules
 # Mint/fetch cartridge (requires Abra License NFT when ABRA_LICENSE_NFT is set on server)
 abra cartridge ensure 0xYourWallet
 
-# Push signed checkpoint
-abra cartridge checkpoint --dry-run    # preview sign message
+# Metadata-only checkpoint
+abra cartridge checkpoint --dry-run
 abra cartridge checkpoint --label "after-onboard"
 
-# Inspect
+# Full vault (prompts for passphrase; schemaVersion 2 + sealedVault)
+abra cartridge checkpoint --full
+
+# Restore from latest full checkpoint (overwrites local vault + master key)
+abra cartridge restore
+
+# Inspect (includes hasSealedVault)
 abra cartridge status
 ```
 
 Local state: `~/.abracadabra/cartridge.json`
+
+## Checkpoint schemas
+
+| Version | Contents |
+|---------|----------|
+| `1` | Metadata only (backward compatible) |
+| `2` | Metadata + optional `sealedVault` (`abracadabra-backup` bundle) |
+
+Aarcade sim/fixtures may need a v2 schema update to accept `sealedVault`; until then, servers that reject unknown fields will error on `--full`.
 
 ## Env
 

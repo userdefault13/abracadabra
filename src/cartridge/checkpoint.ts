@@ -3,14 +3,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import os from "node:os";
 import { abraDir } from "../core/paths.js";
-import { loadVault } from "../core/vault.js";
+import { loadVault, encryptVault } from "../core/vault.js";
+import { getMasterKey } from "../platform/index.js";
+import { sealBundle } from "../core/backup.js";
+import type { BackupBundle } from "../core/backup.js";
 import { licenseEnforcementEnabled } from "../license/config.js";
 import { readActivation } from "../license/store.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
 
-export interface AbraCheckpointState {
+export interface AbraCheckpointStateV1 {
   schemaVersion: 1;
   abraVersion: string;
   license: {
@@ -28,6 +31,15 @@ export interface AbraCheckpointState {
   };
   checkpointedAt: string;
 }
+
+/** v2 may carry a passphrase-sealed BackupBundle (full vault portability). */
+export interface AbraCheckpointStateV2 extends Omit<AbraCheckpointStateV1, "schemaVersion"> {
+  schemaVersion: 2;
+  /** Present when checkpoint was created with --full */
+  sealedVault?: BackupBundle;
+}
+
+export type AbraCheckpointState = AbraCheckpointStateV1 | AbraCheckpointStateV2;
 
 function machineIdPath(): string {
   return `${abraDir()}/machine-id`;
@@ -47,8 +59,7 @@ export function readMachineId(): string {
   return id;
 }
 
-/** Build checkpoint payload — metadata only, never secret values. */
-export async function buildCheckpointState(ownerWallet: string): Promise<AbraCheckpointState> {
+async function buildMetadata(ownerWallet: string): Promise<Omit<AbraCheckpointStateV1, "schemaVersion">> {
   const vault = await loadVault();
   const activation = readActivation();
   const projects = Object.entries(vault.projects)
@@ -60,7 +71,6 @@ export async function buildCheckpointState(ownerWallet: string): Promise<AbraChe
     .sort((a, b) => a.name.localeCompare(b.name));
 
   return {
-    schemaVersion: 1,
     abraVersion: pkg.version,
     license: {
       wallet: ownerWallet.toLowerCase(),
@@ -77,4 +87,31 @@ export async function buildCheckpointState(ownerWallet: string): Promise<AbraChe
     },
     checkpointedAt: new Date().toISOString(),
   };
+}
+
+/** Build checkpoint payload — metadata only by default; never plaintext secrets. */
+export async function buildCheckpointState(ownerWallet: string): Promise<AbraCheckpointStateV1> {
+  const meta = await buildMetadata(ownerWallet);
+  return { schemaVersion: 1, ...meta };
+}
+
+/** Full checkpoint: metadata + passphrase-sealed BackupBundle. */
+export async function buildFullCheckpointState(
+  ownerWallet: string,
+  passphrase: string,
+): Promise<AbraCheckpointStateV2> {
+  if (passphrase.length < 8) throw new Error("Passphrase must be at least 8 characters");
+  const meta = await buildMetadata(ownerWallet);
+  const vault = await loadVault();
+  const masterKey = await getMasterKey();
+  const sealedVault = sealBundle(encryptVault(vault, masterKey), masterKey, passphrase);
+  return { schemaVersion: 2, ...meta, sealedVault };
+}
+
+export function extractSealedVault(state: unknown): BackupBundle | null {
+  if (!state || typeof state !== "object") return null;
+  const s = state as AbraCheckpointStateV2;
+  if (s.schemaVersion !== 2 || !s.sealedVault) return null;
+  if (s.sealedVault.format !== "abracadabra-backup") return null;
+  return s.sealedVault;
 }

@@ -1,4 +1,7 @@
 import http from "node:http";
+import https from "node:https";
+import fs from "node:fs";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadVault, assertProject } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
 import { identifyPeer } from "./identify.js";
@@ -9,11 +12,33 @@ import * as session from "./session.js";
 import * as passkeys from "./passkeys.js";
 import * as licenseDash from "./license-dash.js";
 import { isLicensed, licenseEnforcementEnabled } from "../license/index.js";
+import { createEphemeralTls } from "../core/tls-ephemeral.js";
+import os from "node:os";
 
 const MAX_BODY = 64 * 1024;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
 
+/** When true, API may bind beyond loopback; non-loopback /secret requires API key. */
+let lanMode = false;
+
 let authChain: Promise<unknown> = Promise.resolve();
+
+function isLoopbackAddress(remote: string): boolean {
+  return /^127\.0\.0\.1$|^::1$|^::ffff:127\.0\.0\.1$/.test(remote);
+}
+
+function privateAddresses(): string[] {
+  const nets = os.networkInterfaces();
+  const out: string[] = [];
+  for (const entries of Object.values(nets)) {
+    if (!entries) continue;
+    for (const e of entries) {
+      if (e.internal || e.family !== "IPv4") continue;
+      out.push(e.address);
+    }
+  }
+  return out;
+}
 
 /** Serialize biometric prompts so parallel requests queue instead of stacking dialogs. */
 function enqueueAuth<T>(fn: () => Promise<T>): Promise<T> {
@@ -47,10 +72,19 @@ interface SecretRequest {
   ttl?: number;
 }
 
+function attachHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
+  void handleRequest(req, res);
+}
+
 export function createApiServer(): http.Server {
-  return http.createServer((req, res) => {
-    void handleRequest(req, res);
-  });
+  return http.createServer(attachHandler);
+}
+
+export function createApiHttpsServer(key: string, cert: string): https.Server {
+  return https.createServer({ key, cert }, attachHandler);
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -153,6 +187,18 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
               return await dash.usbBackup(await readJson(), res);
             if (method === "POST" && parts[2] === "sync" && parts.length === 3)
               return await dash.usbSync(await readJson(), res);
+            if (parts[2] === "host") {
+              if (method === "POST" && parts[3] === "start" && parts.length === 4)
+                return await dash.usbLanHostStart(await readJson(), res);
+              if (method === "POST" && parts[3] === "stop" && parts.length === 4)
+                return await dash.usbLanHostStop(res);
+              if (method === "GET" && parts[3] === "status" && parts.length === 4)
+                return await dash.usbLanHostStatus(res);
+            }
+            if (method === "GET" && parts[2] === "peers" && parts.length === 3)
+              return await dash.usbLanPeers(res);
+            if (method === "POST" && parts[2] === "lan-sync" && parts.length === 3)
+              return await dash.usbLanSync(await readJson(), res);
           }
           if (parts[1] === "keys") {
             if (method === "GET" && parts.length === 2) return await dash.listApiKeys(res);
@@ -179,9 +225,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         }
 
         if (req.method === "POST" && req.url === "/secret") {
-          // loopback only
           const remote = req.socket.remoteAddress ?? "";
-          if (!/^127\.0\.0\.1$|^::1$|^::ffff:127\.0\.0\.1$/.test(remote)) {
+          const loopback = isLoopbackAddress(remote);
+          if (!loopback && !lanMode) {
             send(res, 403, { error: "loopback connections only" });
             return;
           }
@@ -248,6 +294,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
             return;
           }
 
+          // Non-loopback (LAN serve): API key required — no Touch ID / session grants
+          if (!loopback) {
+            send(res, 401, { error: "API key required for LAN access (Authorization: Bearer abra_…)" });
+            return;
+          }
+
           const clientPort = req.socket.remotePort ?? 0;
           const requester = await identifyPeer(clientPort);
 
@@ -305,13 +357,67 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 }
 
-export async function startServer(port = 7331, open = false): Promise<void> {
-  const server = createApiServer();
+export interface StartServerOptions {
+  port?: number;
+  open?: boolean;
+  lan?: boolean;
+  tlsCert?: string;
+  tlsKey?: string;
+}
 
-  await new Promise<void>((resolve) => {
-    server.listen(port, "127.0.0.1", () => resolve());
+export async function startServer(
+  portOrOpts: number | StartServerOptions = 7331,
+  openArg = false,
+): Promise<void> {
+  const opts: StartServerOptions =
+    typeof portOrOpts === "number"
+      ? { port: portOrOpts, open: openArg }
+      : portOrOpts;
+  const port = opts.port ?? 7331;
+  const open = opts.open ?? false;
+  lanMode = Boolean(opts.lan);
+
+  let server: http.Server | https.Server;
+  let scheme = "http";
+  let fingerprint: string | undefined;
+
+  if (lanMode) {
+    let key: string;
+    let cert: string;
+    if (opts.tlsCert && opts.tlsKey) {
+      key = fs.readFileSync(opts.tlsKey, "utf8");
+      cert = fs.readFileSync(opts.tlsCert, "utf8");
+      const { fingerprintOfPem } = await import("../core/tls-ephemeral.js");
+      fingerprint = fingerprintOfPem(cert);
+    } else {
+      const tls = createEphemeralTls(os.hostname());
+      key = tls.key;
+      cert = tls.cert;
+      fingerprint = tls.fingerprint;
+    }
+    server = createApiHttpsServer(key, cert);
+    scheme = "https";
+  } else {
+    server = createApiServer();
+  }
+
+  const host = lanMode ? "0.0.0.0" : "127.0.0.1";
+  await new Promise<void>((resolve, reject) => {
+    server.listen(port, host, () => resolve());
+    server.on("error", reject);
   });
-  console.log(`✦ abracadabra API listening on http://127.0.0.1:${port}`);
+
+  if (lanMode) {
+    console.log(`✦ abracadabra API listening on ${scheme}://0.0.0.0:${port} (LAN)`);
+    if (fingerprint) console.log(`  TLS fingerprint: ${fingerprint}`);
+    for (const addr of privateAddresses()) {
+      console.log(`  LAN URL: ${scheme}://${addr}:${port}/`);
+    }
+    console.log("  Non-loopback POST /secret requires Authorization: Bearer abra_…");
+  } else {
+    console.log(`✦ abracadabra API listening on http://127.0.0.1:${port}`);
+  }
+
   {
     const vault = await loadVault();
     if (!vault.passkeys?.length) {
@@ -325,10 +431,11 @@ export async function startServer(port = 7331, open = false): Promise<void> {
   if (dash.webDistMissing()) {
     console.log("⚠ web dash not built — run: npm run web:build");
   } else {
-    console.log(`  ✦ dash:    http://127.0.0.1:${port}/`);
+    const localUrl = `${scheme}://127.0.0.1:${port}/`;
+    console.log(`  ✦ dash:    ${localUrl}`);
     if (open) {
       const { execFile } = await import("node:child_process");
-      execFile("open", [`http://127.0.0.1:${port}/`]);
+      execFile("open", [localUrl]);
     }
   }
   console.log('  POST   /secret   {"project": "name", "keys": ["KEY"], "ttl"?: seconds}');

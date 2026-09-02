@@ -2,7 +2,7 @@
 
 abracadabra is a **local secrets vault** on macOS. Agents fetch env vars through a loopback HTTP API (`http://127.0.0.1:7331`) or the MCP server (`abra mcp`). This guide is for coding agents and the humans who supervise them.
 
-**Platform:** macOS only (Touch ID + Keychain). **Network:** loopback only — nothing is exposed to the internet.
+**Platform:** macOS only (Touch ID + Keychain). **Network:** loopback by default (`abra serve`); optional `abra serve --lan` binds TLS on all interfaces (off-loopback `/secret` requires an API key). Vault LAN sync uses a separate short-lived `abra usb host` listener.
 
 ---
 

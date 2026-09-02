@@ -42,13 +42,15 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@simplewebauthn/server": "^13.3.2",
+    "bonjour-service": "^1.4.4",
     "commander": "^12.1.0",
     "ink": "^7.1.1",
-    "react": "^19.2.8",
     "keytar": "^7.9.0",
+    "react": "^19.2.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/bonjour": "^3.5.13",
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.18",
     "tsx": "^4.19.0",

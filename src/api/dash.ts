@@ -301,6 +301,95 @@ export async function usbSync(body: UsbSyncBody, res: ServerResponse): Promise<v
   }
 }
 
+/** POST /api/usb/host/start {port?, ttl?} */
+export async function usbLanHostStart(
+  body: { port?: number; ttl?: number },
+  res: ServerResponse,
+): Promise<void> {
+  const { startLanHost } = await import("../commands/usb.js");
+  try {
+    const handle = await startLanHost({
+      port: typeof body.port === "number" ? body.port : undefined,
+      ttlMs: typeof body.ttl === "number" ? body.ttl * 1000 : undefined,
+    });
+    send(res, 200, {
+      ok: true,
+      pin: handle.pin,
+      port: handle.port,
+      addresses: handle.addresses,
+      fingerprint: handle.fingerprint,
+      hostname: handle.hostname,
+      expiresAt: handle.expiresAt,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    send(res, /biometric/i.test(msg) ? 403 : 400, { error: msg });
+  }
+}
+
+/** POST /api/usb/host/stop */
+export async function usbLanHostStop(res: ServerResponse): Promise<void> {
+  const { stopLanHost } = await import("../commands/usb.js");
+  await stopLanHost();
+  send(res, 200, { ok: true });
+}
+
+/** GET /api/usb/host/status */
+export async function usbLanHostStatus(res: ServerResponse): Promise<void> {
+  const { getLanHostStatus } = await import("../commands/usb.js");
+  const status = getLanHostStatus();
+  send(res, 200, { ok: true, host: status });
+}
+
+/** GET /api/usb/peers */
+export async function usbLanPeers(res: ServerResponse): Promise<void> {
+  const { browseLanPeers } = await import("../commands/usb.js");
+  const peers = await browseLanPeers();
+  send(res, 200, { peers });
+}
+
+interface UsbLanSyncBody {
+  host?: string;
+  pin?: string;
+  fingerprint?: string;
+  apply?: boolean;
+  force?: "ours" | "theirs";
+}
+
+/** POST /api/usb/lan-sync */
+export async function usbLanSync(body: UsbLanSyncBody, res: ServerResponse): Promise<void> {
+  const host = body.host?.trim();
+  const pin = body.pin?.trim();
+  if (!host || !pin || !/^\d{6}$/.test(pin)) {
+    send(res, 400, { error: "expected {host, pin (6 digits), apply?, force?, fingerprint?}" });
+    return;
+  }
+  const { previewLanSync, applyLanSync } = await import("../commands/usb.js");
+  try {
+    if (body.apply) {
+      if (body.force && body.force !== "ours" && body.force !== "theirs") {
+        send(res, 400, { error: 'force must be "ours" or "theirs"' });
+        return;
+      }
+      const result = await applyLanSync(host, pin, body.force, body.fingerprint);
+      send(res, 200, { ok: true, ...result, conflicts: [] });
+    } else {
+      const preview = await previewLanSync(host, pin, body.fingerprint);
+      send(res, 200, { ok: true, ...preview });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if ((err as { conflicts?: unknown })?.conflicts) {
+      const conflictErr = err as Error & {
+        conflicts: { scope: string; key: string; newest: string; ours?: string; theirs?: string }[];
+      };
+      send(res, 409, { error: msg, conflicts: conflictErr.conflicts });
+      return;
+    }
+    send(res, /biometric/i.test(msg) ? 403 : 400, { error: msg });
+  }
+}
+
 // ─── API keys (bearer tokens for POST /secret) ──────────────────────────
 
 /** GET /api/keys — metadata only, never full keys */

@@ -136,7 +136,7 @@
     {#if authed}
       <button class="lock-btn" disabled={locking} onclick={lockSession}>Lock</button>
     {/if}
-    <span>local · loopback only</span>
+    <span>local vault</span>
   </div>
 </aside>
 

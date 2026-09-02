@@ -190,6 +190,49 @@ export function usbSync(body: {
   return request<UsbSyncResponse>("POST", "/api/usb/sync", body);
 }
 
+export interface LanHostStatus {
+  pin: string;
+  port: number;
+  addresses: string[];
+  fingerprint: string;
+  hostname: string;
+  expiresAt: number;
+}
+
+export interface LanPeer {
+  name: string;
+  host: string;
+  port: number;
+  fingerprint?: string;
+  hostname?: string;
+}
+
+export function usbLanHostStart(body?: { port?: number; ttl?: number }) {
+  return request<{ ok: true } & LanHostStatus>("POST", "/api/usb/host/start", body ?? {});
+}
+
+export function usbLanHostStop() {
+  return request<{ ok: true }>("POST", "/api/usb/host/stop", {});
+}
+
+export function usbLanHostStatus() {
+  return request<{ ok: true; host: LanHostStatus | null }>("GET", "/api/usb/host/status");
+}
+
+export function usbLanPeers() {
+  return request<{ peers: LanPeer[] }>("GET", "/api/usb/peers");
+}
+
+export function usbLanSync(body: {
+  host: string;
+  pin: string;
+  fingerprint?: string;
+  apply: boolean;
+  force?: "ours" | "theirs";
+}) {
+  return request<UsbSyncResponse>("POST", "/api/usb/lan-sync", body);
+}
+
 // ── API keys (bearer tokens for POST /secret) ─────────────────────────────
 
 export interface ApiKeyInfo {

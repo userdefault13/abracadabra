@@ -14,10 +14,11 @@ This doc defines platform abstractions, a phased rollout, and a Tier 1 task list
 | In scope | Out of scope (for now) |
 |----------|-------------------------|
 | Linux x64/arm64 CLI: `set`, `get`, `run`, `serve`, `mcp`, `keys` | Mobile (iOS/Android) |
-| Windows x64 CLI (native; WSL is a nice-to-have test target) | Cloud-hosted vault |
+| Windows x64 CLI (native; WSL is a nice-to-have test target) | Unencrypted cloud-hosted vault |
 | Same vault file format (`abracadabra-vault` v1) on all OSes | Changing USB bundle format |
-| Same loopback API (`127.0.0.1:7331`, `POST /secret`) | Biometric parity on day one |
+| Same loopback API (`127.0.0.1:7331`, `POST /secret`); optional `serve --lan` | Biometric parity on day one |
 | USB backup/restore/sync across Mac ↔ Linux ↔ Windows | TUI parity (Ink works; polish later) |
+| Volume discovery: macOS `/Volumes`, Linux media paths, Windows drive letters | Mesh / multi-peer LAN sync |
 
 **Compatibility promise:** a vault created on macOS must open on Linux/Windows after USB restore (or copy `vault.enc` + re-wrap master key on the new machine). API keys and project structure are unchanged.
 

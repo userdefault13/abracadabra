@@ -151,13 +151,18 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra keygen foundry <proj>` | Generate EVM wallet(s) via Foundry (`--pay-to`, `-n`) |
 | `abra run [-p proj] [-k K1,K2] -- <cmd…>` | Run command with vars injected into env |
 | `abra env <proj> [-k K1,K2]` | Print `export` lines for `eval $(…)` — Touch ID gated |
-| `abra serve [--port 7331] [--open]` | Start the local biometric-gated API + web dash |
+| `abra serve [--port 7331] [--open] [--lan]` | Start the local biometric-gated API + web dash (`--lan` = TLS on all interfaces) |
 | `abra keys new <name> [-p projs] [--expires-in d]` | Issue an API key for `POST /secret` (printed once) |
 | `abra keys ls` / `keys rm <id>` | List (masked) / revoke API keys |
-| `abra usb list` | List mounted volumes and any abra backups on them |
+| `abra usb list [--lan]` | List mounted volumes (and optional LAN peers) |
 | `abra usb backup [-v vol] [-f dir]` | Write a passphrase-encrypted bundle (vault + master key) to USB |
 | `abra usb restore [target]` | Restore vault + master key from a bundle |
 | `abra usb sync [-v vol] [--dry-run] [--theirs/--ours]` | Two-way 3-way-merge sync with the USB copy |
+| `abra usb host [--port] [--ttl]` | Start a short-lived TLS LAN sync host (PIN + mDNS) |
+| `abra usb peers` | Browse LAN for sync hosts |
+| `abra usb sync --lan [host] [--pin] [--fingerprint]` | Sync with a LAN host |
+| `abra cartridge checkpoint [--full]` | Cloud checkpoint (metadata, or sealed full vault with `--full`) |
+| `abra cartridge restore` | Restore from latest full cartridge checkpoint |
 | `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
 
 ### Injecting secrets into a deploy
@@ -436,6 +441,37 @@ resolve by newest `updatedAt`. True conflicts (same key edited on both sides,
 or edited-vs-deleted) prompt per-key showing both values with timestamps.
 `~/.abracadabra/sync-state.json` stores a local snapshot of the last synced
 vault (mode `0600`) so merges work offline.
+
+### LAN sync (same merge, no stick)
+
+One Mac hosts a short-lived TLS listener; the other joins with a PIN. mDNS
+advertises the host as `_abracadabra-sync._tcp`.
+
+```sh
+# computer A
+abra usb host                  # Touch ID → prints PIN, fingerprint, ip:port
+
+# computer B
+abra usb peers                 # optional: discover hosts
+abra usb sync --lan            # pick a peer, enter PIN
+abra usb sync --lan 192.168.1.20:7332 --pin 482910 --dry-run
+abra usb sync --lan 192.168.1.20:7332 --pin 482910 --theirs
+```
+
+The transfer uses the same `BackupBundle` format sealed with the **PIN** (not
+your USB passphrase). Confirm the TLS fingerprint when joining an untrusted
+network. The host stops after a successful push or when `--ttl` expires
+(default 10 minutes). The web dash USB panel can start/stop a host and join peers.
+
+### `abra serve --lan`
+
+```sh
+abra serve --lan               # HTTPS on 0.0.0.0; prints TLS fingerprint + LAN URLs
+abra serve --lan --tls-cert c.pem --tls-key k.pem
+```
+
+Off-loopback `POST /secret` requires an API key (`Authorization: Bearer abra_…`).
+Loopback behavior is unchanged. Prefer `--lan` only on trusted networks.
 
 ## Security model
 
