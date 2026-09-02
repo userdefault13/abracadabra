@@ -395,26 +395,35 @@ export async function startServer(
       cert = tls.cert;
       fingerprint = tls.fingerprint;
     }
+    const { ensureDir, lanServeCertFile } = await import("../core/paths.js");
+    ensureDir();
+    const certPath = lanServeCertFile();
+    fs.writeFileSync(certPath, cert, { mode: 0o600 });
     server = createApiHttpsServer(key, cert);
     scheme = "https";
-  } else {
-    server = createApiServer();
-  }
 
-  const host = lanMode ? "0.0.0.0" : "127.0.0.1";
-  await new Promise<void>((resolve, reject) => {
-    server.listen(port, host, () => resolve());
-    server.on("error", reject);
-  });
+    await new Promise<void>((resolve, reject) => {
+      server.listen(port, "0.0.0.0", () => resolve());
+      server.on("error", reject);
+    });
 
-  if (lanMode) {
     console.log(`✦ abracadabra API listening on ${scheme}://0.0.0.0:${port} (LAN)`);
     if (fingerprint) console.log(`  TLS fingerprint: ${fingerprint}`);
+    console.log(`  CA file (use with curl --cacert): ${certPath}`);
+    console.log("  NEVER use curl -k / --insecure on LAN — that enables MITM theft of ABRA_KEY");
     for (const addr of privateAddresses()) {
       console.log(`  LAN URL: ${scheme}://${addr}:${port}/`);
+      console.log(
+        `  example: curl --cacert ${certPath} -H "Authorization: Bearer $ABRA_KEY" … https://${addr}:${port}/secret`,
+      );
     }
     console.log("  Non-loopback POST /secret requires Authorization: Bearer abra_…");
   } else {
+    server = createApiServer();
+    await new Promise<void>((resolve, reject) => {
+      server.listen(port, "127.0.0.1", () => resolve());
+      server.on("error", reject);
+    });
     console.log(`✦ abracadabra API listening on http://127.0.0.1:${port}`);
   }
 

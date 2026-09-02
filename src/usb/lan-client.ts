@@ -121,13 +121,15 @@ function httpsRequest(opts: {
         res.on("data", (c: Buffer) => chunks.push(c));
         res.on("end", () => {
           const peerFp = peerFingerprintFromSocket(res.socket as TLSSocket);
-          if (
-            opts.expectedFingerprint &&
-            peerFp &&
-            !fingerprintsMatch(opts.expectedFingerprint, peerFp)
-          ) {
-            reject(new Error(`TLS fingerprint mismatch (got ${peerFp})`));
-            return;
+          if (opts.expectedFingerprint) {
+            if (!peerFp) {
+              reject(new Error("TLS fingerprint unavailable — refusing unauthenticated peer"));
+              return;
+            }
+            if (!fingerprintsMatch(opts.expectedFingerprint, peerFp)) {
+              reject(new Error(`TLS fingerprint mismatch (got ${peerFp})`));
+              return;
+            }
           }
           const text = Buffer.concat(chunks).toString("utf8");
           let json: unknown = {};
@@ -252,7 +254,7 @@ export async function previewLanSync(
     throw new Error("Wrong PIN for sealed bundle");
   }
   const local = await loadVault();
-  const base = loadSyncState()?.base ?? null;
+  const base = (await loadSyncState())?.base ?? null;
   const { conflicts, report } = threeWayMerge(local, remote, base, new Map(), "LAN peer");
   return {
     report,
@@ -275,7 +277,7 @@ export async function applyLanSync(
     throw new Error("Wrong PIN for sealed bundle");
   }
   const local = await loadVault();
-  const base = loadSyncState()?.base ?? null;
+  const base = (await loadSyncState())?.base ?? null;
   const resolutions: Resolutions = new Map();
   if (force) {
     const probe = threeWayMerge(local, remote, base, new Map(), "LAN peer");
@@ -293,7 +295,7 @@ export async function applyLanSync(
   if (conflicts.length > 0 && !force) throw new LanConflictError(conflicts.map(toConflictInfo));
 
   if (report.length === 0) {
-    saveSyncState(local);
+    await saveSyncState(local);
     const masterKey = await getMasterKey();
     const out = sealBundle(encryptVault(local, masterKey), masterKey, pin);
     await pushBundle(target, pin, out, expectedFingerprint);
@@ -305,7 +307,7 @@ export async function applyLanSync(
   const masterKey = await getMasterKey();
   const out = sealBundle(encryptVault(merged, masterKey), masterKey, pin);
   await pushBundle(target, pin, out, expectedFingerprint);
-  saveSyncState(merged);
+  await saveSyncState(merged);
   return { changed: true, report };
 }
 

@@ -26,7 +26,8 @@ abra project new myproj
 abra serve                   # local API + web dash
 ```
 
-See **[AGENTS.md](AGENTS.md)** for AI agent integration (API keys, MCP, session grants).
+See **[README.agents.md](README.agents.md)** (agent-first: cut human–password friction) and
+**[AGENTS.md](AGENTS.md)** (API keys, MCP, session grants). Skill: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 
 ```
 ┌─────────────┐     ┌──────────────────────────────────┐
@@ -116,6 +117,9 @@ abra serve --open              # serves API + dash at http://127.0.0.1:7331/
 ```
 
 ## For AI agents
+
+Start here: **[README.agents.md](README.agents.md)** — why abracadabra removes
+human↔agent password friction, and how to fetch secrets without pasting keys into chat.
 
 abracadabra is built for coding agents. Three integration paths:
 
@@ -439,8 +443,9 @@ abra usb sync --theirs                 # force-resolve conflicts with the USB co
 Merge rules: additions/deletions propagate both ways; edits to the same var
 resolve by newest `updatedAt`. True conflicts (same key edited on both sides,
 or edited-vs-deleted) prompt per-key showing both values with timestamps.
-`~/.abracadabra/sync-state.json` stores a local snapshot of the last synced
-vault (mode `0600`) so merges work offline.
+`~/.abracadabra/sync-state.json` stores an **AES-256-GCM encrypted** snapshot of the
+last synced vault (sealed with the same master key as `vault.enc`, mode `0600`)
+so merges work offline without leaving plaintext secrets on disk.
 
 ### LAN sync (same merge, no stick)
 
@@ -466,22 +471,30 @@ network. The host stops after a successful push or when `--ttl` expires
 ### `abra serve --lan`
 
 ```sh
-abra serve --lan               # HTTPS on 0.0.0.0; prints TLS fingerprint + LAN URLs
+abra serve --lan               # HTTPS on 0.0.0.0; writes ~/.abracadabra/lan-serve.pem
 abra serve --lan --tls-cert c.pem --tls-key k.pem
 ```
 
 Off-loopback `POST /secret` requires an API key (`Authorization: Bearer abra_…`).
 Loopback behavior is unchanged. Prefer `--lan` only on trusted networks.
 
+**TLS:** Clients must trust the printed CA file — e.g.
+`curl --cacert ~/.abracadabra/lan-serve.pem …`. **Never use `curl -k` /
+`--insecure`**; that disables MITM protection and can leak the bearer key and
+secret payloads.
+
 ## Security model
 
 - Vault is a single file at `~/.abracadabra/vault.enc`, AES-256-GCM encrypted;
   master key lives in the macOS Keychain (`abracadabra-master-key`)
 - Vault writes are atomic (tmp + rename) with `0600` perms; directory is `0700`
+- `sync-state.json` is encrypted with the same master key (legacy plaintext files are migrated on next sync)
 - `abra get`, `abra env`, and unauthenticated `POST /secret` require per-use biometric approval
 - API keys skip Touch ID on `POST /secret` but are scoped to specific projects
 - **`abra run` does not require Touch ID** — it trusts the local shell user and
   injects secrets into the child process. Use API keys or MCP for agent access.
+- `abra serve --lan` writes `lan-serve.pem` for `curl --cacert`; never use `curl -k`
+- Cartridge `--full` requires a strong passphrase (≥16 chars, mixed classes) and slower scrypt
 - The API identifies the requesting process so you always know who's asking
 - Caveat: Keychain items created via the `/usr/bin/security` CLI can be read by
   any local process that shells out to it; the LAContext prompt is the primary

@@ -245,7 +245,7 @@ export async function startLanHost(opts: {
           const vault = decryptEnvelope(payload.vaultEnc, peerMaster);
           // Re-encrypt under this machine's master key (same as USB sync apply).
           await saveVault(vault);
-          saveSyncState(vault);
+          await saveSyncState(vault);
           sendJson(res, 200, { ok: true });
           void stopLanHost();
           return;

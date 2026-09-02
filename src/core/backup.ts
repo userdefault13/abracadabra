@@ -62,14 +62,15 @@ export function sealBundle(
   vaultEnc: VaultEnvelope,
   masterKey: Buffer,
   passphrase: string,
+  opts?: { kdf?: Partial<Pick<KdfParams, "N" | "r" | "p" | "keyLen">> },
 ): BackupBundle {
   const kdf: KdfParams = {
     algo: "scrypt",
     salt: crypto.randomBytes(16).toString("base64"),
-    N: 16384,
-    r: 8,
-    p: 1,
-    keyLen: 32,
+    N: opts?.kdf?.N ?? 16384,
+    r: opts?.kdf?.r ?? 8,
+    p: opts?.kdf?.p ?? 1,
+    keyLen: opts?.kdf?.keyLen ?? 32,
   };
   const payload: BundlePayload = {
     vaultEnc,

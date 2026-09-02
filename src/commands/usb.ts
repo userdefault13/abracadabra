@@ -277,7 +277,7 @@ async function prepareSync(
   force?: "ours" | "theirs",
 ): Promise<PreparedSync> {
   const localVault = await loadVault();
-  const base = loadSyncState()?.base ?? null;
+  const base = (await loadSyncState())?.base ?? null;
   let latestFile: string | null;
   try {
     latestFile = resolveLatest(target);
@@ -333,7 +333,7 @@ export async function applySync(
   const p = await prepareSync(target, passphrase, force);
   if (p.hasConflicts && !force) throw new UsbConflictError(p.conflictInfos);
   if (p.report.length === 0) {
-    saveSyncState(await loadVault());
+    await saveSyncState(await loadVault());
     return { changed: false, file: path.basename(p.latestFile), report: [] };
   }
   await authenticate("abracadabra: sync vault with USB backup");
@@ -345,7 +345,7 @@ export async function applySync(
     masterKey,
     passphrase,
   );
-  saveSyncState(p.merged);
+  await saveSyncState(p.merged);
   console.log(`✓ dash/usb: synced — refreshed ${path.basename(file)}`);
   return { changed: true, file: path.basename(file), report: p.report };
 }
@@ -615,7 +615,7 @@ export function registerUsbCommands(program: Command): void {
           }
 
           const localVault = await loadVault();
-          const state = loadSyncState();
+          const state = await loadSyncState();
           const base = state?.base ?? null;
           if (!base) {
             console.log(
@@ -636,7 +636,7 @@ export function registerUsbCommands(program: Command): void {
             if (pass.length < 8) fail("Passphrase must be at least 8 characters");
             const masterKey = await getMasterKey();
             const file = writeBundleToDir(dir, encryptVault(localVault, masterKey), masterKey, pass);
-            saveSyncState(localVault);
+            await saveSyncState(localVault);
             console.log(green(`✓ Initial backup written: ${file}`));
             return;
           }
@@ -660,7 +660,7 @@ export function registerUsbCommands(program: Command): void {
           console.log(`\nSyncing against ${dim(path.basename(latest))}`);
           if (report.length === 0) {
             console.log(green("✓ Already in sync"));
-            if (!opts.dryRun) saveSyncState(localVault);
+            if (!opts.dryRun) await saveSyncState(localVault);
             return;
           }
           for (const line of report) console.log(`  ${line}`);
@@ -679,7 +679,7 @@ export function registerUsbCommands(program: Command): void {
             masterKey,
             await cachedPassphrase(),
           );
-          saveSyncState(merged);
+          await saveSyncState(merged);
           console.log(green(`✓ Sync complete — USB refreshed (${path.basename(file)})`));
         } catch (err) {
           if (err instanceof LanConflictError) {

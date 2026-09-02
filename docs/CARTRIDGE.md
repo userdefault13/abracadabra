@@ -2,7 +2,7 @@
 
 `gameId`: **`abracadabra`**
 
-Cloud checkpoints carry **vault metadata** by default (project names, var counts, license wallet). With `abra cartridge checkpoint --full`, a **passphrase-sealed** `BackupBundle` (vault + master key) is included — same crypto as USB backup. Plaintext secrets are never uploaded.
+Cloud checkpoints carry **vault metadata** by default (project names, var counts, license wallet). With `abra cartridge checkpoint --full`, a **passphrase-sealed** `BackupBundle` (vault + master key) is included — same crypto as USB backup, with a **stronger passphrase policy** (min 16 chars, mixed character classes) and slower scrypt (`N=262144`) because sealed blobs may be fetchable from the cartridge API. Plaintext secrets are never uploaded.
 
 ## Why
 
@@ -24,7 +24,7 @@ abra cartridge ensure 0xYourWallet
 abra cartridge checkpoint --dry-run
 abra cartridge checkpoint --label "after-onboard"
 
-# Full vault (prompts for passphrase; schemaVersion 2 + sealedVault)
+# Full vault (strong passphrase: ≥16 chars, 3 of lower/upper/digit/symbol)
 abra cartridge checkpoint --full
 
 # Restore from latest full checkpoint (overwrites local vault + master key)

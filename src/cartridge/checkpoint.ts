@@ -7,6 +7,7 @@ import { loadVault, encryptVault } from "../core/vault.js";
 import { getMasterKey } from "../platform/index.js";
 import { sealBundle } from "../core/backup.js";
 import type { BackupBundle } from "../core/backup.js";
+import { assertCloudPassphrase, CLOUD_SCRYPT } from "../core/passphrase.js";
 import { licenseEnforcementEnabled } from "../license/config.js";
 import { readActivation } from "../license/store.js";
 
@@ -95,16 +96,18 @@ export async function buildCheckpointState(ownerWallet: string): Promise<AbraChe
   return { schemaVersion: 1, ...meta };
 }
 
-/** Full checkpoint: metadata + passphrase-sealed BackupBundle. */
+/** Full checkpoint: metadata + passphrase-sealed BackupBundle (strong passphrase required). */
 export async function buildFullCheckpointState(
   ownerWallet: string,
   passphrase: string,
 ): Promise<AbraCheckpointStateV2> {
-  if (passphrase.length < 8) throw new Error("Passphrase must be at least 8 characters");
+  assertCloudPassphrase(passphrase);
   const meta = await buildMetadata(ownerWallet);
   const vault = await loadVault();
   const masterKey = await getMasterKey();
-  const sealedVault = sealBundle(encryptVault(vault, masterKey), masterKey, passphrase);
+  const sealedVault = sealBundle(encryptVault(vault, masterKey), masterKey, passphrase, {
+    kdf: CLOUD_SCRYPT,
+  });
   return { schemaVersion: 2, ...meta, sealedVault };
 }
 

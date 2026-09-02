@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import type { Vault, VarEntry, Connection } from "./vault.js";
 import { syncStateFile, ensureDir } from "./paths.js";
+import { getMasterKey } from "../platform/index.js";
 
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -21,21 +23,90 @@ export type Resolutions = Map<string, VarEntry | undefined>;
 
 type VarMap = Record<string, VarEntry>;
 
-export function loadSyncState(): SyncState | null {
+const SYNC_MAGIC = "abracadabra-sync-state";
+
+interface EncryptedSyncFile {
+  format: typeof SYNC_MAGIC;
+  version: 1;
+  iv: string;
+  tag: string;
+  data: string;
+}
+
+function encryptSyncState(state: SyncState, key: Buffer): EncryptedSyncFile {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const plaintext = Buffer.from(JSON.stringify(state), "utf8");
+  const data = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return {
+    format: SYNC_MAGIC,
+    version: 1,
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    data: data.toString("base64"),
+  };
+}
+
+function decryptSyncState(file: EncryptedSyncFile, key: Buffer): SyncState {
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    key,
+    Buffer.from(file.iv, "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(file.tag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(file.data, "base64")),
+    decipher.final(),
+  ]);
+  const state = JSON.parse(plaintext.toString("utf8")) as SyncState;
+  if (!state?.base) throw new Error("Invalid sync-state payload");
+  return state;
+}
+
+function isEncryptedSyncFile(raw: unknown): raw is EncryptedSyncFile {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    (raw as EncryptedSyncFile).format === SYNC_MAGIC &&
+    typeof (raw as EncryptedSyncFile).data === "string"
+  );
+}
+
+function isLegacyPlainSyncState(raw: unknown): raw is SyncState {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    !(raw as { format?: string }).format &&
+    typeof (raw as SyncState).base === "object" &&
+    (raw as SyncState).base !== null
+  );
+}
+
+/** Load last sync snapshot (encrypted with master key). Migrates legacy plaintext once. */
+export async function loadSyncState(): Promise<SyncState | null> {
   try {
-    const raw = JSON.parse(fs.readFileSync(syncStateFile(), "utf8")) as SyncState;
-    return raw && typeof raw === "object" && raw.base ? raw : null;
+    const raw = JSON.parse(fs.readFileSync(syncStateFile(), "utf8")) as unknown;
+    if (isLegacyPlainSyncState(raw)) {
+      await saveSyncState(raw.base);
+      return raw;
+    }
+    if (!isEncryptedSyncFile(raw)) return null;
+    const key = await getMasterKey();
+    return decryptSyncState(raw, key);
   } catch {
     return null;
   }
 }
 
-export function saveSyncState(vault: Vault): void {
+/** Persist sync base encrypted with the Keychain/master key (mode 0600). */
+export async function saveSyncState(vault: Vault): Promise<void> {
   ensureDir();
+  const key = await getMasterKey();
   const state: SyncState = { lastSyncAt: Date.now(), base: vault };
+  const enc = encryptSyncState(state, key);
   const file = syncStateFile();
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(enc), { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 

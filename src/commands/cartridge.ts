@@ -120,8 +120,15 @@ export async function cmdCartridgeCheckpoint(opts: {
 
   let gameState;
   if (opts.full) {
-    const pass1 = await promptHidden("Passphrase to seal full vault for cartridge (min 8, hidden): ");
-    if (pass1.length < 8) fail("Passphrase must be at least 8 characters");
+    const pass1 = await promptHidden(
+      "Strong passphrase for cloud full vault (min 16 chars, mixed classes, hidden): ",
+    );
+    try {
+      const { assertCloudPassphrase } = await import("../core/passphrase.js");
+      assertCloudPassphrase(pass1);
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
     if ((await promptHidden("Repeat passphrase: ")) !== pass1) fail("Passphrases do not match");
     await authenticate("abracadabra: export sealed vault to cartridge checkpoint");
     gameState = await buildFullCheckpointState(owner, pass1);

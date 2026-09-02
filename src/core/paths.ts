@@ -26,6 +26,11 @@ export function syncStateFile(): string {
   return path.join(resolveAbraDir(), "sync-state.json");
 }
 
+/** PEM CA/cert written by `abra serve --lan` for clients to pin with curl --cacert. */
+export function lanServeCertFile(): string {
+  return path.join(resolveAbraDir(), "lan-serve.pem");
+}
+
 export function licenseFile(): string {
   return path.join(resolveAbraDir(), "license.json");
 }
