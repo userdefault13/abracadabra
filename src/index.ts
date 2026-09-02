@@ -10,6 +10,12 @@ import { keygen } from "./commands/keygen.js";
 import { updateCommand } from "./commands/update.js";
 import { cmdDoctor } from "./commands/doctor.js";
 import { cmdActivate, cmdLicenseStatus, cmdLicenseClear } from "./commands/activate.js";
+import {
+  cmdCartridgeEnsure,
+  cmdCartridgeStatus,
+  cmdCartridgeCheckpoint,
+  cmdCartridgeRules,
+} from "./commands/cartridge.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
@@ -130,6 +136,36 @@ license
   .command("clear")
   .description("Remove local activation (requires ABRA_SKIP_LICENSE=1)")
   .action(cmdLicenseClear);
+
+const cartridge = program.command("cartridge").description("Aarcade cartridge — cloud metadata checkpoints");
+
+cartridge
+  .command("rules")
+  .description("Fetch abracadabra cartridge rules manifest from Aarcade")
+  .action(cmdCartridgeRules);
+
+cartridge
+  .command("ensure [wallet]")
+  .description("Mint or fetch your abracadabra cartridge (Abra License NFT when enforced)")
+  .action(async (wallet?: string) => {
+    await cmdCartridgeEnsure(wallet);
+  });
+
+cartridge
+  .command("status")
+  .description("Show local + remote cartridge snapshot")
+  .action(cmdCartridgeStatus);
+
+cartridge
+  .command("checkpoint")
+  .description("Sign and save a vault metadata checkpoint (no secret values)")
+  .option("--wallet <0x>", "license wallet (default: activated wallet)")
+  .option("--label <text>", "checkpoint label")
+  .option("--signature <0x>", "pre-signed checkpoint message")
+  .option("--dry-run", "print gameState + sign message only")
+  .action(async (opts: { wallet?: string; label?: string; signature?: string; dryRun?: boolean }) => {
+    await cmdCartridgeCheckpoint(opts);
+  });
 
 program
   .command("doctor")
