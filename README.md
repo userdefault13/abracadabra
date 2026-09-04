@@ -517,3 +517,14 @@ node demo/demo.sh    # end-to-end demo: vault → API → dapp client → run in
 ---
 
 Logo/icon by [Flaticon](https://www.flaticon.com)
+
+## Author
+
+**Julius Wong** (userDef@ult) — [userdefault.dev](https://www.userdefault.dev) · [GitHub](https://github.com/userdefault13) · [X](https://x.com/userDefault_0x)
+
+Freelance engineer working on AI agent orchestration, AI developer tooling, and Unity/WebGL
+multiplayer games. Write-up of the AI tooling and credential-infrastructure work behind this project:
+[userdefault.dev/work/abracadabra](https://www.userdefault.dev/work/abracadabra).
+
+Available for freelance and contract work — [book a consult](https://www.userdefault.dev/hire),
+or read more about [AI tooling & developer infrastructure](https://www.userdefault.dev/services/ai-tooling).
