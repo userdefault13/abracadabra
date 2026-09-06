@@ -100,6 +100,8 @@ abra project new myproj        # create a project
 abra set myproj MY_API_KEY     # hidden input — stored AES-256-GCM encrypted
 abra ls myproj                 # list vars (secrets masked)
 abra get myproj MY_API_KEY     # reveal value → approve Touch ID
+abra get myproj MY_API_KEY | vercel env add MY_API_KEY production   # pipes into prompts (newline-terminated)
+abra get -n myproj TLS_KEY > key.pem                                 # --raw: exact bytes, no newline
 abra run myproj -- ./deploy.sh # inject all vars into any command
 ```
 
@@ -150,7 +152,7 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra project rm <name>` / `project ls` | Delete / list projects |
 | `abra ls [project]` | List projects, or vars in a project (secrets masked) |
 | `abra set <proj> <KEY>` | Add/update a var — hidden input by default; `--visible`, `--no-secret`, `--stdin` flags available |
-| `abra get <proj> <KEY>` | Print value to stdout (**Touch ID required**) |
+| `abra get <proj> <KEY>` | Print value to stdout, newline-terminated (**Touch ID required**); `--raw` for exact bytes |
 | `abra rm <proj> <KEY>` | Delete a var |
 | `abra keygen foundry <proj>` | Generate EVM wallet(s) via Foundry (`--pay-to`, `-n`) |
 | `abra run [-p proj] [-k K1,K2] -- <cmd…>` | Run command with vars injected into env |
