@@ -149,7 +149,11 @@ export async function setVar(projectName: string, key: string, opts: SetOptions)
   }
 }
 
-export async function getVar(projectName: string, key: string): Promise<void> {
+export async function getVar(
+  projectName: string,
+  key: string,
+  opts: { raw?: boolean } = {},
+): Promise<void> {
   try {
     const vault = await loadVault();
     const project = assertProject(vault, projectName);
@@ -157,7 +161,12 @@ export async function getVar(projectName: string, key: string): Promise<void> {
     if (!entry) fail(`Var not found: ${key} in ${projectName}`);
     await assertLicensed();
     await authenticate(`abracadabra: reveal ${projectName}/${key}`);
-    process.stdout.write(entry.value);
+    // End with a newline unless --raw. Without it, piping into a tool that
+    // reads its value from a prompt (`vercel env add`, `gh secret set` with
+    // a prompt, `read`) sees the bytes but never the Enter that submits them,
+    // and silently discards the value. `$(abra get …)` strips the newline
+    // anyway; use --raw when the exact bytes matter (redirecting to a file).
+    process.stdout.write(opts.raw ? entry.value : `${entry.value}\n`);
   } catch (err) {
     fail(err);
   }
