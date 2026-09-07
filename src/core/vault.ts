@@ -133,6 +133,16 @@ export function assertProject(vault: Vault, name: string): Project {
   return project;
 }
 
+/** Reserved vault project for the user-funded abra treasury wallet (not founder). */
+export const TREASURY_PROJECT = "__abra_treasury__";
+
+/** Projects starting with this prefix are system-managed — not for `abra project new`. */
+export const RESERVED_PROJECT_PREFIX = "__abra_";
+
+export function isReservedProjectName(name: string): boolean {
+  return name.startsWith(RESERVED_PROJECT_PREFIX);
+}
+
 /** Encrypt a vault into the portable envelope shape (usb backup). */
 export function encryptVault(vault: Vault, key: Buffer): EncryptedFile {
   return encrypt(vault, key);

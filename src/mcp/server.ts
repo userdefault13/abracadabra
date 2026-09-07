@@ -9,6 +9,11 @@ import {
   mintCloudflareTokenIntoProject,
   generateSshKeysIntoProject,
 } from "../commands/keygen.js";
+import {
+  getTreasuryStatus,
+  payFromTreasury,
+} from "../commands/treasury.js";
+import { isEthAddress } from "../license/config.js";
 import { providers } from "../connectors/providers.js";
 import {
   findMcpGrant,
@@ -321,6 +326,65 @@ async function listGrants() {
   });
 }
 
+
+async function treasuryStatusTool() {
+  try {
+    const status = await getTreasuryStatus();
+    return textResult({
+      tool: "treasury_status",
+      format:
+        '{ address, usdc, eth, usdcContract, rpc } — public balances only; never includes the private key',
+      address: status.address,
+      usdc: status.usdc,
+      usdcRaw: status.usdcRaw,
+      eth: status.eth,
+      usdcContract: status.usdcContract,
+      rpc: status.rpc,
+    });
+  } catch (err) {
+    return textResult(
+      { error: err instanceof Error ? err.message : String(err) },
+      true,
+    );
+  }
+}
+
+async function requestTreasuryPayment(args: {
+  to: string;
+  amountUsdc: string;
+  reason: string;
+}) {
+  try {
+    if (!isEthAddress(args.to.trim())) {
+      return textResult({ error: `invalid destination address: ${args.to}`, approved: false }, true);
+    }
+    if (!args.reason?.trim()) {
+      return textResult({ error: "reason is required", approved: false }, true);
+    }
+    const result = await payFromTreasury({
+      to: args.to,
+      amountUsdc: args.amountUsdc,
+      reason: args.reason,
+    });
+    return textResult({
+      tool: "request_treasury_payment",
+      format:
+        '{ approved: true, txHash, from, to, amountUsdc } — private key never returned',
+      ...result,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      /denied|cancel|timed out|timeout|biometric|User cancelled|Authentication failed/i.test(
+        msg,
+      )
+    ) {
+      return textResult({ approved: false }, true);
+    }
+    return textResult({ error: msg, approved: false }, true);
+  }
+}
+
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({
     name: "abracadabra",
@@ -412,6 +476,29 @@ request it via get_secrets when needed. Add the public key to a host's ~/.ssh/au
       comment: z.string().optional().describe("key comment/label (default: <project>@<hostname>)"),
     },
     async (args) => generateSshKey(args),
+  );
+
+
+  server.tool(
+    "treasury_status",
+    `Read-only abra treasury status: public address + Base mainnet USDC + ETH balances.
+No Touch ID. Never returns the private key. Fund the address with Base USDC + tiny ETH for gas.`,
+    {},
+    async () => treasuryStatusTool(),
+  );
+
+  server.tool(
+    "request_treasury_payment",
+    `Request a Base USDC payment from the user-funded abra treasury wallet.
+Pops Touch ID with amount + destination + reason. On approve broadcasts ERC-20 transfer.
+Args: { to, amountUsdc, reason }
+Returns { approved: true, txHash, from, to, amountUsdc } or { approved: false }. Never returns the private key.`,
+    {
+      to: z.string().describe("destination 0x address on Base"),
+      amountUsdc: z.string().describe('USDC amount as decimal string, e.g. "0.008"'),
+      reason: z.string().describe("human-readable reason shown in the Touch ID prompt"),
+    },
+    async (args) => requestTreasuryPayment(args),
   );
 
   await server.connect(new StdioServerTransport());

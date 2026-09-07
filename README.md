@@ -168,6 +168,9 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra cartridge checkpoint [--full]` | Cloud checkpoint (metadata, or sealed full vault with `--full`) |
 | `abra cartridge restore` | Restore from latest full cartridge checkpoint |
 | `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
+| `abra treasury init [--force]` | Create user-funded abra treasury wallet (`__abra_treasury__`) |
+| `abra treasury address` / `status` | Public address / Base USDC + ETH balances |
+| `abra treasury pay --to 0x… --amount 0.008 --reason "…"` | Touch ID gated Base USDC spend |
 
 ### Injecting secrets into a deploy
 
@@ -343,6 +346,22 @@ must be an *Account Owned Token* with **API Tokens Write** (dash.cloudflare.com 
 your account → Manage Account → Account API Tokens). Each project then gets its
 own scoped, revocable token instead of sharing the admin one.
 
+## Abra treasury (user-funded spends)
+
+A reserved vault project (`__abra_treasury__`) holds a **user-funded** Base mainnet
+wallet — separate from any founder wallet. Agents and projects request USDC payments;
+every spend pops **Touch ID** with the amount, destination, and reason.
+
+```sh
+abra treasury init                 # create wallet once (prints address)
+abra treasury status               # address + USDC + ETH (gas)
+# Fund the printed address on Base with USDC + a tiny bit of ETH for gas, then:
+abra treasury pay --to 0x… --amount 0.008 --reason "cron402 bazaar settle"
+```
+
+Via MCP: `treasury_status` (read-only) and `request_treasury_payment`
+`{ to, amountUsdc, reason }` — approve with your fingerprint; private key never leaves the vault / is never returned to the agent.
+
 ## MCP server (for AI agents)
 
 Agents working on a project can request env vars through the
@@ -371,6 +390,8 @@ Register it with your agent client:
 | `generate_wallet` | `{ project, payTo?, chain? }` | Foundry wallet stored encrypted → `{ wallets: [{ address, varSuffix, payToSet }] }`; `chain: "base-sepolia"` adds chainId + USDC address + faucet hints for funding |
 | `generate_cloudflare_token` | `{ project, perms?, expiresInDays?, requestedBy? }` | Touch ID gate → mints a fresh Account Owned token via the Cloudflare API, stored encrypted as `CLOUDFLARE_API_TOKEN` (value never returned to the agent — fetch via `get_secrets`) |
 | `generate_ssh_key` | `{ project, count?, comment? }` | Local ed25519 keypair → `{ keys: [{ varSuffix, publicKey, comment }] }`; private key stored encrypted as `SSH_PRIVATE_KEY<varSuffix>` |
+| `treasury_status` | — | Read-only treasury address + Base USDC + ETH (no private key) |
+| `request_treasury_payment` | `{ to, amountUsdc, reason }` | Touch ID gate → Base USDC transfer `{ approved: true, txHash, from, to, amountUsdc }` |
 
 ### How an agent requests a var
 

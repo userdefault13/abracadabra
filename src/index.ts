@@ -6,6 +6,7 @@ import { printEnv } from "./commands/env.js";
 import { registerConnectCommands } from "./commands/connect.js";
 import { registerUsbCommands } from "./commands/usb.js";
 import { registerKeyCommands } from "./commands/keys.js";
+import { registerTreasuryCommands } from "./commands/treasury.js";
 import { keygen } from "./commands/keygen.js";
 import { updateCommand } from "./commands/update.js";
 import { cmdDoctor } from "./commands/doctor.js";
@@ -37,6 +38,7 @@ registerProjectCommands(program);
 registerConnectCommands(program);
 registerUsbCommands(program);
 registerKeyCommands(program);
+registerTreasuryCommands(program);
 
 program
   .command("ls [project]")

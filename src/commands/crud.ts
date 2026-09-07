@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { loadVault, saveVault, assertProject } from "../core/vault.js";
+import { loadVault, saveVault, assertProject, isReservedProjectName } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { prompt, promptHidden } from "../core/prompt.js";
 import { authenticate, biometricsSkipped } from "../platform/index.js";
@@ -47,6 +47,9 @@ export function registerProjectCommands(program: Command): void {
     .description("Create a new project")
     .action(async (name: string) => {
       try {
+        if (isReservedProjectName(name)) {
+          fail(`"${name}" is reserved (system project). Use: abra treasury init`);
+        }
         const vault = await loadVault();
         if (vault.projects[name]) fail(`Project already exists: ${name}`);
         vault.projects[name] = { createdAt: Date.now(), vars: {} };
@@ -62,6 +65,9 @@ export function registerProjectCommands(program: Command): void {
     .description("Delete a project and all its variables")
     .action(async (name: string) => {
       try {
+        if (isReservedProjectName(name)) {
+          fail(`"${name}" is a reserved system project and cannot be deleted via project rm`);
+        }
         const vault = await loadVault();
         assertProject(vault, name);
         const answer = await prompt(
