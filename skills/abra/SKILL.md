@@ -104,9 +104,19 @@ Rules for this path:
   environment and let them die with it.
 - **If a file is unavoidable**, write it under `~/.abracadabra/agent-env/` — never in
   the repository or current working directory — with exclusive create (`wx`),
-  mode `0600`, a symlink check, and a chmod after open. Remove it when done.
+  mode `0600`, a symlink check, and a chmod after open. The **same wrapper** must
+  launch the consumer and `unlink` the file in an outer `finally` (plus signal
+  handlers). Prefer an anonymous temp file that is unlinked immediately after open
+  when the consumer can read an inherited path/fd.
 - **Error output** must never include the response body, headers, or env.
 - **Allowlist names explicitly** (`export ABRA_ALLOWLIST=…`); ignore anything else.
+- **Reject process-control names.** Never inject `PATH`, `NODE_OPTIONS`,
+  `PYTHONPATH`, `PYTHONSTARTUP`, `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `ENV`,
+  `PERL5OPT`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `DOTNET_*`, `SSLKEYLOGFILE`, or
+  similar loader/runtime/shell variables — even if they appear in `ABRA_ALLOWLIST`.
+- **Minimal child env.** Do not clone all of `process.env`. Pass only a small
+  allowlist of OS basics the child needs (`HOME`, `USER`, `TMPDIR`, `LANG`,
+  `TERM`, and maybe `SHELL`) plus the approved secret names.
 
 ### 1a. Inject into a process (no file) — default
 
@@ -116,15 +126,37 @@ reach the child's env, and secret values are treated as opaque strings.
 ```sh
 export ABRA_PROJECT='PROJECT'
 export ABRA_ALLOWLIST='KEY_ONE,KEY_TWO'
-node - -- your-command --your-args <<'EOF'
+node - -- /absolute/path/to/your-command --your-args <<'EOF'
 const { spawn } = require("node:child_process");
+const path = require("node:path");
 const key = process.env.ABRA_KEY;
 if (!key) { console.error("ABRA_KEY not set"); process.exit(1); }
-const allow = process.env.ABRA_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
+// Reject loader/runtime/shell/path vars — names can execute code even as "opaque" values.
+const DENY = new Set([
+  "PATH","PATHEXT","ComSpec","COMSPEC","PROMPT",
+  "NODE_OPTIONS","NODE_PATH","NODE_EXTRA_CA_CERTS","OPENSSL_CONF",
+  "PYTHONPATH","PYTHONSTARTUP","PYTHONHOME","PYTHONEXECUTABLE",
+  "LD_PRELOAD","LD_LIBRARY_PATH","LD_AUDIT","DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH","DYLD_FRAMEWORK_PATH","DYLD_FALLBACK_LIBRARY_PATH",
+  "BASH_ENV","ENV","SHELLOPTS","PS4","IFS",
+  "PERL5OPT","PERL5LIB","RUBYOPT","RUBYLIB",
+  "JAVA_TOOL_OPTIONS","JDK_JAVA_OPTIONS","_JAVA_OPTIONS",
+  "DOTNET_STARTUP_HOOKS","DOTNET_ADDITIONAL_DEPS","DOTNET_SHARED_STORE",
+  "SSLKEYLOGFILE","GIT_SSH_COMMAND","GIT_EXEC_PATH","SSH_AUTH_SOCK",
+  "ABRA_KEY","ABRA_ALLOWLIST","ABRA_PROJECT",
+]);
+const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const allow = (process.env.ABRA_ALLOWLIST || "").split(",").map(s => s.trim()).filter(Boolean);
+for (const k of allow) {
+  if (!NAME_RE.test(k) || DENY.has(k) || k.startsWith("DYLD_") || k.startsWith("LD_") || k.startsWith("DOTNET_")) {
+    console.error(`refusing dangerous or invalid env name: ${k}`); process.exit(2);
+  }
+}
 const rest = process.argv.slice(2);
 if (rest[0] === "--") rest.shift(); // node passes the separator through
 const [cmd, ...args] = rest;
-if (!cmd) { console.error("usage: node - -- <command> [args]"); process.exit(2); }
+if (!cmd) { console.error("usage: node - -- <absolute-command> [args]"); process.exit(2); }
+if (!path.isAbsolute(cmd)) { console.error("child command must be an absolute path"); process.exit(2); }
 (async () => {
   const res = await fetch("http://127.0.0.1:7331/secret", {
     method: "POST",
@@ -134,10 +166,13 @@ if (!cmd) { console.error("usage: node - -- <command> [args]"); process.exit(2);
   if (!res.ok) { console.error(`abra /secret failed: HTTP ${res.status}`); process.exit(1); }
   const j = await res.json();
   if (j.error) { console.error("abra error (see abra serve log)"); process.exit(1); }
-  const env = { ...process.env };
-  delete env.ABRA_KEY; // the child does not need the vault key
-  for (const k of allow) if (typeof j[k] === "string") env[k] = j[k]; // opaque
-  const child = spawn(cmd, args, { stdio: "inherit", env });
+  // Minimal env: do not clone process.env (avoids leaking unrelated secrets / control vars).
+  const env = {};
+  for (const k of ["HOME","USER","LOGNAME","TMPDIR","TMP","TEMP","LANG","LC_ALL","TERM","COLORTERM","SHELL"]) {
+    if (typeof process.env[k] === "string") env[k] = process.env[k];
+  }
+  for (const k of allow) if (typeof j[k] === "string") env[k] = j[k]; // opaque values only
+  const child = spawn(cmd, args, { stdio: "inherit", env, shell: false });
   child.on("error", () => { console.error(`could not start ${cmd}`); process.exit(127); });
   child.on("exit", code => process.exit(code ?? 1));
 })().catch(() => { console.error("abra fetch failed"); process.exit(1); });
@@ -147,10 +182,13 @@ EOF
 Confirm in chat: "KEY_ONE and KEY_TWO were loaded into the process" — never values.
 
 Treat the child command as fully trusted with those secrets. Only spawn a binary the
-human named or that this task already uses. Prefer a fixed absolute path or a
-lockfile-local package binary — not a freshly downloaded or user-controlled string.
+human named or that this task already uses — resolve it to a **trusted absolute path
+before** fetching secrets. Never spawn a freshly downloaded or user-controlled string.
 The child and its descendants can see the injected env (crash dumps, debug tools,
-accidental logs). Keep the allowlist minimal and short-lived.
+accidental logs). Keep the allowlist minimal and short-lived. Environment **names**
+themselves can have executable semantics; that is why the deny list exists.
+If the child truly needs a search path, set a **fixed** `PATH` of trusted directories in
+the wrapper (not from vault secrets, not from `ABRA_ALLOWLIST`).
 
 ### 1b. Write a private file (only when the runtime cannot take env)
 
@@ -158,23 +196,45 @@ Same fetch, then an exclusive-create write outside the repo. Use this path only 
 the runtime cannot take environment variables — prefer §1a. Fails closed if the
 project name is not a plain single path segment, the resolved path leaves
 `agent-env`, the directory is a symlink or not owned by the user, the file exists,
-or the destination is a symlink. Delete the file in a `finally` (or equivalent)
-as soon as the consumer has loaded it, unless the human explicitly asked to keep it.
+or the destination is a symlink. Apply the same allowlist deny rules as §1a.
+
+**The wrapper that creates the file must also launch the consumer and delete the
+file in an outer `finally`**, including on signals. Do not exit after writing with
+only a reminder. Prefer unlinking immediately after open when the consumer can
+read an open fd / already-opened path.
 
 ```sh
 export ABRA_PROJECT='PROJECT'
 export ABRA_ALLOWLIST='KEY_ONE,KEY_TWO'
-node - <<'EOF'
+node - -- /absolute/path/to/consumer --args <<'EOF'
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+const { spawn } = require("node:child_process");
 const key = process.env.ABRA_KEY;
 if (!key) { console.error("ABRA_KEY not set"); process.exit(1); }
-const allow = process.env.ABRA_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
+const DENY = new Set([
+  "PATH","NODE_OPTIONS","NODE_PATH","PYTHONPATH","PYTHONSTARTUP","LD_PRELOAD",
+  "LD_LIBRARY_PATH","DYLD_INSERT_LIBRARIES","BASH_ENV","ENV","PERL5OPT","RUBYOPT",
+  "JAVA_TOOL_OPTIONS","DOTNET_STARTUP_HOOKS","SSLKEYLOGFILE","ABRA_KEY","ABRA_ALLOWLIST","ABRA_PROJECT",
+]);
+const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const allow = (process.env.ABRA_ALLOWLIST || "").split(",").map(s => s.trim()).filter(Boolean);
+for (const k of allow) {
+  if (!NAME_RE.test(k) || DENY.has(k) || k.startsWith("DYLD_") || k.startsWith("LD_") || k.startsWith("DOTNET_")) {
+    console.error(`refusing dangerous or invalid env name: ${k}`); process.exit(2);
+  }
+}
+const rest = process.argv.slice(2);
+if (rest[0] === "--") rest.shift();
+const [cmd, ...args] = rest;
+if (!cmd || !path.isAbsolute(cmd)) { console.error("usage: node - -- <absolute-consumer> [args]"); process.exit(2); }
 const project = process.env.ABRA_PROJECT ?? "";
-// project is used as a filename: one path segment, no dots at the start, no separators
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(project)) { console.error("invalid ABRA_PROJECT"); process.exit(2); }
 const dir = path.join(os.homedir(), ".abracadabra", "agent-env");
 const file = path.resolve(dir, `${project}.json`);
 if (path.dirname(file) !== path.resolve(dir)) { console.error("refusing path outside agent-env"); process.exit(2); }
+let wrote = false;
+const cleanup = () => { if (!wrote) return; try { fs.unlinkSync(file); } catch {} wrote = false; };
+for (const sig of ["SIGINT","SIGTERM","SIGHUP"]) process.on(sig, () => { cleanup(); process.exit(130); });
 (async () => {
   const res = await fetch("http://127.0.0.1:7331/secret", {
     method: "POST",
@@ -192,6 +252,11 @@ if (path.dirname(file) !== path.resolve(dir)) { console.error("refusing path out
     console.error("unsafe agent-env directory"); process.exit(1);
   }
   try { if (fs.lstatSync(file).isSymbolicLink()) { console.error("refusing symlink"); process.exit(1); } } catch {}
+  // Best-effort stale cleanup for this project file only (same uid path, regular file).
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isFile() && !st.isSymbolicLink()) fs.unlinkSync(file);
+  } catch {}
   const fd = fs.openSync(file, "wx", 0o600); // exclusive: fails if it already exists
   try {
     fs.fchmodSync(fd, 0o600);
@@ -199,19 +264,30 @@ if (path.dirname(file) !== path.resolve(dir)) { console.error("refusing path out
   } finally {
     fs.closeSync(fd);
   }
-  console.log(`wrote ${allow.length} allowlisted names to ${file}`);
-  console.error("delete this file after the consumer loads it (prefer env injection next time)");
-})().catch(() => { console.error("abra fetch/write failed"); process.exit(1); });
+  wrote = true;
+  console.log(`wrote ${allow.length} allowlisted names; launching consumer (file deleted after exit)`);
+  const childEnv = { ...process.env, ABRA_AGENT_ENV_FILE: file };
+  delete childEnv.ABRA_KEY; // vault key stays in the wrapper only
+  await new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: "inherit", env: childEnv, shell: false });
+    child.on("error", reject);
+    child.on("exit", code => (code === 0 ? resolve() : reject(new Error(`consumer exit ${code}`))));
+  });
+})().catch((e) => {
+  console.error(e && e.message ? e.message : "abra fetch/write/run failed");
+  process.exitCode = 1;
+}).finally(() => { cleanup(); });
 EOF
 ```
 
-Load it in the app (`JSON.parse` + `process.env[name] = value` for allowlisted names,
-Python `json.load`, etc.), then **delete the file immediately** (`fs.unlinkSync` /
-`os.remove` in a `finally`). Do not leave it for a later session. If a file *must*
-live inside a repository, first verify it is ignored (`git check-ignore -q <path>`
-exits 0) and stop if it is not. **Do not** feed vault JSON, `.env` lines, or secret
-values to a shell. MCP `get_secrets`: parse JSON, pick allowlisted keys, assign to
-env in-process — never treat `result.content[0].text` as a script.
+The consumer reads `process.env.ABRA_AGENT_ENV_FILE` (or the path you pass), loads
+allowlisted names only (`JSON.parse` / `json.load`), then continues. The wrapper
+deletes the file when the consumer exits — success or failure. Do not leave the
+file for a later session. If a file *must* live inside a repository, first verify
+it is ignored (`git check-ignore -q <path>` exits 0) and stop if it is not.
+**Do not** feed vault JSON, `.env` lines, or secret values to a shell. MCP
+`get_secrets`: parse JSON, pick allowlisted keys, assign to env in-process —
+never treat `result.content[0].text` as a script. Prefer §1a whenever possible.
 
 ### 1c. Manual one-off with curl (humans, not agents)
 

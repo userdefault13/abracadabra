@@ -51,40 +51,19 @@ Keys can also be created in the web dash: `abra serve --open` → **API Keys** p
 
 Rules: `ABRA_KEY` stays in the environment and is sent by an in-process HTTP client —
 **never in a `curl -H` argument, URL, or command string** (argv is readable by other
-local processes). Fetched values go straight into the target process's env; **never
-`eval` vault output** and never write it into the repo. Fetch only the names the
-current task needs, within the scope the human granted.
+local processes). Inject into a **minimal** child env (not a full `process.env`
+clone); reject process-control names (`NODE_OPTIONS`, `LD_PRELOAD`, `PATH`,
+`DYLD_*`, …). **Never `eval` vault output** and never write secrets into the repo.
+Fetch only the names the current task needs, within the scope the human granted.
+Canonical example: [abra skill §1a](skills/abra/SKILL.md).
 
 ```sh
 export ABRA_PROJECT='myproj'
 export ABRA_ALLOWLIST='OPENAI_API_KEY,DATABASE_URL'
-export ABRA_PROJECT='PROJECT'
-export ABRA_ALLOWLIST='KEY_ONE,KEY_TWO'
-node - -- your-command --your-args <<'EOF'
-const { spawn } = require("node:child_process");
-const key = process.env.ABRA_KEY;
-if (!key) { console.error("ABRA_KEY not set"); process.exit(1); }
-const allow = process.env.ABRA_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
-const rest = process.argv.slice(2);
-if (rest[0] === "--") rest.shift(); // node passes the separator through
-const [cmd, ...args] = rest;
-if (!cmd) { console.error("usage: node - -- <command> [args]"); process.exit(2); }
-(async () => {
-  const res = await fetch("http://127.0.0.1:7331/secret", {
-    method: "POST",
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-    body: JSON.stringify({ project: process.env.ABRA_PROJECT, keys: allow }),
-  });
-  if (!res.ok) { console.error(`abra /secret failed: HTTP ${res.status}`); process.exit(1); }
-  const j = await res.json();
-  if (j.error) { console.error("abra error (see abra serve log)"); process.exit(1); }
-  const env = { ...process.env };
-  delete env.ABRA_KEY; // the child does not need the vault key
-  for (const k of allow) if (typeof j[k] === "string") env[k] = j[k]; // opaque
-  const child = spawn(cmd, args, { stdio: "inherit", env });
-  child.on("error", () => { console.error(`could not start ${cmd}`); process.exit(127); });
-  child.on("exit", code => process.exit(code ?? 1));
-})().catch(() => { console.error("abra fetch failed"); process.exit(1); });
+# Use the hardened wrapper from skills/abra/SKILL.md §1a (deny list + minimal env +
+# absolute child path). Do not copy older snippets that clone process.env wholesale.
+node - -- /absolute/path/to/your-command --your-args <<'EOF'
+# paste §1a from skills/abra/SKILL.md
 EOF
 ```
 
@@ -95,7 +74,8 @@ EOF
 
 If the runtime cannot take env and a file is unavoidable, use the exclusive-create
 `0600` file under `~/.abracadabra/agent-env/` from the
-[abra skill, §1b](skills/abra/SKILL.md) — never `.env` in the working directory.
+[abra skill, §1b](skills/abra/SKILL.md) — same wrapper must launch the consumer and
+delete the file in `finally`. Never `.env` in the working directory.
 
 ### LAN (`abra serve --lan`) — pin TLS, never `-k`
 
