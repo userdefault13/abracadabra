@@ -72,10 +72,9 @@ EOF
 - `403` — key valid but not scoped to that project → stop; ask human to re-scope
 - `404` — unknown project or key name → stop; check names with `abra ls <project>`
 
-If the runtime cannot take env and a file is unavoidable, use the exclusive-create
-`0600` file under `~/.abracadabra/agent-env/` from the
-[abra skill, §1b](skills/abra/SKILL.md) — same wrapper must launch the consumer and
-delete the file in `finally`. Never `.env` in the working directory.
+Do **not** write fetched secrets to disk (no home-dir dumps, no repo `.env`).
+If a runtime cannot take environment variables, stop and tell the human. See
+[abra skill §1](skills/abra/SKILL.md).
 
 ### LAN (`abra serve --lan`) — pin TLS, never `-k`
 
