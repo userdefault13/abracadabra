@@ -49,42 +49,75 @@ Keys can also be created in the web dash: `abra serve --open` → **API Keys** p
 
 ### 2. Agent reads secrets (no Touch ID)
 
-```sh
-curl -s -X POST http://127.0.0.1:7331/secret \
-  -H "Authorization: Bearer $ABRA_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"project": "myproj", "keys": ["OPENAI_API_KEY", "DATABASE_URL"]}'
-```
-
-- `200` — JSON `{ "<KEY>": "<value>", … }` — use values in env/files; **do not log or echo them**
-- `401` — invalid, expired, or revoked key → ask human to issue a new one
-- `403` — key valid but not scoped to that project
-- `404` — unknown project or key name
-
-Safe shell load on **loopback only** (no values in chat):
+Rules: `ABRA_KEY` stays in the environment and is sent by an in-process HTTP client —
+**never in a `curl -H` argument, URL, or command string** (argv is readable by other
+local processes). Fetched values go straight into the target process's env; **never
+`eval` vault output** and never write it into the repo. Fetch only the names the
+current task needs, within the scope the human granted.
 
 ```sh
-eval "$(
-  curl -s -X POST http://127.0.0.1:7331/secret \
-    -H "Authorization: Bearer $ABRA_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{"project": "myproj", "keys": ["OPENAI_API_KEY"]}' \
-  | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{const j=JSON.parse(d);for(const[k,v] of Object.entries(j)){if(k==="error")process.exit(1);console.log("export "+k+"="+JSON.stringify(v))}})'
-)"
+export ABRA_PROJECT='myproj'
+export ABRA_ALLOWLIST='OPENAI_API_KEY,DATABASE_URL'
+export ABRA_PROJECT='PROJECT'
+export ABRA_ALLOWLIST='KEY_ONE,KEY_TWO'
+node - -- your-command --your-args <<'EOF'
+const { spawn } = require("node:child_process");
+const key = process.env.ABRA_KEY;
+if (!key) { console.error("ABRA_KEY not set"); process.exit(1); }
+const allow = process.env.ABRA_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
+const rest = process.argv.slice(2);
+if (rest[0] === "--") rest.shift(); // node passes the separator through
+const [cmd, ...args] = rest;
+if (!cmd) { console.error("usage: node - -- <command> [args]"); process.exit(2); }
+(async () => {
+  const res = await fetch("http://127.0.0.1:7331/secret", {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    body: JSON.stringify({ project: process.env.ABRA_PROJECT, keys: allow }),
+  });
+  if (!res.ok) { console.error(`abra /secret failed: HTTP ${res.status}`); process.exit(1); }
+  const j = await res.json();
+  if (j.error) { console.error("abra error (see abra serve log)"); process.exit(1); }
+  const env = { ...process.env };
+  delete env.ABRA_KEY; // the child does not need the vault key
+  for (const k of allow) if (typeof j[k] === "string") env[k] = j[k]; // opaque
+  const child = spawn(cmd, args, { stdio: "inherit", env });
+  child.on("error", () => { console.error(`could not start ${cmd}`); process.exit(127); });
+  child.on("exit", code => process.exit(code ?? 1));
+})().catch(() => { console.error("abra fetch failed"); process.exit(1); });
+EOF
 ```
+
+- `200` — allowlisted names are set in the child's env; **do not log or echo them**
+- `401` — invalid, expired, or revoked key → stop; ask human to issue a new one and revoke the old
+- `403` — key valid but not scoped to that project → stop; ask human to re-scope
+- `404` — unknown project or key name → stop; check names with `abra ls <project>`
+
+If the runtime cannot take env and a file is unavoidable, use the exclusive-create
+`0600` file under `~/.abracadabra/agent-env/` from the
+[abra skill, §1b](skills/abra/SKILL.md) — never `.env` in the working directory.
 
 ### LAN (`abra serve --lan`) — pin TLS, never `-k`
 
 `abra serve --lan` writes `~/.abracadabra/lan-serve.pem` and prints a fingerprint.
-**Never use `curl -k` / `--insecure`** — that disables MITM protection and can leak `ABRA_KEY` plus every secret you request.
+**Never use `curl -k` / `--insecure` or `NODE_TLS_REJECT_UNAUTHORIZED=0`** — that
+disables MITM protection and can leak `ABRA_KEY` plus every secret you request.
+
+Run the same script with the URL changed to `https://<LAN_IP>:7331/secret` and the
+CA pinned in-process:
 
 ```sh
-CACERT="$HOME/.abracadabra/lan-serve.pem"   # path printed at serve startup
-HOST="192.168.1.20"                         # LAN IP printed at startup
-curl -s --cacert "$CACERT" -X POST "https://$HOST:7331/secret" \
-  -H "Authorization: Bearer $ABRA_KEY" \
+export NODE_EXTRA_CA_CERTS="$HOME/.abracadabra/lan-serve.pem"   # path printed at serve startup
+```
+
+For a manual one-off with curl, keep the header off argv via a config on stdin:
+
+```sh
+curl -s -K - --cacert "$HOME/.abracadabra/lan-serve.pem" -X POST "https://192.168.1.20:7331/secret" \
   -H "Content-Type: application/json" \
-  -d '{"project": "myproj", "keys": ["OPENAI_API_KEY"]}'
+  -d '{"project": "myproj", "keys": ["OPENAI_API_KEY"]}' <<EOF
+header = "Authorization: Bearer $ABRA_KEY"
+EOF
 ```
 
 Prefer loopback (`http://127.0.0.1:7331`) whenever the agent runs on the same machine as `abra serve`.
@@ -96,7 +129,7 @@ abra ls                 # projects
 abra ls myproj          # key names (values masked)
 ```
 
-Or MCP `list_projects`. Never ask the human for a value that already has a name in the vault.
+Or MCP `list_projects`. Do not ask the human to paste a value that is already in the vault and within your scope — ask them to widen scope or approve Touch ID instead.
 
 ---
 

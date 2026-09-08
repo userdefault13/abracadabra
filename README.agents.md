@@ -37,18 +37,26 @@ MCP (optional): copy [`.mcp.json.example`](.mcp.json.example) into the client co
 
 ---
 
-## How you get secrets (no human in the loop)
+## How you get secrets (within the scope a human granted)
 
 ### Prefer: API key
 
+A human issues a scoped, expiring `abra_…` key once. From then on the agent reads
+by **name**, in-process, with the key kept in env — never on a command line:
+
 ```sh
-curl -s -X POST http://127.0.0.1:7331/secret \
-  -H "Authorization: Bearer $ABRA_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"project": "myproj", "keys": ["OPENAI_API_KEY", "DATABASE_URL"]}'
+export ABRA_PROJECT='myproj'
+export ABRA_ALLOWLIST='OPENAI_API_KEY,DATABASE_URL'
+node - -- your-command --args <<'EOF'
+# fetch /secret with `authorization: Bearer ${process.env.ABRA_KEY}` in-process,
+# copy only ABRA_ALLOWLIST names into the child env, spawn your-command.
+# Full tested script: AGENTS.md §2 or skills/abra/SKILL.md §1a.
+EOF
 ```
 
-Pipe into env/files. Refer to results by **key name only** in chat.
+Inject into the process, do not write files into the repo, never `eval` the
+response. Refer to results by **key name only** in chat. On `401`/`403`/`404`,
+stop and ask the human — do not route around a grant.
 
 ### Interactive: MCP
 
@@ -57,7 +65,8 @@ Pipe into env/files. Refer to results by **key name only** in chat.
 
 ### Never
 
-- Ask “can you paste the key?”
+- Ask “can you paste the key?” for a value already in the vault and in scope — ask them to scope or approve instead
+- Put `ABRA_KEY` in a `curl -H` argument or any command line; `eval` vault output
 - Dump curl / MCP payloads into chat, PRs, or commits  
 - Use `abra run` as an agent API (local shell only)
 
