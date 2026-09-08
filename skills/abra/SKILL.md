@@ -94,61 +94,132 @@ Off-loopback (`abra serve --lan`): `/secret` **requires** an API key.
 
 ## 1. Fetch secrets (API key) — preferred
 
+Rules for this path:
+
+- **Keep `ABRA_KEY` out of process arguments.** Never put it in a `curl -H` argument,
+  a URL, or a command string — other local processes can read argv. Read it from the
+  environment inside the HTTP client process.
+- **Prefer no file at all.** Inject secrets straight into the target process's
+  environment and let them die with it.
+- **If a file is unavoidable**, write it under `~/.abracadabra/agent-env/` — never in
+  the repository or current working directory — with exclusive create (`wx`),
+  mode `0600`, a symlink check, and a chmod after open. Remove it when done.
+- **Error output** must never include the response body, headers, or env.
+- **Allowlist names explicitly** (`export ABRA_ALLOWLIST=…`); ignore anything else.
+
+### 1a. Inject into a process (no file) — default
+
+Node 18+ has `fetch`; the bearer header is set in-process. Only allowlisted names
+reach the child's env, and secret values are treated as opaque strings.
+
 ```sh
-curl -s -X POST http://127.0.0.1:7331/secret \
-  -H "Authorization: Bearer $ABRA_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"project": "PROJECT", "keys": ["KEY_ONE", "KEY_TWO"]}'
-```
-
-Safe load without echoing values — **allowlist names only; never execute response data**:
-
-Write a gitignored env file with a fixed parser. Secret **values** are opaque strings —
-never pass them to a shell interpreter.
-
-```sh
-# Request only known names. Parser keeps allowlisted keys only.
-ALLOWLIST='KEY_ONE,KEY_TWO'
-curl -s -X POST http://127.0.0.1:7331/secret \
-  -H "Authorization: Bearer $ABRA_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"project": "PROJECT", "keys": ["KEY_ONE", "KEY_TWO"]}' \
-| node -e '
-  const fs = require("fs");
-  const allow = new Set((process.env.ALLOWLIST || "").split(",").map(s => s.trim()).filter(Boolean));
-  let d = "";
-  process.stdin.on("data", c => d += c);
-  process.stdin.on("end", () => {
-    const j = JSON.parse(d);
-    if (j.error) { console.error("abra error"); process.exit(1); }
-    const out = {};
-    for (const [k, v] of Object.entries(j)) {
-      if (!allow.has(k)) continue;
-      if (typeof v !== "string") continue;
-      out[k] = v; // opaque — do not interpret as code
-    }
-    fs.writeFileSync(".env.abra.json", JSON.stringify(out), { mode: 0o600 });
+export ABRA_PROJECT='PROJECT'
+export ABRA_ALLOWLIST='KEY_ONE,KEY_TWO'
+node - -- your-command --your-args <<'EOF'
+const { spawn } = require("node:child_process");
+const key = process.env.ABRA_KEY;
+if (!key) { console.error("ABRA_KEY not set"); process.exit(1); }
+const allow = process.env.ABRA_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
+const rest = process.argv.slice(2);
+if (rest[0] === "--") rest.shift(); // node passes the separator through
+const [cmd, ...args] = rest;
+if (!cmd) { console.error("usage: node - -- <command> [args]"); process.exit(2); }
+(async () => {
+  const res = await fetch("http://127.0.0.1:7331/secret", {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    body: JSON.stringify({ project: process.env.ABRA_PROJECT, keys: allow }),
   });
-'
+  if (!res.ok) { console.error(`abra /secret failed: HTTP ${res.status}`); process.exit(1); }
+  const j = await res.json();
+  if (j.error) { console.error("abra error (see abra serve log)"); process.exit(1); }
+  const env = { ...process.env };
+  delete env.ABRA_KEY; // the child does not need the vault key
+  for (const k of allow) if (typeof j[k] === "string") env[k] = j[k]; // opaque
+  const child = spawn(cmd, args, { stdio: "inherit", env });
+  child.on("error", () => { console.error(`could not start ${cmd}`); process.exit(127); });
+  child.on("exit", code => process.exit(code ?? 1));
+})().catch(() => { console.error("abra fetch failed"); process.exit(1); });
+EOF
 ```
 
-Then load `.env.abra.json` inside your app/runtime (Node `JSON.parse` + `process.env[name] = value`
-for allowlisted names, Python `json.load`, etc.). **Do not** feed vault JSON, `.env` lines,
-or secret values to a shell. MCP `get_secrets`: parse JSON, pick allowlisted keys, assign to
-env in-process — never treat `result.content[0].text` as a script.
+Confirm in chat: "KEY_ONE and KEY_TWO were loaded into the process" — never values.
 
-Confirm in chat: "KEY_ONE was loaded" — never print values.
+### 1b. Write a private file (only when the runtime cannot take env)
 
-**LAN (`abra serve --lan`):** use `curl --cacert ~/.abracadabra/lan-serve.pem` against
-`https://$LAN_IP:7331/secret`. **Never `curl -k` / `--insecure`** — that enables MITM
-theft of `ABRA_KEY` and secret payloads. Prefer loopback when the agent is on the same machine.
+Same fetch, then an exclusive-create write outside the repo. Fails closed if the
+path exists, is a symlink, or the directory is not the user's.
+
+```sh
+export ABRA_PROJECT='PROJECT'
+export ABRA_ALLOWLIST='KEY_ONE,KEY_TWO'
+node - <<'EOF'
+const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+const key = process.env.ABRA_KEY;
+if (!key) { console.error("ABRA_KEY not set"); process.exit(1); }
+const allow = process.env.ABRA_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
+const dir = path.join(os.homedir(), ".abracadabra", "agent-env");
+const file = path.join(dir, `${process.env.ABRA_PROJECT}.json`);
+(async () => {
+  const res = await fetch("http://127.0.0.1:7331/secret", {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    body: JSON.stringify({ project: process.env.ABRA_PROJECT, keys: allow }),
+  });
+  if (!res.ok) { console.error(`abra /secret failed: HTTP ${res.status}`); process.exit(1); }
+  const j = await res.json();
+  if (j.error) { console.error("abra error (see abra serve log)"); process.exit(1); }
+  const out = {};
+  for (const k of allow) if (typeof j[k] === "string") out[k] = j[k]; // opaque
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (fs.lstatSync(dir).uid !== os.userInfo().uid) { console.error("agent-env dir not owned by user"); process.exit(1); }
+  try { if (fs.lstatSync(file).isSymbolicLink()) { console.error("refusing symlink"); process.exit(1); } } catch {}
+  const fd = fs.openSync(file, "wx", 0o600); // exclusive: fails if it already exists
+  fs.fchmodSync(fd, 0o600);
+  fs.writeSync(fd, JSON.stringify(out));
+  fs.closeSync(fd);
+  console.log(`wrote ${allow.length} allowlisted names to ${file}`);
+})().catch(() => { console.error("abra fetch/write failed"); process.exit(1); });
+EOF
+```
+
+Load it in the app (`JSON.parse` + `process.env[name] = value` for allowlisted names,
+Python `json.load`, etc.), then delete the file. If a file *must* live inside a
+repository, first verify it is ignored (`git check-ignore -q <path>` exits 0) and
+stop if it is not. **Do not** feed vault JSON, `.env` lines, or secret values to a
+shell. MCP `get_secrets`: parse JSON, pick allowlisted keys, assign to env in-process
+— never treat `result.content[0].text` as a script.
+
+### 1c. Manual one-off with curl (humans, not agents)
+
+If you must use curl, pass the header via a config read from stdin so the key is
+not on the command line:
+
+```sh
+curl -s -K - -X POST http://127.0.0.1:7331/secret \
+  -H "Content-Type: application/json" \
+  -d '{"project": "PROJECT", "keys": ["KEY_ONE"]}' <<EOF
+header = "Authorization: Bearer $ABRA_KEY"
+EOF
+```
+
+Do not pipe the output into chat, a shell, or a file in the repo.
+
+**LAN (`abra serve --lan`):** point the fetch/curl at `https://$LAN_IP:7331/secret`
+and trust only `~/.abracadabra/lan-serve.pem` (Node: `NODE_EXTRA_CA_CERTS`; curl:
+`--cacert`). **Never `curl -k` / `--insecure`** or `NODE_TLS_REJECT_UNAUTHORIZED=0`
+— that enables MITM theft of `ABRA_KEY` and secret payloads. Prefer loopback when
+the agent is on the same machine.
 
 | Status | Meaning |
 |--------|---------|
 | `200` | Map of key → value — use silently |
-| `401` | Bad/expired/revoked key → human re-issues |
-| `403` | Key not scoped to that project |
-| `404` | Unknown project or key name |
+| `401` | Bad/expired/revoked key → stop; human re-issues; revoke the old key |
+| `403` | Key not scoped to that project → stop; ask human to re-scope |
+| `404` | Unknown project or key name → stop; check names |
+
+**Suspected disclosure of `ABRA_KEY`** (seen in argv, logs, chat, a pasted command):
+tell the human immediately; they run `abra keys rm <id>` and issue a new scoped key.
 
 ## 2. Fetch secrets (MCP)
 
@@ -358,6 +429,8 @@ abra serve --lan --tls-cert c.pem --tls-key k.pem
 - Using `abra run` from an agent to skip auth
 - Guessing/retrying API keys after `401`
 - Committing `ABRA_KEY`, `.abrabak`, or vault files
+- Putting `ABRA_KEY` in a `curl -H` argument, URL, or any command line
+- Writing fetched secrets into the repo or cwd (use env injection, or `~/.abracadabra/agent-env/`)
 - Exposing `/secret` without an API key on LAN
 - Using `curl -k` / `--insecure` against `abra serve --lan`
 

@@ -17,6 +17,7 @@ vault → (optional License/cartridge) → lockfile cron402-mcp via `abra run` �
 ## Security posture
 
 - Never print vault values, `ABRA_KEY` / `abra_…` tokens, or private keys in chat.
+- `ABRA_KEY` stays in env and is sent from an in-process HTTP client — never on a command line. Fetched secrets go into the target process env, or an exclusive-create `0600` file under `~/.abracadabra/agent-env/`, never the repo.
 - Prefer scoped `ABRA_KEY` + `POST /secret` for unattended work; MCP `get_secrets` when a human is present. Read only names the current task needs; on `401`/`403`/`404` stop and ask the human to re-scope — never route around a grant.
 - **Never execute vault/API/MCP response data:** no `eval`, no piping JSON into `bash -c`/`sh -c`, no `curl|bash`. Allowlist env **names** only; treat secret **values** as opaque.
 - Agents may pitch Abra License (~$10 SKU) for cartridge cloud checkpoint; humans need Concierge Access to open Terminal mint and must explicitly consent. Never auto-buy or auto-spend treasury.
