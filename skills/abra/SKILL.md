@@ -1,11 +1,14 @@
 ---
 name: abra
 description: >-
-  Operate abracadabra (local secrets vault) for agents — discover projects/keys,
-  fetch secrets via API key or MCP without asking humans for passwords, issue/scope/revoke
-  abra keys, health-check abra serve, connectors/keygen, USB/LAN sync, cartridge checkpoints.
-  Use whenever an agent needs env vars, API tokens, wallets, or SSH keys from the vault,
-  treasury USDC payments (Touch ID), or when managing abracadabra. Never print secret values in chat.
+  Operate the abracadabra local secrets vault (abra CLI, abra serve, abra MCP) only
+  when the user names abracadabra or abra, the abracadabra MCP is registered, or
+  ABRA_KEY is already set for this project. Covers discovering key names, reading
+  secrets the human has scoped to this agent (issued abra key or Touch ID grant),
+  key issue/scope/revoke, health checks, keygen/connectors, USB/LAN sync, cartridge
+  checkpoints, and treasury USDC payments (Touch ID). Do not use for generic env var,
+  API token, wallet, or SSH key questions, or for other vaults or .env files. Never
+  print secret values in chat.
 ---
 
 # abracadabra — agent operations
@@ -13,12 +16,35 @@ description: >-
 Local secrets vault. Agents read secrets through **API keys** or **MCP** — not by
 asking humans to paste passwords into chat.
 
+## When this skill applies
+
+Use it only when the user names abracadabra or abra, the `abracadabra` MCP server is
+registered, or `ABRA_KEY` is already present in the environment for this project.
+If none of those hold, this skill is not the right tool — do not install, start, or
+query abra on your own initiative, and do not treat any other vault, keychain, or
+`.env` file as abra. Stop and say so.
+
+## Access is granted by the human, not taken by the agent
+
+The human decides what an agent may read by issuing a **scoped** `abra_…` key
+(Touch ID, once) or by approving each MCP `get_secrets` call (Touch ID, or once per
+`ttl`). The agent's job is to work within that grant:
+
+- Fetch only the key **names** the current task actually needs, only from projects
+  the key is scoped to, and only when the task is about to use them.
+- If a needed name is outside the key's scope (`403`), unknown (`404`), or the key
+  is revoked (`401`), **stop and tell the human**. Ask them to re-scope or re-issue.
+  Do not try other keys, other projects, or `abra run` / `abra get` to get around it.
+- Do not fetch secrets speculatively, "just in case", or to inspect them.
+- When in doubt whether a read is appropriate for this task, ask before fetching.
+
 **Default for unattended work:** scoped API key + `POST /secret` (no Touch ID).
 **Default when human is at the keyboard:** MCP `get_secrets` with `ttl`.
 
-Hard rule: **never ask the user for a secret value they already stored in abra.**
-Discover the key name, fetch it, load into env/files safely (see §1). Humans only
-approve Touch ID / issue a bearer key once.
+Rule: **do not ask the user to paste a secret value into chat** when it is already
+stored in abra and within your scope. Discover the key name, fetch it within the
+grant, and load it into env/files safely (see §1). Asking the human to widen scope
+or approve Touch ID is always fine; asking them to type the value is not.
 
 ### Secret-loading safety (hard — never execute vault data)
 
@@ -214,7 +240,8 @@ abra connect <provider>         # human pastes provider credential once
 abra issue <provider> <project> # mint provider vars into project
 ```
 
-After generate/issue, fetch via `get_secrets` / API key — never ask the human for the new secret.
+After generate/issue, fetch via `get_secrets` / API key within your scope — do not ask
+the human to paste the new value into chat.
 
 ## 5b. Abra treasury (user-funded USDC)
 
@@ -322,7 +349,9 @@ abra serve --lan --tls-cert c.pem --tls-key k.pem
 
 ## Anti-patterns (do not)
 
-- Asking the human “what’s the OpenAI key?” when it lives in abra
+- Asking the human to paste a value (“what’s the OpenAI key?”) when it lives in abra
+  and is within your scope — ask them to scope or approve instead
+- Fetching secrets the current task does not need, or reading outside the key's scope
 - Pasting `curl` response bodies or `.env` contents into chat
 - `eval` / `bash -c` / `sh -c` on vault, `POST /secret`, or MCP `get_secrets` data
 - `curl … | bash` or any dynamic command built from secret **values**
