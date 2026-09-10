@@ -19,3 +19,6 @@ vendor/
 .DS_Store
 *.log
 tmp/
+
+# personal runbooks (never published)
+docs/private/
