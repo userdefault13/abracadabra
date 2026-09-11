@@ -327,7 +327,12 @@ Never print `TREASURY_PRIVATE_KEY`.
 abra treasury init
 abra treasury status          # tell human the address to fund (Base USDC + tiny ETH)
 # do NOT pay from an empty treasury
+abra refill <project> --dry-run   # treasury low? see what a project wallet (EVM_ADDRESS) can give back
+abra refill <project>             # one Touch ID: auto gas top-up + USDC sweep into the treasury
 ```
+
+`refill` only works for wallets whose `EVM_PRIVATE_KEY` is in the vault (`abra keygen foundry`).
+If the human's agent session blocks it, hand them the `abra refill <project>` line to run.
 
 MCP (preferred for agents / cron402):
 

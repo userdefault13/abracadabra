@@ -4,8 +4,29 @@
 
 `abra treasury pay` only sends *out of* the treasury. When a project wallet created with
 `abra keygen foundry <project>` has accumulated USDC (x402 refunds, leftover top-ups, revenue)
-and the treasury is running low, move it back with two `cast` transactions signed by keys
-that never leave the vault except as a process argument.
+and the treasury is running low, move it back.
+
+## The short way: `abra refill`
+
+```sh
+abra refill <project> --dry-run          # balances + plan, no Touch ID, no transactions
+abra refill <project>                    # execute: one Touch ID prompt
+abra refill <project> --suffix _2        # EVM_ADDRESS_2 / EVM_PRIVATE_KEY_2 (keygen -n wallets)
+abra refill <project> --amount 0.5       # partial sweep (default: full balance)
+abra refill <project> --json             # machine-readable result (tx hashes, before/after)
+```
+
+`abra refill` is an alias of `abra treasury refill`. It performs steps 0–3 below: reads both
+balances, sends a `--gas-topup` ETH sliver from the treasury (default 0.00002) if the source
+holds under 0.000005 ETH, transfers the USDC signed by the source key, then re-reads the
+treasury balance. `--no-gas-topup` makes it fail instead of topping up. Keys are passed to
+`cast` as process arguments only and never printed.
+
+## The long way: manual `cast`
+
+Use this when `abra` is not installed on the machine that has the keys, or to see exactly
+what `refill` does. Two `cast` transactions signed by keys that never leave the vault except
+as a process argument.
 
 ## Wallets involved
 
@@ -90,9 +111,9 @@ A little ETH dust remains in the signer wallet. Leave it; it covers the next swe
   contain it (they don't). Command substitution strips the trailing newline, so no `-n` flag
   is needed.
 - **Agent sessions.** Agents running under a permission classifier are typically blocked from
-  `cast send` with a vault private key. Let the agent do steps 0 and 3; run steps 1 and 2
-  yourself (in Claude Code, the `!` prefix runs a command in-session so receipts land in the
-  conversation).
+  `cast send` with a vault private key. Let the agent run `abra refill <project> --dry-run`
+  (or steps 0 and 3); run `abra refill <project>` (or steps 1 and 2) yourself. In Claude Code,
+  the `!` prefix runs a command in-session so the output lands in the conversation.
 - **Multiple wallets.** `abra keygen foundry <project> -n 3` stores `EVM_ADDRESS_1…3` /
   `EVM_PRIVATE_KEY_1…3`. Repeat steps 0–3 per suffix.
 - **Gasless alternative.** Base USDC implements EIP-3009 `transferWithAuthorization`: the source

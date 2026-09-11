@@ -171,6 +171,7 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra treasury init [--force]` | Create user-funded abra treasury wallet (`__abra_treasury__`) |
 | `abra treasury address` / `status` | Public address / Base USDC + ETH balances |
 | `abra treasury pay --to 0x… --amount 0.008 --reason "…"` | Touch ID gated Base USDC spend |
+| `abra refill <project> [--dry-run]` | Sweep a project wallet's Base USDC back into the treasury (alias of `treasury refill`) |
 
 ### Injecting secrets into a deploy
 
@@ -358,6 +359,19 @@ abra treasury status               # address + USDC + ETH (gas)
 # Fund the printed address on Base with USDC + a tiny bit of ETH for gas, then:
 abra treasury pay --to 0x… --amount 0.008 --reason "cron402 bazaar settle"
 ```
+
+When the treasury runs low, pull USDC back from a project wallet you created with
+`abra keygen foundry <project>` (its `EVM_ADDRESS` / `EVM_PRIVATE_KEY`):
+
+```sh
+abra refill myproj --dry-run     # balances + plan, no Touch ID
+abra refill myproj               # one Touch ID: gas top-up from treasury if needed, then USDC transfer
+abra refill myproj --suffix _2 --amount 0.5   # keygen -n wallets / partial sweep
+```
+
+The source wallet usually holds no ETH (x402 payments are relayed), so `refill` first sends
+`--gas-topup` ETH (default 0.00002) from the treasury when the source is below 0.000005 ETH.
+`--no-gas-topup` fails instead. See `docs/TREASURY-SWEEP.md` for the manual `cast` equivalent.
 
 Via MCP: `treasury_status` (read-only) and `request_treasury_payment`
 `{ to, amountUsdc, reason }` — approve with your fingerprint; private key never leaves the vault / is never returned to the agent.
