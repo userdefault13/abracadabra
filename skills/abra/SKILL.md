@@ -329,6 +329,25 @@ abra treasury status          # tell human the address to fund (Base USDC + tiny
 # do NOT pay from an empty treasury
 abra refill <project> --dry-run   # treasury low? see what a project wallet (EVM_ADDRESS) can give back
 abra refill <project>             # one Touch ID: auto gas top-up + USDC sweep into the treasury
+## 5a. Push vault vars into Vercel env
+
+When a deploy needs a vault var on Vercel, do **not** `abra get … | vercel env add` (value
+transits the shell). Use the built-in push — Touch ID once, values never printed:
+
+```sh
+abra push vercel <project> KEY_ONE KEY_TWO        # from a `vercel link`ed dir; targets production,preview
+abra push vercel <project> KEY --dry-run          # names only, nothing sent — safe for agents to run
+abra push vercel <project> --all -e production    # every var, one target
+abra push vercel <project> KEY -p <prj_id> -t <team_id>
+```
+
+Agents may run `--dry-run` freely; the real push is Touch ID gated, so ask the human to run it
+(or run it while they are at the keyboard). Env changes apply to the next deployment.
+
+For a server `.env`: `abra push ssh <project> user@host -e /path/.env KEY[:REMOTE_NAME] … [--identity-project <proj>] [--run '<cmd>']`
+— values travel on stdin, an optional vault-held SSH key is used via a 0600 temp file and removed, `--run` executes a
+follow-up (e.g. `docker compose up -d --build`). Same rules: `--dry-run` is safe for agents, the real push needs the human.
+
 ```
 
 `refill` only works for wallets whose `EVM_PRIVATE_KEY` is in the vault (`abra keygen foundry`).

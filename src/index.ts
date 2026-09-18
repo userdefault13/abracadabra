@@ -4,6 +4,7 @@ import { registerProjectCommands, listProjects, listVars, setVar, getVar, remove
 import { runCommand } from "./commands/run.js";
 import { printEnv } from "./commands/env.js";
 import { registerConnectCommands } from "./commands/connect.js";
+import { registerPushCommands } from "./commands/push.js";
 import { registerUsbCommands } from "./commands/usb.js";
 import { registerKeyCommands } from "./commands/keys.js";
 import { registerTreasuryCommands } from "./commands/treasury.js";
@@ -36,6 +37,7 @@ program
 
 registerProjectCommands(program);
 registerConnectCommands(program);
+registerPushCommands(program);
 registerUsbCommands(program);
 registerKeyCommands(program);
 registerTreasuryCommands(program);

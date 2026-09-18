@@ -298,8 +298,33 @@ abra disconnect cloudflare
 > CDP API v2 spec has no key-management endpoints). abracadabra therefore
 > stores your admin key once and provisions it per-project; when Coinbase
 > ships a create-key API, `issue` becomes an API call without CLI changes.
+abra push vercel myproj KEY_ONE  # Touch ID gate → project vars into Vercel env
 
 Then run your app with everything injected:
+
+### Pushing vars to Vercel
+
+`abra push vercel` upserts vault vars straight into a Vercel project's environment
+variables through the connected `VERCEL_TOKEN`, so a value never passes through your
+clipboard or shell history. Secret vars land as `encrypted`, plain ones as `plain`.
+
+```sh
+cd ~/Dev/my-app                                   # a `vercel link`ed directory…
+abra push vercel my-app API_KEY DB_URL            # …resolves the project from .vercel/project.json
+abra push vercel my-app --all -e production       # every var, one target
+abra push vercel my-app API_KEY -p prj_… -t team_… # or name the Vercel project/team explicitly
+abra push vercel my-app API_KEY --dry-run         # names only, nothing sent
+```
+
+Targets default to `production,preview`. Env changes apply to the *next* deployment.
+
+The same idea works for a server `.env` over ssh — values ride on stdin, optionally with a vault-held key:
+
+```sh
+abra push ssh myproj root@1.2.3.4 -e /opt/app/.env API_KEY DB_URL          # upsert KEY=value lines
+abra push ssh myproj root@1.2.3.4 -e /opt/app/.env EVM_PRIVATE_KEY:ATTESTOR_KEY \
+  --identity-project ops --run 'cd /opt/app && docker compose up -d --build'   # rename, ssh key from the vault, then rebuild
+```
 
 ```sh
 cd ~/Dev/ai-cron-site
