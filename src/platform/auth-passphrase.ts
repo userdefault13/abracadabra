@@ -84,9 +84,10 @@ export class PassphraseAuth implements PlatformAuth {
 
     // Unlock a locked session so the subsequent reveal can read the master key.
     // The approval itself is never cached — next authenticate() prompts again.
-    if (isPassphraseVaultLocked()) {
-      unlockSession(key);
-    } else {
+    // unlockSession keeps its own copy, so always zero the derived key here.
+    try {
+      if (isPassphraseVaultLocked()) unlockSession(key);
+    } finally {
       key.fill(0);
     }
   }
