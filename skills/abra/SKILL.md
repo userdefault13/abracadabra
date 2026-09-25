@@ -6,7 +6,8 @@ description: >-
   ABRA_KEY is already set for this project. Covers discovering key names, reading
   secrets the human has scoped to this agent (issued abra key or Touch ID grant),
   key issue/scope/revoke, health checks, keygen/connectors, USB/LAN sync, cartridge
-  checkpoints, and treasury USDC payments (Touch ID). Do not use for generic env var,
+  checkpoints, treasury USDC payments and Gnosis Safe multisig spends (Touch ID). Do not
+  use for generic env var,
   API token, wallet, or SSH key questions, or for other vaults or .env files. Never
   print secret values in chat.
 ---
@@ -250,6 +251,9 @@ Register once (`.mcp.json` / Claude Desktop):
 | `generate_ssh_key` | ed25519 → vault |
 | `treasury_status` | Treasury address + Base USDC/ETH (no key) |
 | `request_treasury_payment` | Touch ID → pay Base USDC from treasury |
+| `safe_status` | Linked Safe owners/threshold/nonce/balances/queue (no key) |
+| `safe_pending` | Unexecuted Safe proposals + confirmation counts |
+| `request_safe_payment` | Touch ID → pay Base USDC from the Safe (executes or proposes) |
 
 `get_secrets` args example:
 
@@ -296,6 +300,14 @@ printf '%s' "$GENERATED" | abra set <project> <KEY> --stdin
 abra set <project> <KEY>
 ```
 
+No global keystore — every key needs a project. For secrets shared across apps (not one repo), use a catch-all project:
+
+```sh
+abra project new general
+abra set general GROK_BOT_API_KEY
+# or: printf '%s' "$VAL" | abra set general GROK_BOT_API_KEY --stdin
+```
+
 Read one value to stdout (Touch ID — prefer API key / MCP instead):
 
 ```sh
@@ -317,18 +329,6 @@ abra issue <provider> <project> # mint provider vars into project
 After generate/issue, fetch via `get_secrets` / API key within your scope — do not ask
 the human to paste the new value into chat.
 
-## 5b. Abra treasury (user-funded USDC)
-
-Reserved project `__abra_treasury__` — **not** the founder wallet. Human funds it;
-agents request spends. Every pay pops Touch ID with amount + destination + reason.
-Never print `TREASURY_PRIVATE_KEY`.
-
-```sh
-abra treasury init
-abra treasury status          # tell human the address to fund (Base USDC + tiny ETH)
-# do NOT pay from an empty treasury
-abra refill <project> --dry-run   # treasury low? see what a project wallet (EVM_ADDRESS) can give back
-abra refill <project>             # one Touch ID: auto gas top-up + USDC sweep into the treasury
 ## 5a. Push vault vars into Vercel env
 
 When a deploy needs a vault var on Vercel, do **not** `abra get … | vercel env add` (value
@@ -348,6 +348,18 @@ For a server `.env`: `abra push ssh <project> user@host -e /path/.env KEY[:REMOT
 — values travel on stdin, an optional vault-held SSH key is used via a 0600 temp file and removed, `--run` executes a
 follow-up (e.g. `docker compose up -d --build`). Same rules: `--dry-run` is safe for agents, the real push needs the human.
 
+## 5b. Abra treasury (user-funded USDC)
+
+Reserved project `__abra_treasury__` — **not** the founder wallet. Human funds it;
+agents request spends. Every pay pops Touch ID with amount + destination + reason.
+Never print `TREASURY_PRIVATE_KEY`.
+
+```sh
+abra treasury init
+abra treasury status          # tell human the address to fund (Base USDC + tiny ETH)
+# do NOT pay from an empty treasury
+abra refill <project> --dry-run   # treasury low? see what a project wallet (EVM_ADDRESS) can give back
+abra refill <project>             # one Touch ID: auto gas top-up + USDC sweep into the treasury
 ```
 
 `refill` only works for wallets whose `EVM_PRIVATE_KEY` is in the vault (`abra keygen foundry`).
@@ -368,6 +380,33 @@ MCP (preferred for agents / cron402):
 
 On `{ approved: true, txHash, … }` continue. On `{ approved: false }` stop — do not retry in a loop.
 Check balances first with `treasury_status`.
+
+## 5c. Gnosis Safe (multisig)
+
+When a Safe is linked (`abra safe address` succeeds), larger funds live in the Safe and the
+treasury wallet is just one **owner/signer**. Prefer `request_safe_payment` over
+`request_treasury_payment` for amounts the human would want co-signed.
+
+```sh
+abra safe status                  # owners (abra marked), threshold, nonce, USDC/ETH, pending
+abra safe pay --to 0x… --amount 25 --reason "…" --dry-run   # plan + safeTxHash, no Touch ID
+abra safe pay --to 0x… --amount 25 --reason "…"             # Touch ID
+abra safe pending                 # queue; "ready" when confirmations ≥ threshold
+abra safe confirm <safeTxHash> --exec   # co-sign a proposal from another owner, execute if ready
+abra safe exec <safeTxHash>       # broadcast a fully-confirmed proposal
+```
+
+MCP result shapes from `request_safe_payment`:
+
+- `{ approved: true, mode: "execute", txHash }` — done (1-of-N Safe).
+- `{ approved: true, mode: "propose", safeTxHash, confirmations, threshold, appUrl }` — **funds
+  have not moved.** Tell the human the other owners must confirm at `appUrl`, then poll
+  `safe_pending` (or run `abra safe exec <safeTxHash>` once `ready`). Do not re-propose the
+  same payment — that creates duplicate queue entries.
+- `{ approved: false }` — stop.
+
+Never print `TREASURY_PRIVATE_KEY` or `SAFE_API_KEY`. Setup (`abra safe create` /
+`abra safe link`) is the human's call — surface the command, do not run it unasked.
 
 ## 6. USB / LAN sync (multi-machine vault)
 

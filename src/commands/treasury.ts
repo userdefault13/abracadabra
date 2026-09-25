@@ -57,7 +57,7 @@ async function castNewWallet(): Promise<CastWallet> {
   }
 }
 
-function ensureCastAvailable(err: unknown): never {
+export function ensureCastAvailable(err: unknown): never {
   if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
     throw new Error(
       "foundry's `cast` not found on PATH. Install: curl -L https://foundry.paradigm.xyz | sh && foundryup",
@@ -124,7 +124,7 @@ export function readTreasuryAddress(vault: Vault): string {
 }
 
 /** Load private key after caller has already authenticated. Never log this. */
-function readTreasuryPrivateKey(vault: Vault): string {
+export function readTreasuryPrivateKey(vault: Vault): string {
   const p = vault.projects[TREASURY_PROJECT];
   const pk = p?.vars[PRIVATE_KEY_VAR]?.value;
   if (!pk) {
@@ -171,7 +171,7 @@ export interface TreasuryStatus {
   usdcContract: string;
 }
 
-async function castBalanceEth(address: string): Promise<{ eth: string; wei: string }> {
+export async function castBalanceEth(address: string): Promise<{ eth: string; wei: string }> {
   try {
     const { stdout } = await execFileAsync("cast", [
       "balance",
@@ -193,12 +193,12 @@ async function castBalanceEth(address: string): Promise<{ eth: string; wei: stri
   }
 }
 
-async function castBalanceWei(address: string): Promise<bigint> {
+export async function castBalanceWei(address: string): Promise<bigint> {
   const { wei } = await castBalanceEth(address);
   return BigInt(wei.trim().split(/\s+/)[0] ?? "0");
 }
 
-async function castUsdcBalance(address: string): Promise<bigint> {
+export async function castUsdcBalance(address: string): Promise<bigint> {
   try {
     const { stdout } = await execFileAsync("cast", [
       "call",
@@ -246,13 +246,20 @@ export function paymentAuthReason(args: {
 /**
  * Run `cast send <args…> --private-key <key> --rpc-url <rpc> --json` and return the tx hash.
  * The key is passed as a process argument only; it is never logged or echoed.
+ * If `args` already include `--rpc-url`, that wins; else uses live env / Base mainnet.
  */
-async function castSend(args: string[], privateKey: string): Promise<string> {
+export async function castSend(args: string[], privateKey: string): Promise<string> {
+  const hasRpc = args.includes("--rpc-url");
+  const rpc =
+    process.env.ABRA_TREASURY_RPC?.trim() ||
+    process.env.ABRA_LICENSE_RPC?.trim() ||
+    BASE_RPC;
+  const rpcArgs = hasRpc ? [] : ["--rpc-url", rpc];
   let stdout: string;
   try {
     const result = await execFileAsync(
       "cast",
-      ["send", ...args, "--private-key", privateKey, "--rpc-url", BASE_RPC, "--json"],
+      ["send", ...args, "--private-key", privateKey, ...rpcArgs, "--json"],
       { maxBuffer: 2 * 1024 * 1024 },
     );
     stdout = result.stdout;

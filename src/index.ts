@@ -8,7 +8,9 @@ import { registerPushCommands } from "./commands/push.js";
 import { registerUsbCommands } from "./commands/usb.js";
 import { registerKeyCommands } from "./commands/keys.js";
 import { registerTreasuryCommands } from "./commands/treasury.js";
+import { registerSafeCommands } from "./commands/safe.js";
 import { keygen } from "./commands/keygen.js";
+import { registerRotateWalletCommands } from "./commands/rotate-wallet.js";
 import { updateCommand } from "./commands/update.js";
 import { cmdDoctor } from "./commands/doctor.js";
 import { cmdActivate, cmdLicenseStatus, cmdLicenseClear } from "./commands/activate.js";
@@ -41,6 +43,8 @@ registerPushCommands(program);
 registerUsbCommands(program);
 registerKeyCommands(program);
 registerTreasuryCommands(program);
+registerSafeCommands(program);
+registerRotateWalletCommands(program);
 
 program
   .command("ls [project]")
