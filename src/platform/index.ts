@@ -8,7 +8,6 @@ import { PolkitAuth, probePolkit, setProbePolkitForTests } from "./auth-polkit.j
 import { NoAuth } from "./auth-none.js";
 import {
   biometricsSkipped,
-  resetAuthEnvForTests,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
@@ -36,7 +35,6 @@ export function resetPlatformForTests(): void {
   keystoreSingleton = null;
   authSingleton = null;
   resetSessionForTests();
-  resetAuthEnvForTests();
   setProbePolkitForTests(null);
 }
 

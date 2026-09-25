@@ -35,14 +35,12 @@ describe("platform", () => {
     expect(info.auth).toBe("macos-touchid");
   });
 
-  it("defaults linux/win to keytar + password when polkit unavailable", () => {
-    if (process.platform !== "linux" && process.platform !== "win32") return;
+  it("defaults win32 to keytar + password", () => {
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     delete process.env.ABRA_KEYSTORE;
     delete process.env.ABRA_AUTH;
     delete process.env.ABRA_SKIP_BIOMETRICS;
-    setProbePolkitForTests(() => ({ ok: false, detail: "test" }));
     resetPlatformForTests();
-    setProbePolkitForTests(() => ({ ok: false, detail: "test" }));
     const info = platformInfo();
     expect(info.keystore).toBe("keytar");
     expect(info.auth).toBe("password");
@@ -103,16 +101,20 @@ describe("linux auth selection", () => {
     expect(createAuth().id).toBe("polkit");
   });
 
-  it("falls back to password + stderr warning when probe not ok", () => {
+  it("still selects polkit (no password fallback, no stderr warning) when probe not ok", () => {
     setProbePolkitForTests(() => ({ ok: false, detail: "missing policy" }));
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(resolveAuthBackend()).toBe("polkit");
+    expect(createAuth().id).toBe("polkit");
+    expect(platformInfo().auth).toBe("polkit");
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it("ABRA_AUTH=password is honored as explicit opt-in even when probe not ok", () => {
+    setProbePolkitForTests(() => ({ ok: false, detail: "missing policy" }));
+    process.env.ABRA_AUTH = "password";
     expect(resolveAuthBackend()).toBe("password");
     expect(createAuth().id).toBe("password");
-    expect(stderrSpy.mock.calls.some((c) => String(c[0]).includes("install-polkit"))).toBe(true);
-    // one-shot
-    stderrSpy.mockClear();
-    expect(resolveAuthBackend()).toBe("password");
-    expect(stderrSpy).not.toHaveBeenCalled();
   });
 
   it("ABRA_AUTH overrides still win", () => {

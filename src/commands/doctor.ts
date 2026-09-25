@@ -47,12 +47,12 @@ export async function cmdDoctor(): Promise<void> {
     if (health.polkit.ok) {
       ok(`polkit ready (${health.polkit.pkcheck}; ${health.polkit.policy})`);
     } else if (info.auth === "polkit") {
-      warn(`polkit selected but not ready: ${health.polkit.detail ?? "unknown"}`);
-      warn("install: sudo scripts/install-polkit.sh");
+      warn(`polkit not ready: ${health.polkit.detail ?? "unknown"}`);
+      warn("secret reveals will be DENIED until the policy is installed: sudo scripts/install-polkit.sh");
       fails++;
     } else if (process.platform === "linux") {
-      warn(`polkit unavailable: ${health.polkit.detail ?? "unknown"}`);
-      warn("install: sudo scripts/install-polkit.sh (or rely on password prompt)");
+      warn(`polkit unavailable: ${health.polkit.detail ?? "unknown"} (auth=${info.auth} via ABRA_AUTH)`);
+      warn("install: sudo scripts/install-polkit.sh, then unset ABRA_AUTH to use the PolKit gate");
     }
   }
 

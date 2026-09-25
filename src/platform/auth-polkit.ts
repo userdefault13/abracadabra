@@ -97,9 +97,14 @@ export function resolvePolkitSubject(
   return `${pid},${startTime},${getuidFn()}`;
 }
 
+export const POLKIT_INSTALL_HINT = "sudo scripts/install-polkit.sh";
+
 export function probePolkit(deps: Pick<PolkitAuthDeps, "existsSync"> = {}): PolkitProbeResult {
   if (probeOverride) return probeOverride();
-  const exists = deps.existsSync ?? existsSync;
+  return probeWith(deps.existsSync ?? existsSync);
+}
+
+function probeWith(exists: ExistsFn): PolkitProbeResult {
   const pkcheck = resolvePkcheck(exists);
   const policy = resolvePolicy(exists);
   if (!pkcheck && !policy) {
@@ -132,11 +137,16 @@ export class PolkitAuth implements PlatformAuth {
   }
 
   async authenticate(req: AuthRequest): Promise<void> {
-    const exists = this.deps.existsSync ?? existsSync;
-    const pkcheck = resolvePkcheck(exists);
-    if (!pkcheck) {
+    // Check the (injectable) filesystem, never the test probe override:
+    // a missing pkcheck or policy denies before any exec.
+    const probe = probeWith(this.deps.existsSync ?? existsSync);
+    const pkcheck = probe.pkcheck;
+    if (!probe.ok || !pkcheck) {
       throw new Error(
-        `abracadabra: PolKit approval denied — ${req.reason}. pkcheck not found (install polkit / policy via scripts/install-polkit.sh).`,
+        `abracadabra: PolKit approval denied — ${req.reason}. ` +
+          `PolKit is not set up (${probe.detail ?? "unknown"}). ` +
+          `Install the policy: ${POLKIT_INSTALL_HINT} ` +
+          `(ABRA_AUTH=password is an explicit, less-safe opt-in that skips the identity check).`,
       );
     }
 

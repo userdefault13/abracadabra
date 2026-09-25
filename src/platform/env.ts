@@ -1,5 +1,3 @@
-import { probePolkit } from "./auth-polkit.js";
-
 export function biometricsSkipped(): boolean {
   return process.env.ABRA_SKIP_BIOMETRICS === "1" || process.env.ABRA_AUTH === "none";
 }
@@ -18,34 +16,13 @@ export function resolveKeystoreBackend(): string {
   return "passphrase-file";
 }
 
-let polkitFallbackWarned = false;
-
-/** Test hook — clear one-shot polkit-missing stderr warning. */
-export function resetAuthEnvForTests(): void {
-  polkitFallbackWarned = false;
-}
-
-function warnPolkitUnavailable(detail?: string): void {
-  if (polkitFallbackWarned) return;
-  polkitFallbackWarned = true;
-  const why = detail ? ` (${detail})` : "";
-  process.stderr.write(
-    `abracadabra: PolKit not available${why}; using password prompt. ` +
-      `Install the policy with: sudo scripts/install-polkit.sh ` +
-      `(or set ABRA_AUTH=password to silence this).\n`,
-  );
-}
-
 export function resolveAuthBackend(): string {
   if (process.env.ABRA_AUTH) return process.env.ABRA_AUTH;
   if (biometricsSkipped()) return "none";
   if (process.platform === "darwin") return "macos-touchid";
-  if (process.platform === "linux") {
-    const probe = probePolkit();
-    if (probe.ok) return "polkit";
-    warnPolkitUnavailable(probe.detail);
-    return "password";
-  }
+  // Always PolKit on Linux: if pkcheck/policy is missing, PolkitAuth denies
+  // with an install hint. ABRA_AUTH=password is an explicit opt-in only.
+  if (process.platform === "linux") return "polkit";
   if (process.platform === "win32") return "password";
   return "password";
 }
