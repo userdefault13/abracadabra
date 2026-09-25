@@ -144,9 +144,8 @@ export async function cmdGrantAdd(opts: {
   ttl: string;
   allowInterpreter?: boolean;
 }): Promise<void> {
-  if (!process.stdin.isTTY && !process.stdout.isTTY) {
-    // Prefer detecting a controlling terminal; /dev/tty is checked by authenticate.
-  }
+  // Terminal requirement: under the passphrase backend, authenticate() below
+  // prompts on /dev/tty and denies with no terminal.
 
   const ttlSeconds = parseGrantTtl(opts.ttl);
   const project = opts.project.trim();
