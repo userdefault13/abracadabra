@@ -400,14 +400,48 @@ Requires `pkcheck` (usually `/usr/bin/pkcheck` from the `polkit` package).
 - Requires a controlling terminal — use `ssh -t`. Without a TTY: denied with an `ssh -t` / `abra grant` hint.
 - **Every** reveal prompts for the vault passphrase (no grace window, no caching). Wrong guesses count toward unlock backoff (same counter as `abra unlock`).
 - On success, a locked passphrase-file session is unlocked (same effect as `abra unlock`) so the reveal can proceed; the next reveal still prompts.
-- MCP / HTTP API while headless cannot complete passphrase approval without a TTY — use a scoped API key (`abra grant` / `abra keys new`).
+- MCP / HTTP API while headless cannot complete passphrase approval without a TTY — pre-approve with [`abra grant`](#abra-grant-headless-mcpapi) (caller-bound, agent-held), or use a scoped API key (`abra keys new`) for LAN/non-interactive.
 - `ABRA_AUTH=password` is never auto-selected on Linux.
+
+### abra grant (headless MCP/API)
+
+With `ABRA_AUTH=passphrase`, every reveal needs a TTY. MCP over stdio and the loopback API have none, so they are denied unless the user pre-approves a **specific caller binary** on a terminal:
+
+```bash
+abra unlock                                          # agent must hold the key
+abra grant --project myproj --caller /path/to/client --ttl 2h
+# then headless MCP/API reveals for that exact binary + project succeed until expiry/lock
+abra grant --list
+abra grant --revoke <id>   # or --revoke all
+```
+
+**Flow**
+
+1. On a terminal: `abra grant --project <P> --caller <exe> --ttl <≤8h>` prompts for the vault passphrase (per-reveal approval), then asks the unlocked agent to store a grant in memory.
+2. Headless MCP `get_secrets` / loopback `POST /secret`: passphrase auth fails with no-TTY → resolve real caller identity → `grant.check` on the agent → allow if exact match.
+3. Grants never extend the agent's idle / max-age timers. They are **cleared** on every lock: `abra lock`, idle, max age (8h), sleep, and agent stop.
+
+**Caller identity (never `requestedBy`)**
+
+| Path | Identity |
+|------|----------|
+| MCP | Parent of `abra mcp` (`process.ppid`) — the MCP client that spawned it |
+| Loopback API | Peer PID from `lsof` on the client port, then `/proc/<pid>/exe` |
+| Matching | `realpath(exe)` + `stat` device + inode — exact match on project + exe + dev + ino |
+
+Self-reported `requestedBy` / API `appId` may still appear in approval messages but are **never** used for grant matching.
+
+**Interpreter caveat:** An MCP client that is a Node/Python script shows up as `node` / `python3`. Granting an interpreter covers **any** script it runs — refused unless `--allow-interpreter`. Prefer a dedicated binary when possible. If a wrapper shell launches `abra mcp`, the parent is the shell (grant that shell only with `--allow-interpreter`, which is broad).
+
+**Out of scope:** Payments / signing / keygen / connect / API-key issuance / cartridge / LAN sync / passkeys keep calling `authenticate()` directly and stay **denied** headless even when a matching grant exists.
+
+**TTL session grants disabled:** Under the passphrase backend, the existing MCP/API `ttl` “session grants” (keyed by self-reported `requestedBy` / `appId`) are neither consulted nor issued — that would reintroduce a grace window. Other auth backends are unchanged.
 
 ### MCP / headless
 
-MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless SSH without `passphrase-file` is denied by PolKit auth; with `passphrase-file`, approvals prompt on the terminal (`ssh -t`).
+MCP tools already call `authenticate()` (or `authorizeReveal` for `get_secrets`); no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless SSH without `passphrase-file` is denied by PolKit auth; with `passphrase-file`, approvals prompt on the terminal (`ssh -t`) or use `abra grant` for MCP/API reveals.
 
-The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit, passphrase-file + tty, or a scoped API key for agents.
+The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit, passphrase-file + tty / `abra grant`, or a scoped API key for agents.
 
 ### Omarchy / Quickshell
 
@@ -430,8 +464,8 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Socket | `$XDG_RUNTIME_DIR/abra/agent.sock` (override: `ABRA_AGENT_SOCKET`) |
 | Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
 | Socket perms | `0600` after listen |
-| Protocol | Newline-delimited JSON (`status`, `unlock`, `unlock.key`, `lock`, `vault.load`, `vault.save`) — **never** sends the master key to clients. `unlock.key` is the only path that carries key material, and only **CLI → agent**. |
-| Peer check | Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Relative argv[1] is resolved against the peer's `/proc/<pid>/cwd` before realpath. Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cwd,cmdline,environ}`. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
+| Protocol | Newline-delimited JSON (`status`, `unlock`, `unlock.key`, `lock`, `vault.load`, `vault.save`, `grant.add` / `grant.list` / `grant.revoke` / `grant.check`) — **never** sends the master key to clients. `unlock.key` is the only path that carries key material, and only **CLI → agent**. Grants are metadata only (exe path + inode + project + expiry). |
+| Peer check | Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`, `grant.*`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Relative argv[1] is resolved against the peer's `/proc/<pid>/cwd` before realpath. Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cwd,cmdline,environ}`. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
 | Vault binding | `vault.load` / `vault.save` / `unlock.key` include the client's resolved `vaultPath` + `keystoreBackend`; agent refuses (`mismatch`) if they differ from its own — client falls back to direct I/O |
 | Idle lock | Default **15 min** (`ABRA_AGENT_IDLE_SECONDS`); activity = vault ops |
 | Max age | Absolute **8 h** ceiling (`ABRA_AGENT_MAX_AGE_SECONDS`, values > 8h clamped); activity never extends it |
@@ -498,6 +532,7 @@ CLI:
 
 - `abra agent` — foreground agent (signal handlers; sleep watch on Linux)
 - `abra unlock` — passphrase-file: unlock local session + push key to agent when reachable
-- `abra lock` — clear local session and lock the agent when present
+- `abra lock` — clear local session and lock the agent when present (also clears agent-held grants)
+- `abra grant` — pre-approve a caller binary for headless MCP/API reveals under the passphrase backend
 
 See packaging unit comments for hardening notes (`LimitCORE=0`, no `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX` for D-Bus/keytar/gdbus).

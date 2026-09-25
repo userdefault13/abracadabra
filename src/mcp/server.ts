@@ -3,7 +3,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { loadVault, saveVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
-import { authenticate } from "../platform/index.js";
+import { authenticate, resolveAuthBackend } from "../platform/index.js";
+import { authorizeReveal } from "../platform/reveal-gate.js";
+import { identifyMcpCaller } from "../core/caller-identity.js";
 import {
   generateWalletsIntoProject,
   mintCloudflareTokenIntoProject,
@@ -67,10 +69,13 @@ async function listProjects() {
 }
 
 /**
- * Request secret values. Pops a Touch ID dialog on the user's machine;
- * returns values ONLY after biometric approval.
+ * Request secret values. Pops a Touch ID / passphrase dialog on the user's
+ * machine (or uses an agent-held `abra grant` under the passphrase backend
+ * when headless). Returns values ONLY after approval.
+ *
+ * Exported for tests.
  */
-async function getSecrets(args: {
+export async function getSecrets(args: {
   project: string;
   keys: string[];
   ttl?: number;
@@ -95,8 +100,14 @@ async function getSecrets(args: {
   const agentId = args.requestedBy?.trim() || "MCP agent";
   const who = args.requestedBy ? `${args.requestedBy} (MCP agent)` : "MCP agent";
 
+  // Under passphrase backend, TTL session grants (keyed by self-reported
+  // requestedBy) are disabled — that would be a grace window.
+  const passphraseBackend = resolveAuthBackend() === "passphrase";
+
   const ttl =
-    typeof args.ttl === "number" && args.ttl > 0
+    !passphraseBackend &&
+    typeof args.ttl === "number" &&
+    args.ttl > 0
       ? Math.min(Math.floor(args.ttl), MAX_TTL_SECONDS)
       : 0;
 
@@ -118,13 +129,23 @@ async function getSecrets(args: {
     }
   }
 
+  let via: "auth" | "grant" = "auth";
   try {
-    await authenticate(
-      `abracadabra: ${who} requests ${args.keys.join(", ")} from "${args.project}"`,
-    );
-  } catch {
+    const result = await authorizeReveal({
+      reason: `abracadabra: ${who} requests ${args.keys.join(", ")} from "${args.project}"`,
+      project: args.project,
+      caller: () => identifyMcpCaller(),
+    });
+    via = result.via;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return textResult(
-      { error: "user denied or timed out biometric approval", approved: false },
+      {
+        error: msg.includes("abra grant") || msg.includes("approval denied")
+          ? msg
+          : "user denied or timed out biometric approval",
+        approved: false,
+      },
       true,
     );
   }
@@ -143,7 +164,7 @@ async function getSecrets(args: {
       'parse with JSON.parse(result.content[0].text) → { vars: { "<KEY>": "<value>" }, approved: true }',
     project: args.project,
     approved: true,
-    grantedVia: "touch-id",
+    grantedVia: via === "grant" ? "abra-grant" : "touch-id",
     vars,
     note: "treat these values as secrets; do not log or echo them",
   });
@@ -437,6 +458,9 @@ async function requestSafePayment(args: { to: string; amountUsdc: string; reason
     return textResult({ error: msg, approved: false }, true);
   }
 }
+
+/** @internal Exported for payment-vs-grant tests. */
+export { requestSafePayment };
 
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({

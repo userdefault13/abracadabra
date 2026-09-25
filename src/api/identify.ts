@@ -8,6 +8,8 @@ export interface PeerIdentity {
   appId: string;
   /** Human-readable description including PID. */
   display: string;
+  /** Peer process id when resolved via lsof (for caller identity). */
+  pid?: number;
 }
 
 /**
@@ -43,7 +45,12 @@ export async function identifyPeer(clientPort: number): Promise<PeerIdentity> {
           cmdline = name;
         }
         const appId = cmdline || name;
-        return { appId, display: `${appId} (pid ${pid})` };
+        const pidNum = Number(pid);
+        return {
+          appId,
+          display: `${appId} (pid ${pid})`,
+          ...(Number.isInteger(pidNum) && pidNum > 0 ? { pid: pidNum } : {}),
+        };
       }
     }
   } catch {

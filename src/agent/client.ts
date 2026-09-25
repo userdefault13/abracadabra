@@ -17,6 +17,7 @@ import {
 import type { Vault } from "../core/vault.js";
 import { vaultFile } from "../core/paths.js";
 import { resolveKeystoreBackend } from "../platform/env.js";
+import type { GrantCaller, GrantListItem } from "./grants.js";
 
 export class AgentClientError extends Error {
   constructor(
@@ -82,6 +83,15 @@ export async function agentRequest(
         vaultPath?: string;
         keystoreBackend?: string;
       }
+    | {
+        op: "grant.add";
+        project: string;
+        caller: GrantCaller;
+        ttlSeconds: number;
+      }
+    | { op: "grant.list" }
+    | { op: "grant.revoke"; grantId?: string; all?: boolean }
+    | { op: "grant.check"; project: string; caller: GrantCaller }
   ),
   opts?: AgentClientOpts,
 ): Promise<AgentResponse> {
@@ -237,6 +247,91 @@ export async function agentVaultSave(
   if (!res.ok) {
     throw new AgentClientError(res.error, res.code);
   }
+}
+
+export async function agentGrantAdd(
+  opts: {
+    project: string;
+    caller: GrantCaller;
+    ttlSeconds: number;
+  } & AgentClientOpts,
+): Promise<{
+  id: string;
+  project: string;
+  caller: GrantCaller;
+  createdAt: number;
+  expiresAt: number;
+}> {
+  const { project, caller, ttlSeconds, ...clientOpts } = opts;
+  const res = await agentRequest(
+    { op: "grant.add", project, caller, ttlSeconds },
+    clientOpts,
+  );
+  if (!res.ok || res.op !== "grant.add") {
+    throw new AgentClientError(
+      !res.ok ? res.error : "Unexpected grant.add response",
+      !res.ok ? res.code : "internal",
+    );
+  }
+  return res.grant;
+}
+
+export async function agentGrantList(
+  opts?: AgentClientOpts,
+): Promise<GrantListItem[]> {
+  const res = await agentRequest({ op: "grant.list" }, opts);
+  if (!res.ok || res.op !== "grant.list") {
+    throw new AgentClientError(
+      !res.ok ? res.error : "Unexpected grant.list response",
+      !res.ok ? res.code : "internal",
+    );
+  }
+  return res.grants;
+}
+
+export async function agentGrantRevoke(
+  opts: ({ grantId: string } | { all: true }) & AgentClientOpts,
+): Promise<number> {
+  const clientOpts: AgentClientOpts = {
+    socketPath: opts.socketPath,
+    connectTimeoutMs: opts.connectTimeoutMs,
+  };
+  const res =
+    "all" in opts && opts.all
+      ? await agentRequest({ op: "grant.revoke", all: true }, clientOpts)
+      : await agentRequest(
+          {
+            op: "grant.revoke",
+            grantId: (opts as { grantId: string }).grantId,
+          },
+          clientOpts,
+        );
+  if (!res.ok || res.op !== "grant.revoke") {
+    throw new AgentClientError(
+      !res.ok ? res.error : "Unexpected grant.revoke response",
+      !res.ok ? res.code : "internal",
+    );
+  }
+  return res.revoked;
+}
+
+export async function agentGrantCheck(
+  project: string,
+  caller: GrantCaller,
+  opts?: AgentClientOpts,
+): Promise<{ granted: boolean; grantId?: string; remainingMs?: number }> {
+  const res = await agentRequest({ op: "grant.check", project, caller }, opts);
+  if (!res.ok || res.op !== "grant.check") {
+    throw new AgentClientError(
+      !res.ok ? res.error : "Unexpected grant.check response",
+      !res.ok ? res.code : "internal",
+    );
+  }
+  return {
+    granted: res.granted,
+    ...(res.grantId ? { grantId: res.grantId } : {}),
+    ...(res.remainingMs !== undefined ? { remainingMs: res.remainingMs } : {}),
+  };
 }
 
 /**

@@ -39,6 +39,10 @@ import {
   type PeerCheckDeps,
 } from "./peer.js";
 import {
+  GrantStore,
+  grantPublicView,
+} from "./grants.js";
+import {
   startSleepWatch,
   type SleepWatchFactory,
   type SleepWatchHandle,
@@ -46,12 +50,16 @@ import {
 
 export type { AgentStatusBody };
 
-/** Ops that unlock the in-memory master key or return vault plaintext. */
+/** Ops that unlock the in-memory master key, return vault plaintext, or manage grants. */
 const SENSITIVE_OPS = new Set<AgentOp>([
   "unlock",
   "unlock.key",
   "vault.load",
   "vault.save",
+  "grant.add",
+  "grant.list",
+  "grant.revoke",
+  "grant.check",
 ]);
 
 export type AuthorizePeerFn = (
@@ -87,6 +95,7 @@ export interface StartAgentOpts {
 let running: {
   server: net.Server;
   state: AgentState;
+  grants: GrantStore;
   socketPath: string;
   vaultPath: () => string;
   keystoreBackend: () => string;
@@ -170,6 +179,7 @@ async function requireAbraCliPeer(
 
 async function handleRequest(
   state: AgentState,
+  grants: GrantStore,
   vaultPath: () => string,
   keystoreBackend: () => string,
   authorize: AuthorizePeerFn,
@@ -254,7 +264,7 @@ async function handleRequest(
         }
       }
       case "lock": {
-        // Same-uid lock only reduces access (zeroes the in-memory key).
+        // Same-uid lock only reduces access (zeroes the in-memory key + grants).
         logOp("lock");
         state.lock();
         return { v: PROTOCOL_VERSION, id, ok: true, op: "lock" };
@@ -300,6 +310,88 @@ async function handleRequest(
         writeEncryptedVaultFile(enc, vaultPath());
         return { v: PROTOCOL_VERSION, id, ok: true, op: "vault.save" };
       }
+      case "grant.add": {
+        if (state.isLocked()) {
+          return fail(id, "locked", "Agent is locked");
+        }
+        // Grants do not touch()/extend idle or max-age timers.
+        try {
+          const grant = grants.add({
+            project: req.project,
+            caller: req.caller,
+            ttlSeconds: req.ttlSeconds,
+          });
+          logOp("grant.add", `project=${req.project}`);
+          return {
+            v: PROTOCOL_VERSION,
+            id,
+            ok: true,
+            op: "grant.add",
+            grant: grantPublicView(grant),
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const code =
+            e && typeof e === "object" && "code" in e && (e as { code: string }).code === "bad_request"
+              ? "bad_request"
+              : "bad_request";
+          return fail(id, code, msg);
+        }
+      }
+      case "grant.list": {
+        if (state.isLocked()) {
+          return fail(id, "locked", "Agent is locked");
+        }
+        logOp("grant.list");
+        return {
+          v: PROTOCOL_VERSION,
+          id,
+          ok: true,
+          op: "grant.list",
+          grants: grants.list(),
+        };
+      }
+      case "grant.revoke": {
+        if (state.isLocked()) {
+          return fail(id, "locked", "Agent is locked");
+        }
+        try {
+          const revoked = grants.revoke({
+            grantId: req.grantId,
+            all: req.all,
+            id: req.grantId,
+          });
+          logOp("grant.revoke", `n=${revoked}`);
+          return {
+            v: PROTOCOL_VERSION,
+            id,
+            ok: true,
+            op: "grant.revoke",
+            revoked,
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return fail(id, "bad_request", msg);
+        }
+      }
+      case "grant.check": {
+        if (state.isLocked()) {
+          return fail(id, "locked", "Agent is locked");
+        }
+        const result = grants.check(req.project, req.caller);
+        logOp("grant.check", `granted=${result.granted}`);
+        return {
+          v: PROTOCOL_VERSION,
+          id,
+          ok: true,
+          op: "grant.check",
+          granted: result.granted,
+          ...(result.grantId ? { grantId: result.grantId } : {}),
+          ...(result.remainingMs !== undefined
+            ? { remainingMs: result.remainingMs }
+            : {}),
+        };
+      }
       default:
         return fail(id, "bad_request", "Unknown op");
     }
@@ -325,6 +417,7 @@ async function handleRequest(
 
 function attachConnection(
   state: AgentState,
+  grants: GrantStore,
   vaultPath: () => string,
   keystoreBackend: () => string,
   authorize: AuthorizePeerFn,
@@ -373,6 +466,7 @@ function attachConnection(
       }
       void handleRequest(
         state,
+        grants,
         vaultPath,
         keystoreBackend,
         authorize,
@@ -407,10 +501,12 @@ async function probeExistingAgent(socketPath: string): Promise<boolean> {
  * Start the per-user abra agent (unix socket). Holds the master key in memory
  * after unlock; does not call authenticate() / PolKit.
  *
- * Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`) require an
- * abra CLI peer (Linux ss+/proc check; fail closed on non-Linux / ambiguity).
+ * Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`,
+ * `grant.*`) require an abra CLI peer (Linux ss+/proc check; fail closed on
+ * non-Linux / ambiguity).
  *
  * A fresh process always starts locked (no key persistence across reboot).
+ * Grants live only in agent memory and are cleared on every lock.
  */
 export async function startAgent(opts?: StartAgentOpts): Promise<{
   socketPath: string;
@@ -432,12 +528,14 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     fs.unlinkSync(socketPath);
   }
 
+  const grants = new GrantStore();
   const state = new AgentState({
     idleSeconds: opts?.idleSeconds ?? resolveIdleSeconds(),
     maxAgeSeconds: opts?.maxAgeSeconds ?? resolveMaxAgeSeconds(),
     resolveMasterKey: opts?.resolveMasterKey,
     onIdleLock: () => logOp("idle-lock"),
     onMaxAgeLock: () => logOp("max-age-lock"),
+    onLock: () => grants.clear(),
   });
   const vaultPath = opts?.vaultPath ?? (() => vaultFile());
   const keystoreBackend = opts?.keystoreBackend ?? (() => resolveKeystoreBackend());
@@ -450,7 +548,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
   let server: net.Server;
   try {
     server = net.createServer((socket) => {
-      attachConnection(state, vaultPath, keystoreBackend, authorize, socket);
+      attachConnection(state, grants, vaultPath, keystoreBackend, authorize, socket);
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -491,6 +589,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
   running = {
     server,
     state,
+    grants,
     socketPath,
     vaultPath,
     keystoreBackend,

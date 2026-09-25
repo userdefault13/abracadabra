@@ -18,6 +18,8 @@ export class AgentState {
   private readonly maxAgeMs: number;
   private readonly onIdleLock: () => void;
   private readonly onMaxAgeLock: () => void;
+  /** Fired on every lock() — idle, max-age, sleep, explicit, stopAgent. */
+  private readonly onLock: () => void;
   private readonly resolveMasterKey: ResolveMasterKeyFn;
 
   constructor(opts?: {
@@ -26,6 +28,8 @@ export class AgentState {
     resolveMasterKey?: ResolveMasterKeyFn;
     onIdleLock?: () => void;
     onMaxAgeLock?: () => void;
+    /** Called whenever lock() runs (clears agent-held grants, etc.). */
+    onLock?: () => void;
   }) {
     this.idleMs = (opts?.idleSeconds ?? resolveIdleSeconds()) * 1000;
     this.maxAgeMs = (opts?.maxAgeSeconds ?? resolveMaxAgeSeconds()) * 1000;
@@ -38,6 +42,7 @@ export class AgentState {
       });
     this.onIdleLock = opts?.onIdleLock ?? (() => undefined);
     this.onMaxAgeLock = opts?.onMaxAgeLock ?? (() => undefined);
+    this.onLock = opts?.onLock ?? (() => undefined);
   }
 
   isLocked(): boolean {
@@ -121,6 +126,7 @@ export class AgentState {
     }
     this.lastActivityAt = 0;
     this.unlockedAt = 0;
+    this.onLock();
   }
 
   /** Reset idle timer — call on vault ops (and after unlock). Does NOT extend max age. */
