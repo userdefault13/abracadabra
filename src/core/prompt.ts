@@ -27,6 +27,20 @@ export type TtyHandles = {
 
 const NO_TERMINAL_MSG = "no terminal: use ssh -t";
 
+/** Thrown when `/dev/tty` (or Windows stdin TTY fallback) cannot be opened. */
+export class NoTerminalError extends Error {
+  constructor(message = `abracadabra: ${NO_TERMINAL_MSG}`) {
+    super(message);
+    this.name = "NoTerminalError";
+  }
+}
+
+export function isNoTerminalError(err: unknown): boolean {
+  if (err instanceof NoTerminalError) return true;
+  if (!(err instanceof Error)) return false;
+  return err.message.includes(NO_TERMINAL_MSG);
+}
+
 function defaultOpenTty(): TtyHandles {
   // Prefer the controlling terminal so piped stdin cannot supply the passphrase.
   try {
@@ -75,7 +89,7 @@ function defaultOpenTty(): TtyHandles {
         },
       };
     }
-    throw new Error(`abracadabra: ${NO_TERMINAL_MSG}`);
+    throw new NoTerminalError();
   }
 }
 
@@ -108,13 +122,15 @@ export async function promptHidden(
   const headless = headlessPassphrase();
   if (headless) return headless;
 
+  // Open tty BEFORE writing any prompt text (no partial leak on open failure).
   let handles: TtyHandles;
   try {
     handles = openTtyImpl();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes(NO_TERMINAL_MSG)) throw err instanceof Error ? err : new Error(msg);
-    throw new Error(`abracadabra: ${NO_TERMINAL_MSG}`);
+    if (isNoTerminalError(err)) {
+      throw err instanceof NoTerminalError ? err : new NoTerminalError();
+    }
+    throw new NoTerminalError();
   }
 
   const { input, close } = handles;
@@ -181,11 +197,7 @@ export async function promptHidden(
       input.on("keypress", onKeypress);
     } catch (err) {
       cleanup();
-      reject(
-        err instanceof Error && err.message.includes(NO_TERMINAL_MSG)
-          ? err
-          : new Error(`abracadabra: ${NO_TERMINAL_MSG}`),
-      );
+      reject(isNoTerminalError(err) ? (err instanceof Error ? err : new NoTerminalError()) : new NoTerminalError());
     }
   });
 }

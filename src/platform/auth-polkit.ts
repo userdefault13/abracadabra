@@ -2,6 +2,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import type { AuthRequest, PlatformAuth } from "./types.js";
+import { detectHeadlessSession } from "./env.js";
 
 const DEFAULT_EXEC = promisify(execFileCb);
 
@@ -37,6 +38,9 @@ export interface PolkitAuthDeps {
   readFileSync?: ReadFileFn;
   getuid?: () => number;
   pid?: number;
+  /** Injectable env for headless detection / ABRA_AUTH (tests). */
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
 }
 
 export interface PolkitProbeResult {
@@ -99,6 +103,14 @@ export function resolvePolkitSubject(
 
 export const POLKIT_INSTALL_HINT = "sudo scripts/install-polkit.sh";
 
+export function headlessPolkitHint(reasons: string[]): string {
+  return (
+    `Headless session (${reasons.join("; ")}): PolKit can't show an approval dialog. ` +
+    `Headless use needs ABRA_KEYSTORE=passphrase-file (then approvals prompt for the vault passphrase on the terminal; use ssh -t). ` +
+    `Migrating from keytar is coming via \`abra keystore migrate\`.`
+  );
+}
+
 export function probePolkit(deps: Pick<PolkitAuthDeps, "existsSync"> = {}): PolkitProbeResult {
   if (probeOverride) return probeOverride();
   return probeWith(deps.existsSync ?? existsSync);
@@ -137,23 +149,38 @@ export class PolkitAuth implements PlatformAuth {
   }
 
   async authenticate(req: AuthRequest): Promise<void> {
+    const env = this.deps.env ?? process.env;
+    const platform = this.deps.platform ?? process.platform;
+    const headless = detectHeadlessSession(env, platform);
+    const authExplicit = Boolean(env.ABRA_AUTH);
+
+    // Auto-selected polkit on a headless session cannot show a dialog — deny
+    // before pkcheck. Explicit ABRA_AUTH=polkit still attempts pkcheck.
+    if (headless.headless && !authExplicit) {
+      throw new Error(
+        `abracadabra: approval denied — ${req.reason}. ${headlessPolkitHint(headless.reasons)}`,
+      );
+    }
+
     // Check the (injectable) filesystem, never the test probe override:
     // a missing pkcheck or policy denies before any exec.
     const probe = probeWith(this.deps.existsSync ?? existsSync);
     const pkcheck = probe.pkcheck;
     if (!probe.ok || !pkcheck) {
-      throw new Error(
+      throw denyWithOptionalHeadlessHint(
         `abracadabra: PolKit approval denied — ${req.reason}. ` +
           `PolKit is not set up (${probe.detail ?? "unknown"}). ` +
           `Install the policy: ${POLKIT_INSTALL_HINT} ` +
           `(ABRA_AUTH=password is an explicit, less-safe opt-in that skips the identity check).`,
+        headless.headless && authExplicit ? headless.reasons : null,
       );
     }
 
     const getuid = this.deps.getuid ?? process.getuid;
     if (typeof getuid !== "function") {
-      throw new Error(
+      throw denyWithOptionalHeadlessHint(
         `abracadabra: PolKit approval denied — ${req.reason}. process.getuid is unavailable.`,
+        headless.headless && authExplicit ? headless.reasons : null,
       );
     }
 
@@ -171,9 +198,18 @@ export class PolkitAuth implements PlatformAuth {
     try {
       await execFile(pkcheck, args, { timeout: timeoutSeconds * 1000 });
     } catch (err) {
-      throw denyError(req.reason, err);
+      const base = denyError(req.reason, err);
+      if (headless.headless && authExplicit) {
+        throw new Error(`${base.message} ${headlessPolkitHint(headless.reasons)}`);
+      }
+      throw base;
     }
   }
+}
+
+function denyWithOptionalHeadlessHint(message: string, reasons: string[] | null): Error {
+  if (reasons) return new Error(`${message} ${headlessPolkitHint(reasons)}`);
+  return new Error(message);
 }
 
 function denyError(reason: string, err: unknown): Error {

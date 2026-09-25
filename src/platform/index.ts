@@ -5,12 +5,17 @@ import { PassphraseFileKeystore } from "./keystore-passphrase.js";
 import { MacOSTouchIdAuth } from "./auth-macos.js";
 import { PasswordPromptAuth } from "./auth-password.js";
 import { PolkitAuth, probePolkit, setProbePolkitForTests } from "./auth-polkit.js";
+import { PassphraseAuth } from "./auth-passphrase.js";
 import { NoAuth } from "./auth-none.js";
 import {
+  authSelectionReason,
   biometricsSkipped,
+  detectHeadlessSession,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
+  VALID_AUTH_BACKENDS,
+  type HeadlessDetection,
 } from "./env.js";
 import { resetSessionForTests, isSessionUnlocked, lockSession } from "./session.js";
 import { isPassphraseVaultLocked } from "./keystore-passphrase.js";
@@ -22,7 +27,15 @@ import { resolveMasterKey } from "../core/masterKey.js";
 
 export type { AuthRequest, PlatformAuth, PlatformKeystore } from "./types.js";
 export { KeystoreError } from "./types.js";
-export { biometricsSkipped, resolveAuthBackend, resolveKeystoreBackend } from "./env.js";
+export {
+  authSelectionReason,
+  biometricsSkipped,
+  detectHeadlessSession,
+  resolveAuthBackend,
+  resolveKeystoreBackend,
+  VALID_AUTH_BACKENDS,
+} from "./env.js";
+export type { HeadlessDetection } from "./env.js";
 export { lockSession, isSessionUnlocked } from "./session.js";
 export { VaultLockedError } from "./keystore-passphrase.js";
 export { probeKeytar } from "./keystore-keytar.js";
@@ -69,12 +82,16 @@ export function createAuth(): PlatformAuth {
         throw new Error(`ABRA_AUTH=polkit requires Linux. ${UNSUPPORTED_PLATFORM_HINT}`);
       }
       return new PolkitAuth();
+    case "passphrase":
+      return new PassphraseAuth();
     case "password":
       return new PasswordPromptAuth();
     case "none":
       return new NoAuth();
     default:
-      throw new Error(`Unknown ABRA_AUTH="${backend}". ${UNSUPPORTED_PLATFORM_HINT}`);
+      throw new Error(
+        `Unknown ABRA_AUTH="${backend}". Valid values: ${VALID_AUTH_BACKENDS.join(", ")}. ${UNSUPPORTED_PLATFORM_HINT}`,
+      );
   }
 }
 
@@ -130,15 +147,19 @@ export function platformInfo(): {
   platform: NodeJS.Platform;
   keystore: string;
   auth: string;
+  authSelectionReason: string;
   biometricsSkipped: boolean;
   vaultLocked: boolean;
+  headless: HeadlessDetection;
 } {
   return {
     platform: process.platform,
     keystore: resolveKeystoreBackend(),
     auth: resolveAuthBackend(),
+    authSelectionReason: authSelectionReason(),
     biometricsSkipped: biometricsSkipped(),
     vaultLocked: resolveKeystoreBackend() === "passphrase-file" && isPassphraseVaultLocked(),
+    headless: detectHeadlessSession(),
   };
 }
 
@@ -153,7 +174,9 @@ export async function platformHealth(): Promise<{
   if (resolveKeystoreBackend() === "keytar") {
     out.keytar = await probeKeytar();
   }
-  if (process.platform === "linux" || resolveAuthBackend() === "polkit") {
+  const auth = resolveAuthBackend();
+  // PolKit not needed when passphrase auth is selected.
+  if (auth !== "passphrase" && (process.platform === "linux" || auth === "polkit")) {
     out.polkit = probePolkit();
   }
   return out;

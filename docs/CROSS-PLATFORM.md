@@ -325,6 +325,7 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 | 2026-09-01 | Tier 1 B–E (except README + CI): keytar, passphrase-file, password auth, unlock/lock, doctor |
 | 2026-09-25 | Linux PolKit per-reveal gate (`auth-polkit`, policy + `install-polkit.sh`); password prompt → stderr |
 | 2026-09-25 | Passphrase-file H1: v2 wrap (scrypt 2^17 + AAD), tty-only prompt, no cached passphrase, unlock backoff |
+| 2026-09-25 | H2: headless passphrase auth backend + headless-aware Linux auth selection (no password auto-select) |
 
 ---
 
@@ -352,18 +353,41 @@ Requires `pkcheck` (usually `/usr/bin/pkcheck` from the `polkit` package).
 
 | Condition | Auth backend |
 |-----------|--------------|
-| `ABRA_AUTH` set | that value (`polkit` / `password` / `none` / …) |
+| `ABRA_AUTH` set | that value (`polkit` / `passphrase` / `password` / `none` / …) |
 | `ABRA_SKIP_BIOMETRICS=1` | `none` |
-| Linux | `polkit` (reveals denied until `pkcheck` + policy are installed) |
+| macOS | `macos-touchid` |
+| Linux, headless + `ABRA_KEYSTORE=passphrase-file` | `passphrase` (tty vault-passphrase prompt) |
+| Linux, headless + other keystore | `polkit` (denies immediately — no dialog) |
+| Linux, graphical | `polkit` |
 | Windows / other | `password` |
 
-`ABRA_AUTH=password` on Linux is an **explicit, less-safe opt-in** (press-Enter confirm, no identity check); it is never selected automatically. `abra doctor` flags a missing policy as a failure. `ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
+`ABRA_AUTH=password` on Linux is an **explicit, less-safe opt-in** (press-Enter confirm, no identity check); it is **never** selected automatically. `abra doctor` flags a missing policy as a failure when auth is `polkit`. `ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
+
+### Headless Linux (SSH / no desktop)
+
+**Detection** (`detectHeadlessSession`, Linux only): headless when `SSH_CONNECTION` or `SSH_TTY` is non-empty, **or** when neither `WAYLAND_DISPLAY` nor `DISPLAY` is set and `XDG_SESSION_TYPE` is not `wayland`/`x11`. Non-Linux reports `headless: false` with a “not linux” reason.
+
+**Auth selection (auto, no `ABRA_AUTH`):**
+
+| Session | Keystore | Auth |
+|---------|----------|------|
+| Headless | `passphrase-file` | `passphrase` |
+| Headless | `keytar` (default) / other | `polkit` → **denied** (no dialog); set `ABRA_KEYSTORE=passphrase-file` (`abra keystore migrate` coming) |
+| Graphical | any | `polkit` |
+
+**Passphrase approval (`ABRA_AUTH=passphrase` or auto headless + passphrase-file):**
+
+- Requires a controlling terminal — use `ssh -t`. Without a TTY: denied with an `ssh -t` / `abra grant` hint.
+- **Every** reveal prompts for the vault passphrase (no grace window, no caching). Wrong guesses count toward unlock backoff (same counter as `abra unlock`).
+- On success, a locked passphrase-file session is unlocked (same effect as `abra unlock`) so the reveal can proceed; the next reveal still prompts.
+- MCP / HTTP API while headless cannot complete passphrase approval without a TTY — use a scoped API key (`abra grant` / `abra keys new`).
+- `ABRA_AUTH=password` is never auto-selected on Linux.
 
 ### MCP / headless
 
-MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless or plain SSH sessions without an agent are denied.
+MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless SSH without `passphrase-file` is denied by PolKit auth; with `passphrase-file`, approvals prompt on the terminal (`ssh -t`).
 
-The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit or a scoped API key for agents.
+The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit, passphrase-file + tty, or a scoped API key for agents.
 
 ### Omarchy / Quickshell
 

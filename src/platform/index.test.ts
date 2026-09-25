@@ -131,6 +131,26 @@ describe("linux auth selection", () => {
     expect(createAuth().id).toBe("none");
   });
 
+  it("headless + passphrase-file selects passphrase", () => {
+    process.env.ABRA_KEYSTORE = "passphrase-file";
+    process.env.SSH_CONNECTION = "10.0.0.1 22 10.0.0.2 22";
+    delete process.env.DISPLAY;
+    delete process.env.WAYLAND_DISPLAY;
+    expect(resolveAuthBackend()).toBe("passphrase");
+    expect(createAuth().id).toBe("passphrase");
+  });
+
+  it("createAuth returns PassphraseAuth for ABRA_AUTH=passphrase", () => {
+    process.env.ABRA_AUTH = "passphrase";
+    expect(createAuth().id).toBe("passphrase");
+  });
+
+  it("unknown ABRA_AUTH lists valid values", () => {
+    process.env.ABRA_AUTH = "nope-backend";
+    expect(() => createAuth()).toThrow(/Valid values:.*passphrase/);
+    expect(() => createAuth()).toThrow(/polkit/);
+  });
+
   it("rejects ABRA_AUTH=polkit on non-linux", () => {
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
     process.env.ABRA_AUTH = "polkit";

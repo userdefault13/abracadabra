@@ -93,22 +93,32 @@ export class PassphraseFileKeystore implements PlatformKeystore {
     if (!masterKeyFileExists()) {
       throw new Error("No master key file — run any vault command to initialize, or restore from USB");
     }
-    assertUnlockAllowed();
-    let key: Buffer;
-    try {
-      key = readMasterKeyFile(passphrase);
-    } catch (err) {
-      if (err instanceof WrongPassphraseError) {
-        recordUnlockFailure();
-        throw err;
-      }
-      // I/O / format errors — do not increment the counter.
-      throw err;
-    }
-    resetUnlockAttempts();
+    const key = verifyVaultPassphrase(passphrase);
     unlockSession(key);
     return key;
   }
+}
+
+/**
+ * Assert backoff, decrypt master.key.enc, record/reset unlock attempts.
+ * Shared by `abra unlock` and PassphraseAuth so there is one verification path.
+ * Caller owns the returned Buffer (unlock or zero-fill).
+ */
+export function verifyVaultPassphrase(passphrase: string): Buffer {
+  assertUnlockAllowed();
+  let key: Buffer;
+  try {
+    key = readMasterKeyFile(passphrase);
+  } catch (err) {
+    if (err instanceof WrongPassphraseError) {
+      recordUnlockFailure();
+      throw err;
+    }
+    // I/O / format errors — do not increment the counter.
+    throw err;
+  }
+  resetUnlockAttempts();
+  return key;
 }
 
 export function isPassphraseVaultLocked(): boolean {
