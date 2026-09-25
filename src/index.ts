@@ -63,7 +63,8 @@ program
 
 program
   .command("get <project> <key>")
-  .description("Print a var value to stdout")
+  .description("Print a var value to stdout (newline-terminated)")
+  .option("-n, --raw", "print the exact bytes with no trailing newline")
   .action(getVar);
 
 program

@@ -1,6 +1,6 @@
 {
   "name": "@userdefault/abracadabra",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Terminal vault for env vars & passwords with biometric-gated local API",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
