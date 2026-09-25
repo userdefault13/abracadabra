@@ -145,10 +145,8 @@ export function resolvePeerPidFromSs(
   const pid = peers[0].pid;
   if (pid === null || pid <= 0) return null;
 
-  // Ambiguity: another row also claims this pid for a different pairing.
-  const samePid = entries.filter((e) => e.pid === pid);
-  if (samePid.length !== 1) return null;
-
+  // Pairing is uniquely determined by inode uniqueness above. Do not reject
+  // when the same pid appears on other ESTAB rows (e.g. D-Bus / Secret Service).
   return pid;
 }
 
@@ -222,6 +220,8 @@ export function nodeOptionsAreDangerous(nodeOptions: string | undefined): boolea
  * - peer argv[1] realpath == this package's dist/index.js (Node puts the script
  *   at argv[1] for both `node dist/index.js` and shebang `abra`; an installed
  *   `abra` bin that realpaths to the same file is therefore allowed)
+ * - relative argv[1] is resolved against the peer's cwd (not the agent's) before
+ *   realpath; missing peer cwd with a relative script → `peer_cwd_unreadable`
  * - no node flags before the script (argv[1] must not start with `-`)
  * - NODE_OPTIONS contains none of the dangerous inject/debug flags
  */
@@ -232,6 +232,8 @@ export function isAllowedAbraCliPeer(
     peerArgv: string[];
     cliEntrypointRealpath: string;
     nodeOptions?: string;
+    /** Peer process cwd from `/proc/<pid>/cwd`; required when argv[1] is relative. */
+    peerCwd?: string;
     realpathSync?: (p: string) => string;
   },
 ): { allowed: true } | { allowed: false; reason: string } {
@@ -257,9 +259,17 @@ export function isAllowedAbraCliPeer(
     return { allowed: false, reason: "node_flags_in_argv" };
   }
 
+  let scriptAbs = scriptArg;
+  if (!path.isAbsolute(scriptArg)) {
+    if (!opts.peerCwd) {
+      return { allowed: false, reason: "peer_cwd_unreadable" };
+    }
+    scriptAbs = path.resolve(opts.peerCwd, scriptArg);
+  }
+
   let scriptReal: string;
   try {
-    scriptReal = realpath(scriptArg);
+    scriptReal = realpath(scriptAbs);
   } catch {
     return { allowed: false, reason: "script_realpath_failed" };
   }
@@ -376,12 +386,27 @@ export async function authorizePeer(
     return { ok: false, reason: "environ_read_failed" };
   }
 
+  // Relative argv[1] must be resolved against the peer's cwd, not the agent's.
+  // Otherwise a peer can run `node usr/lib/.../index.js` from an attacker cwd
+  // that collides when realpath'd from the agent process.
+  let peerCwd: string | undefined;
+  try {
+    peerCwd = readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    peerCwd = undefined;
+  }
+  const scriptArg = argv[1];
+  if (scriptArg && !path.isAbsolute(scriptArg) && peerCwd === undefined) {
+    return { ok: false, reason: "peer_cwd_unreadable" };
+  }
+
   const verdict = isAllowedAbraCliPeer({
     peerExeRealpath: peerExe,
     agentExecRealpath: agentExec,
     peerArgv: argv,
     cliEntrypointRealpath: cliEntrypoint,
     nodeOptions,
+    peerCwd,
     realpathSync,
   });
 

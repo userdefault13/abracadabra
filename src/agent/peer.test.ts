@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type net from "node:net";
+import path from "node:path";
 import {
   parseSsUnixXpn,
   resolvePeerPidFromSs,
@@ -58,6 +59,26 @@ u_str ESTAB 0 0 * 40322 * 40321
   it("rejects malformed ss output", () => {
     expect(parseSsUnixXpn("garbage\nnot ss\n")).toEqual([]);
     expect(resolvePeerPidFromSs([], 1)).toBeNull();
+  });
+
+  it("still resolves when the peer pid holds an unrelated extra socket", () => {
+    // Legitimate abra CLI may also hold D-Bus / Secret Service sockets (keytar).
+    // Pairing is uniquely determined by inodes; same pid on other rows is OK.
+    const withExtra = `
+u_str ESTAB 0 0 /run/agent.sock 40321 * 40322 users:(("node",pid=1111,fd=20))
+u_str ESTAB 0 0 * 40322 * 40321 users:(("node",pid=2222,fd=3))
+u_str ESTAB 0 0 * 60001 * 60002 users:(("node",pid=2222,fd=10))
+u_str ESTAB 0 0 * 60002 * 60001 users:(("dbus-daemon",pid=5555,fd=12))
+`.trim();
+    expect(resolvePeerPidFromSs(parseSsUnixXpn(withExtra), 40321)).toBe(2222);
+  });
+
+  it("drops pid when a line has multiple users:(...) groups", () => {
+    const multiUsers = `
+u_str ESTAB 0 0 /run/agent.sock 40321 * 40322 users:(("node",pid=1111,fd=20))
+u_str ESTAB 0 0 * 40322 * 40321 users:(("node",pid=2222,fd=3)) users:(("evil",pid=9999,fd=4))
+`.trim();
+    expect(resolvePeerPidFromSs(parseSsUnixXpn(multiUsers), 40321)).toBeNull();
   });
 });
 
@@ -161,6 +182,70 @@ describe("isAllowedAbraCliPeer", () => {
     });
     expect(r).toEqual({ allowed: false, reason: "dangerous_node_options" });
   });
+
+  it("resolves relative argv[1] against peer cwd (allowed when it is the entrypoint)", () => {
+    const relative = "usr/lib/abracadabra/dist/index.js";
+    const peerCwd = "/";
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerArgv: [node, relative, "ls"],
+      cliEntrypointRealpath: cli,
+      peerCwd,
+      realpathSync: (p) => {
+        if (p === path.resolve(peerCwd, relative)) return cli;
+        return realpathSync(p);
+      },
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("rejects relative argv[1] when peer cwd differs (agent-cwd resolution would match)", () => {
+    // Attacker runs from /tmp/evil with relative path that would realpath to
+    // the real entrypoint if resolved against the agent's cwd (/).
+    const relative = "usr/lib/abracadabra/dist/index.js";
+    const agentCwd = "/";
+    const peerCwd = "/tmp/evil";
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerArgv: [node, relative, "ls"],
+      cliEntrypointRealpath: cli,
+      peerCwd,
+      realpathSync: (p) => {
+        // Peer-cwd resolution → malicious copy, not the real entrypoint.
+        if (p === path.resolve(peerCwd, relative)) return "/tmp/evil/" + relative;
+        // Agent-cwd resolution would "match" the real CLI — must not be used.
+        if (p === path.resolve(agentCwd, relative) || p === relative) return cli;
+        return realpathSync(p);
+      },
+    });
+    expect(r).toEqual({ allowed: false, reason: "argv_script_mismatch" });
+  });
+
+  it("rejects relative argv[1] when peer cwd is unreadable", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerArgv: [node, "usr/lib/abracadabra/dist/index.js", "ls"],
+      cliEntrypointRealpath: cli,
+      // peerCwd omitted
+      realpathSync,
+    });
+    expect(r).toEqual({ allowed: false, reason: "peer_cwd_unreadable" });
+  });
+
+  it("leaves absolute argv[1] unaffected (no peer cwd needed)", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      // no peerCwd
+      realpathSync,
+    });
+    expect(r).toEqual({ allowed: true });
+  });
 });
 
 describe("authorizePeer (injected, no real /proc or ss)", () => {
@@ -244,5 +329,74 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
       },
     });
     expect(r).toEqual({ ok: false, reason: "exe_mismatch" });
+  });
+
+  it("rejects relative argv[1] when peer cwd is unreadable", async () => {
+    const node = "/usr/bin/node";
+    const cli = "/opt/abra/dist/index.js";
+    const relative = "usr/lib/abracadabra/dist/index.js";
+    const r = await authorizePeer(fakeSocket(), {
+      platform: "linux",
+      execPath: node,
+      cliEntrypoint: cli,
+      getSocketFd: () => 20,
+      readlinkSync: (p) => {
+        if (p === "/proc/self/fd/20") return "socket:[40321]";
+        // /proc/2222/cwd unreadable
+        throw new Error("cwd unreadable");
+      },
+      runSs: async () => SS_FIXTURE,
+      realpathSync: (p) => {
+        if (p === `/proc/2222/exe`) return node;
+        if (p === node || p === cli) return p;
+        return p;
+      },
+      readFileSync: (p) => {
+        if (p === "/proc/2222/cmdline") {
+          return Buffer.from(`${node}\0${relative}\0ls\0`);
+        }
+        if (p === "/proc/2222/environ") {
+          return Buffer.from("PATH=/usr/bin\0");
+        }
+        throw new Error("unexpected read " + p);
+      },
+    });
+    expect(r).toEqual({ ok: false, reason: "peer_cwd_unreadable" });
+  });
+
+  it("allows relative argv[1] resolved against peer cwd to the real entrypoint", async () => {
+    const node = "/usr/bin/node";
+    const cli = "/opt/abra/dist/index.js";
+    const relative = "opt/abra/dist/index.js";
+    const peerCwd = "/";
+    const r = await authorizePeer(fakeSocket(), {
+      platform: "linux",
+      execPath: node,
+      cliEntrypoint: cli,
+      getSocketFd: () => 20,
+      readlinkSync: (p) => {
+        if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/cwd") return peerCwd;
+        throw new Error("unexpected readlink " + p);
+      },
+      runSs: async () => SS_FIXTURE,
+      realpathSync: (p) => {
+        if (p === `/proc/2222/exe`) return node;
+        if (p === path.resolve(peerCwd, relative)) return cli;
+        if (p === node || p === cli) return p;
+        return p;
+      },
+      readFileSync: (p) => {
+        if (p === "/proc/2222/cmdline") {
+          return Buffer.from(`${node}\0${relative}\0ls\0`);
+        }
+        if (p === "/proc/2222/environ") {
+          return Buffer.from("PATH=/usr/bin\0");
+        }
+        throw new Error("unexpected read " + p);
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.pid).toBe(2222);
   });
 });
