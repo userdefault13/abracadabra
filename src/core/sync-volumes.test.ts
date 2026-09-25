@@ -21,6 +21,8 @@ describe("volumes", () => {
 
   it("resolves relative volume names per platform", () => {
     expect(resolveVolumePath("STICK", "darwin")).toBe("/Volumes/STICK");
+    // posix separators for linux targets regardless of host OS
+    expect(resolveVolumePath("STICK", "linux")).toMatch(/^\/(run\/media|media|mnt)\/(.+\/)?STICK$/);
     expect(volumesRootLabel("darwin")).toBe("/Volumes");
     expect(volumesRootLabel("linux")).toMatch(/media/);
   });
