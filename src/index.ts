@@ -249,15 +249,15 @@ program
     cmdLock();
     try {
       await lockAgent();
-      console.error("✓ abra-agent locked");
+      console.log("✓ abra-agent locked");
     } catch {
-      /* no agent running */
+      console.log("(no abra-agent running)");
     }
   });
 
 program
   .command("agent")
-  .description("Run the per-user vault agent (holds unlocked key in memory; idle lock)")
+  .description("Run the per-user vault agent (holds unlocked key in memory; idle + max-age + sleep lock)")
   .action(async () => {
     installSignalHandlers();
     const { socketPath } = await startAgent();

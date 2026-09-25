@@ -4,6 +4,9 @@ import path from "node:path";
 /** Default idle lock: 15 minutes. Override with ABRA_AGENT_IDLE_SECONDS. */
 export const DEFAULT_IDLE_SECONDS = 15 * 60;
 
+/** Absolute max unlock age: 8 hours (hard ceiling). Override with ABRA_AGENT_MAX_AGE_SECONDS. */
+export const DEFAULT_MAX_AGE_SECONDS = 8 * 60 * 60;
+
 /**
  * Whether vault I/O should try the background agent.
  *
@@ -26,6 +29,18 @@ export function resolveIdleSeconds(): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_IDLE_SECONDS;
   return Math.floor(n);
+}
+
+/**
+ * Absolute unlock lifetime (seconds). Invalid → default 8h.
+ * Values above 8h are clamped to 8h. Activity does not extend this.
+ */
+export function resolveMaxAgeSeconds(): number {
+  const raw = process.env.ABRA_AGENT_MAX_AGE_SECONDS?.trim();
+  if (!raw) return DEFAULT_MAX_AGE_SECONDS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MAX_AGE_SECONDS;
+  return Math.min(DEFAULT_MAX_AGE_SECONDS, Math.floor(n));
 }
 
 /**

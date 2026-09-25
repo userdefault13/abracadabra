@@ -61,7 +61,9 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     process.env.ABRA_DIR = tmpDir;
     process.env.ABRA_AGENT = "1";
     process.env.ABRA_AGENT_SOCKET = socketPath;
-    process.env.ABRA_KEYSTORE = "passphrase-file";
+    // Classic agent tests exercise keytar-style unlock via injected resolveMasterKey.
+    // Passphrase-file unlock.key coverage lives in agent-passphrase.test.ts.
+    process.env.ABRA_KEYSTORE = "keytar";
     process.env.ABRA_AUTH = "none";
     process.env.ABRA_SKIP_BIOMETRICS = "1";
   });
@@ -83,18 +85,25 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => vaultPath,
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
 
     const st0 = await agentStatus({ socketPath });
     expect(st0.locked).toBe(true);
     expect(st0.idleRemainingMs).toBeNull();
+    expect(st0.maxAgeRemainingMs).toBeNull();
     expect(JSON.stringify(st0)).not.toMatch(/[A-Za-z0-9+/]{40,}={0,2}/); // no key-like blobs
 
     await agentUnlock({ socketPath });
     const st1 = await agentStatus({ socketPath });
     expect(st1.locked).toBe(false);
     expect(st1.idleRemainingMs).toBeTypeOf("number");
-    expect(Object.keys(st1).sort()).toEqual(["idleRemainingMs", "locked"]);
+    expect(st1.maxAgeRemainingMs).toBeTypeOf("number");
+    expect(Object.keys(st1).sort()).toEqual([
+      "idleRemainingMs",
+      "locked",
+      "maxAgeRemainingMs",
+    ]);
 
     const vault: Vault = emptyVault();
     vault.projects.demo = {
@@ -121,6 +130,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => vaultPath,
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     await agentUnlock({ socketPath });
     const buf = state.getKeyBufferForTests();
@@ -212,6 +222,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => vaultPath,
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     expect(first.socketPath).toBe(socketPath);
 
@@ -221,6 +232,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
         resolveMasterKey: async () => masterKey,
         vaultPath: () => vaultPath,
         authorizePeer: allowPeer,
+        sleepWatch: false,
       }),
     ).rejects.toThrow(/already running/);
 
@@ -234,6 +246,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => vaultPath,
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     const vault = emptyVault();
     vault.projects.x = { createdAt: 1, vars: {} };
@@ -257,7 +270,11 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       const buf = state.getKeyBufferForTests()!;
       state.lock();
       expect(buf.every((b) => b === 0)).toBe(true);
-      expect(state.status()).toEqual({ locked: true, idleRemainingMs: null });
+      expect(state.status()).toEqual({
+        locked: true,
+        idleRemainingMs: null,
+        maxAgeRemainingMs: null,
+      });
     });
   });
 
@@ -267,6 +284,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => vaultPath,
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     await agentUnlock({ socketPath });
     // Status never includes key material:
@@ -284,6 +302,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => path.resolve(vaultPath),
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     const v = emptyVault();
     v.projects.round = {
@@ -309,6 +328,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => agentVault,
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     await agentUnlock({ socketPath });
     const seed = emptyVault();
@@ -320,6 +340,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     const agentBytesBefore = fs.readFileSync(agentVault);
 
     process.env.ABRA_DIR = clientDir;
+    process.env.ABRA_KEYSTORE = "passphrase-file";
     process.env.ABRA_HEADLESS_PASSPHRASE = "fallback-mismatch-pass";
     const { writeMasterKeyFile } = await import("../platform/master-key-file.js");
     const { unlockSession } = await import("../platform/session.js");
@@ -357,8 +378,10 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       vaultPath: () => path.resolve(vaultPath),
       keystoreBackend: () => "keytar",
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
-    // Client env is passphrase-file
+    // Client env is passphrase-file (differs from agent's keytar)
+    process.env.ABRA_KEYSTORE = "passphrase-file";
     await expect(agentVaultLoad({ socketPath })).rejects.toMatchObject({
       code: "mismatch",
     });
@@ -370,6 +393,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => path.resolve(vaultPath),
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     await agentUnlock({ socketPath });
     const res = await agentRequest({ op: "vault.load" }, { socketPath });
@@ -385,6 +409,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       },
       vaultPath: () => path.resolve(vaultPath),
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
 
     await expect(agentUnlock({ socketPath })).rejects.toMatchObject({
@@ -394,6 +419,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       isAgentUnavailable(new AgentClientError("locked vault", "unavailable")),
     ).toBe(true);
 
+    process.env.ABRA_KEYSTORE = "passphrase-file";
     process.env.ABRA_HEADLESS_PASSPHRASE = "unlock-fail-pass";
     const { writeMasterKeyFile } = await import("../platform/master-key-file.js");
     const { unlockSession } = await import("../platform/session.js");
@@ -420,6 +446,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => path.resolve(vaultPath),
       authorizePeer: denyPeer,
+      sleepWatch: false,
     });
 
     // status / lock do not require abra CLI peer
@@ -438,6 +465,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       ),
     ).toBe(true);
 
+    process.env.ABRA_KEYSTORE = "passphrase-file";
     process.env.ABRA_HEADLESS_PASSPHRASE = "forbidden-peer-pass";
     const { writeMasterKeyFile } = await import("../platform/master-key-file.js");
     const { unlockSession } = await import("../platform/session.js");
@@ -463,6 +491,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       resolveMasterKey: async () => masterKey,
       vaultPath: () => path.resolve(vaultPath),
       authorizePeer: allowPeer,
+      sleepWatch: false,
     });
     await agentUnlock({ socketPath });
     const v = emptyVault();

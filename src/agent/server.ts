@@ -7,6 +7,7 @@ import {
   ensureAgentRuntimeDir,
   resolveAgentSocketPath,
   resolveIdleSeconds,
+  resolveMaxAgeSeconds,
 } from "./paths.js";
 import { AgentState, type ResolveMasterKeyFn } from "./state.js";
 import {
@@ -37,11 +38,21 @@ import {
   type PeerAuthResult,
   type PeerCheckDeps,
 } from "./peer.js";
+import {
+  startSleepWatch,
+  type SleepWatchFactory,
+  type SleepWatchHandle,
+} from "./sleep-watch.js";
 
 export type { AgentStatusBody };
 
-/** Ops that return key material or unlock the in-memory master key. */
-const SENSITIVE_OPS = new Set<AgentOp>(["unlock", "vault.load", "vault.save"]);
+/** Ops that unlock the in-memory master key or return vault plaintext. */
+const SENSITIVE_OPS = new Set<AgentOp>([
+  "unlock",
+  "unlock.key",
+  "vault.load",
+  "vault.save",
+]);
 
 export type AuthorizePeerFn = (
   socket: net.Socket,
@@ -50,6 +61,7 @@ export type AuthorizePeerFn = (
 export interface StartAgentOpts {
   socketPath?: string;
   idleSeconds?: number;
+  maxAgeSeconds?: number;
   /** Injectable master-key resolution (tests). Default: resolveMasterKey(getKeystore()). */
   resolveMasterKey?: ResolveMasterKeyFn;
   /** Injectable vault.enc path (defaults to vaultFile()). */
@@ -63,6 +75,13 @@ export interface StartAgentOpts {
   authorizePeer?: AuthorizePeerFn;
   /** Extra deps for the default Linux peer check (tests). */
   peerCheckDeps?: PeerCheckDeps;
+  /**
+   * Sleep/suspend lock via logind PrepareForSleep.
+   * - omit / undefined → start default sleep watch on Linux
+   * - `false` → disable
+   * - factory → inject for tests
+   */
+  sleepWatch?: false | SleepWatchFactory;
 }
 
 let running: {
@@ -72,6 +91,7 @@ let running: {
   vaultPath: () => string;
   keystoreBackend: () => string;
   authorizePeer: AuthorizePeerFn;
+  sleepWatch: SleepWatchHandle | null;
 } | null = null;
 
 function logOp(op: string, detail?: string): void {
@@ -81,6 +101,23 @@ function logOp(op: string, detail?: string): void {
 
 function fail(id: string, code: AgentErrorCode, error: string): AgentResponse {
   return { v: PROTOCOL_VERSION, id, ok: false, error, code };
+}
+
+/** Strict base64 → exactly 32 bytes. Returns null on any violation. */
+function decodeMasterKeyB64(raw: unknown): Buffer | null {
+  if (typeof raw !== "string" || !raw) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return null;
+  if (raw.length % 4 !== 0) return null;
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(raw, "base64");
+  } catch {
+    return null;
+  }
+  if (buf.length !== 32) return null;
+  // Round-trip rejects non-canonical / ignored characters.
+  if (buf.toString("base64") !== raw) return null;
+  return buf;
 }
 
 /** Refuse vault I/O that would touch a different vault / keystore than this agent. */
@@ -148,7 +185,7 @@ async function handleRequest(
 
     switch (op) {
       case "status": {
-        // Same-uid status is safe: locked + idleRemainingMs only (no secrets).
+        // Same-uid status is safe: locked + remaining timers only (no secrets).
         logOp("status");
         return {
           v: PROTOCOL_VERSION,
@@ -159,9 +196,62 @@ async function handleRequest(
         };
       }
       case "unlock": {
+        // Passphrase-file agents never prompt / never call getOrCreateMasterKey.
+        // The CLI pushes the key via unlock.key after a tty passphrase prompt.
+        if (keystoreBackend() === "passphrase-file" && state.isLocked()) {
+          logOp("unlock", "locked");
+          return fail(
+            id,
+            "locked",
+            "agent locked — run: abra unlock (on a terminal)",
+          );
+        }
         logOp("unlock");
         await state.unlock();
         return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock" };
+      }
+      case "unlock.key": {
+        const agentKs = keystoreBackend();
+        // Binding: must be passphrase-file on both sides and match the agent.
+        if (agentKs !== "passphrase-file") {
+          return fail(
+            id,
+            "mismatch",
+            "unlock.key requires passphrase-file keystore on the agent",
+          );
+        }
+        const bindErr = checkVaultBinding(id, req, vaultPath(), agentKs);
+        if (bindErr) return bindErr;
+        if (req.keystoreBackend !== "passphrase-file") {
+          return fail(
+            id,
+            "mismatch",
+            "unlock.key requires keystoreBackend passphrase-file",
+          );
+        }
+
+        const decoded = decodeMasterKeyB64(req.key);
+        if (!decoded) {
+          return fail(id, "bad_request", "key must be base64-encoded 32 bytes");
+        }
+
+        try {
+          const file = vaultPath();
+          if (fs.existsSync(file)) {
+            try {
+              const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+              decryptVault(raw, decoded);
+            } catch {
+              decoded.fill(0);
+              return fail(id, "bad_request", "key does not decrypt vault");
+            }
+          }
+          state.unlockWithKey(decoded);
+          logOp("unlock.key", "ok");
+          return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock.key" };
+        } finally {
+          decoded.fill(0);
+        }
       }
       case "lock": {
         // Same-uid lock only reduces access (zeroes the in-memory key).
@@ -225,8 +315,8 @@ async function handleRequest(
       (e as { code: string }).code === "locked"
     ) {
       code = "locked";
-    } else if (op === "unlock") {
-      code = "unavailable";
+    } else if (op === "unlock" || op === "unlock.key") {
+      code = op === "unlock" ? "unavailable" : "bad_request";
     }
     logOp(op, `error=${code}`);
     return fail(id, code, msg);
@@ -317,8 +407,10 @@ async function probeExistingAgent(socketPath: string): Promise<boolean> {
  * Start the per-user abra agent (unix socket). Holds the master key in memory
  * after unlock; does not call authenticate() / PolKit.
  *
- * Sensitive ops (`unlock`, `vault.load`, `vault.save`) require an abra CLI peer
- * (Linux ss+/proc check; fail closed on non-Linux / ambiguity).
+ * Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`) require an
+ * abra CLI peer (Linux ss+/proc check; fail closed on non-Linux / ambiguity).
+ *
+ * A fresh process always starts locked (no key persistence across reboot).
  */
 export async function startAgent(opts?: StartAgentOpts): Promise<{
   socketPath: string;
@@ -342,8 +434,10 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
 
   const state = new AgentState({
     idleSeconds: opts?.idleSeconds ?? resolveIdleSeconds(),
+    maxAgeSeconds: opts?.maxAgeSeconds ?? resolveMaxAgeSeconds(),
     resolveMasterKey: opts?.resolveMasterKey,
     onIdleLock: () => logOp("idle-lock"),
+    onMaxAgeLock: () => logOp("max-age-lock"),
   });
   const vaultPath = opts?.vaultPath ?? (() => vaultFile());
   const keystoreBackend = opts?.keystoreBackend ?? (() => resolveKeystoreBackend());
@@ -375,15 +469,47 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     process.umask(prevUmask);
   }
 
-  running = { server, state, socketPath, vaultPath, keystoreBackend, authorizePeer: authorize };
+  let sleep: SleepWatchHandle | null = null;
+  if (opts?.sleepWatch === false) {
+    sleep = null;
+  } else if (typeof opts?.sleepWatch === "function") {
+    sleep = opts.sleepWatch({
+      onSleep: () => {
+        state.lock();
+        logOp("sleep-lock");
+      },
+    });
+  } else {
+    sleep = startSleepWatch({
+      onSleep: () => {
+        state.lock();
+        logOp("sleep-lock");
+      },
+    });
+  }
+
+  running = {
+    server,
+    state,
+    socketPath,
+    vaultPath,
+    keystoreBackend,
+    authorizePeer: authorize,
+    sleepWatch: sleep,
+  };
   logOp("listen", socketPath);
   return { socketPath, state };
 }
 
 export async function stopAgent(): Promise<void> {
   if (!running) return;
-  const { server, state, socketPath } = running;
+  const { server, state, socketPath, sleepWatch } = running;
   running = null;
+  try {
+    sleepWatch?.stop();
+  } catch {
+    /* ignore */
+  }
   state.lock();
   await new Promise<void>((resolve) => {
     server.close(() => resolve());

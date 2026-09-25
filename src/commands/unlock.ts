@@ -1,12 +1,33 @@
-import { promptHidden } from "../core/prompt.js";
+import { promptHidden, isNoTerminalError, NoTerminalError } from "../core/prompt.js";
 import {
   lockSession,
   isSessionUnlocked,
   platformInfo,
-  unlockPassphraseVault,
+  authenticate,
 } from "../platform/index.js";
-import { resolveKeystoreBackend } from "../platform/env.js";
+import { resolveKeystoreBackend, resolveAuthBackend } from "../platform/env.js";
+import { verifyVaultPassphrase } from "../platform/keystore-passphrase.js";
+import { unlockSession } from "../platform/session.js";
+import {
+  shouldTryAgent,
+  agentUnlockKey,
+  AgentClientError,
+  resolveAgentSocketPath,
+} from "../agent/index.js";
+import fs from "node:fs";
 
+/**
+ * Unlock the passphrase-file vault for this process, and push the master key
+ * into abra-agent when reachable.
+ *
+ * Approval:
+ * - When `resolveAuthBackend() === "passphrase"`, the unlock passphrase prompt
+ *   IS the approval (single prompt; same verifyVaultPassphrase path incl. backoff).
+ * - Otherwise authenticate() runs first (Touch ID / PolKit / password), then the
+ *   vault passphrase is prompted separately.
+ *
+ * The agent never prompts — it only accepts `unlock.key` from the abra CLI peer.
+ */
 export async function cmdUnlock(): Promise<void> {
   const backend = resolveKeystoreBackend();
   if (backend !== "passphrase-file") {
@@ -14,17 +35,73 @@ export async function cmdUnlock(): Promise<void> {
     if (isSessionUnlocked()) lockSession();
     return;
   }
-  const passphrase = await promptHidden("Vault passphrase: ");
+
+  const authBackend = resolveAuthBackend();
+  if (authBackend !== "passphrase") {
+    await authenticate(
+      "abracadabra: unlock vault (passphrase-file) and load the key into abra-agent",
+    );
+  }
+
+  let passphrase: string;
+  try {
+    passphrase = await promptHidden("Vault passphrase: ");
+  } catch (err) {
+    if (isNoTerminalError(err) || err instanceof NoTerminalError) {
+      throw err instanceof NoTerminalError ? err : new NoTerminalError();
+    }
+    throw err;
+  }
   if (!passphrase) {
     throw new Error("Empty passphrase");
   }
-  await unlockPassphraseVault(passphrase);
-  console.log("✓ Vault unlocked");
+
+  // Shared verify path (#13): counts failures, resets on success.
+  const key = verifyVaultPassphrase(passphrase);
+
+  // Local session unlock (same effect as unlockPassphraseVault).
+  unlockSession(key);
+
+  let agentHoldsKey = false;
+  if (shouldTryAgent()) {
+    let socketPath: string | undefined;
+    try {
+      socketPath = resolveAgentSocketPath();
+    } catch {
+      socketPath = undefined;
+    }
+    if (socketPath && fs.existsSync(socketPath)) {
+      try {
+        await agentUnlockKey(key, { socketPath });
+        agentHoldsKey = true;
+      } catch (e) {
+        const code = e instanceof AgentClientError ? e.code : "error";
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`⚠ abra-agent unlock.key failed (${code}): ${msg}`);
+        console.error(
+          "  Local session is unlocked for this process; start/fix abra-agent and retry unlock to share the key.",
+        );
+      }
+    }
+  }
+
+  key.fill(0);
+
+  if (agentHoldsKey) {
+    console.log(
+      "✓ Vault unlocked (abra-agent holds the key: idle 15m, max 8h)",
+    );
+  } else {
+    console.log(
+      "✓ Vault unlocked for this process only — start abra-agent (systemctl --user start abra-agent) to keep it unlocked between commands",
+    );
+  }
 }
 
+/** Clear the local passphrase session. Agent lock is handled by the CLI wrapper. */
 export function cmdLock(): void {
   lockSession();
-  console.log("✓ Vault locked");
+  console.log("✓ Vault session locked");
 }
 
 export async function cmdUnlockStatus(): Promise<void> {

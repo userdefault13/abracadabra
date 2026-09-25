@@ -20,8 +20,10 @@ import {
 } from "./unlock-attempts.js";
 
 export class VaultLockedError extends Error {
-  constructor() {
-    super("Vault locked — run: abra unlock");
+  constructor(
+    message = "Vault locked — run: abra unlock (with abra-agent running it stays unlocked between commands)",
+  ) {
+    super(message);
     this.name = "VaultLockedError";
   }
 }
