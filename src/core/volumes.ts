@@ -80,14 +80,15 @@ export function resolveVolumePath(target: string, platform = process.platform): 
   if (fs.existsSync(path.join(process.cwd(), target))) {
     return path.join(process.cwd(), target);
   }
-  if (platform === "darwin") return path.join("/Volumes", target);
+  // Target-platform paths use posix separators even when the host is Windows.
+  if (platform === "darwin") return path.posix.join("/Volumes", target);
   if (platform === "linux") {
     const user = os.userInfo().username;
     for (const root of [`/run/media/${user}`, `/media/${user}`, "/mnt"]) {
-      const candidate = path.join(root, target);
+      const candidate = path.posix.join(root, target);
       if (fs.existsSync(candidate)) return candidate;
     }
-    return path.join(`/media/${user}`, target);
+    return path.posix.join(`/media/${user}`, target);
   }
   if (platform === "win32") {
     const withSlash = target.endsWith("\\") || target.endsWith("/") ? target : `${target}\\`;
