@@ -312,6 +312,7 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 | 2026-09-01 | A1–A5 landed: `src/platform/*`, vault + call sites wired |
 | 2026-09-01 | Tier 1 B–E (except README + CI): keytar, passphrase-file, password auth, unlock/lock, doctor |
 | 2026-09-25 | Linux PolKit per-reveal gate (`auth-polkit`, policy + `install-polkit.sh`); password prompt → stderr |
+| 2026-09-25 | Linux abra-agent (unix socket, idle lock, vault.load/save); systemd --user unit |
 
 ---
 
@@ -359,3 +360,50 @@ On Omarchy, the polkit agent runs inside the Quickshell shell. Machines without 
 ### Optional: FIDO2 / pam-u2f (Touch-ID-like tap)
 
 Optional. You can configure **pam-u2f** so the polkit-1 PAM stack accepts a security key tap. This changes PAM for `polkit-1`; keep a password fallback and test from a second session before relying on it. Not required for abracadabra.
+
+---
+
+## Linux: abra-agent (per-user key-holding agent)
+
+Modelled on 1Password’s Linux design: a **background user agent** holds the unlocked vault master key in memory and **actually locks** (idle + explicit), so `abra` commands stop each reading a login-unlocked Secret Service / keyring entry.
+
+### Overview
+
+| Piece | Detail |
+|-------|--------|
+| Socket | `$XDG_RUNTIME_DIR/abra/agent.sock` (override: `ABRA_AGENT_SOCKET`) |
+| Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
+| Socket perms | `0600` after listen |
+| Protocol | Newline-delimited JSON (`status`, `unlock`, `lock`, `vault.load`, `vault.save`) — **never** sends the master key to clients |
+| Idle lock | Default **15 min** (`ABRA_AGENT_IDLE_SECONDS`); activity = vault ops |
+| Crypto | Agent encrypts/decrypts `vault.enc` with the same AES-256-GCM helpers as `core/vault.ts` |
+
+**Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent).
+
+If the socket is missing, connect times out (~500ms), or the agent returns unavailable, `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path.
+
+### Unlock vs reveal approval
+
+Agent **unlock** is a keystore read into agent memory. It does **not** satisfy PolKit / `authenticate()` reveal gates. CLI/MCP still call `authenticate()` before revealing secrets. Same-uid processes can talk to the socket (same trust boundary as today’s keyring); peer-credential checks (`SO_PEERCRED`) are deferred.
+
+Raw-key callers (USB/LAN sync, cartridge checkpoint, keychain re-export) keep using `getMasterKey()` directly — there is no key-export op on the agent socket.
+
+### systemd --user
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp packaging/linux/abra-agent.service ~/.config/systemd/user/
+# Edit ExecStart to absolute /usr/bin/node + absolute …/dist/agent/server.js
+# (do not rely on mise/nvm PATH in the user manager)
+systemctl --user daemon-reload
+systemctl --user enable --now abra-agent
+```
+
+Runnable entry (no CLI subcommand yet): `node dist/agent/server.js`.
+
+### Pending CLI (not wired in `src/index.ts` yet)
+
+- `abra agent` — start/status foreground helper
+- `abra lock` — should also lock the agent when present (today’s `abra lock` only clears the passphrase-file session)
+
+See packaging unit comments for hardening notes (`LimitCORE=0`, no `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX` for D-Bus/keytar).
