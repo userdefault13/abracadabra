@@ -16,6 +16,7 @@ import { resetSessionForTests, isSessionUnlocked, lockSession } from "./session.
 import { isPassphraseVaultLocked } from "./keystore-passphrase.js";
 import { writeMasterKeyFile } from "./master-key-file.js";
 import { unlockSession } from "./session.js";
+import { VAULT_PASSPHRASE_MIN } from "./master-key-file.js";
 import { probeKeytar } from "./keystore-keytar.js";
 import { resolveMasterKey } from "../core/masterKey.js";
 
@@ -106,8 +107,15 @@ export async function restoreMasterKey(key: Buffer, bundlePassphrase?: string): 
     if (!bundlePassphrase) {
       throw new Error("USB restore on passphrase-file keystore requires the bundle passphrase");
     }
+    // Bundle passphrase is an existing secret — allow < 12 chars but warn.
+    // Enforcing the new minimum would brick restores of older USB/cloud bundles.
+    if ([...bundlePassphrase.normalize("NFKC")].length < VAULT_PASSPHRASE_MIN) {
+      process.stderr.write(
+        `abracadabra: bundle passphrase is shorter than ${VAULT_PASSPHRASE_MIN} characters — vault wrap will use it anyway; consider changing the vault passphrase after restore\n`,
+      );
+    }
     writeMasterKeyFile(key, bundlePassphrase);
-    unlockSession(key, bundlePassphrase);
+    unlockSession(key);
     keystoreSingleton = createKeystore();
     return;
   }

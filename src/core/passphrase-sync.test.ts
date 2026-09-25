@@ -7,6 +7,7 @@ import { assertCloudPassphrase, assertUsbPassphrase, CLOUD_PASSPHRASE_MIN } from
 import { saveSyncState, loadSyncState } from "./sync.js";
 import type { Vault } from "./vault.js";
 import { resetPlatformForTests, restoreMasterKey, getMasterKey } from "../platform/index.js";
+import { setDefaultKdfForTests } from "../platform/master-key-file.js";
 
 describe("passphrase policy", () => {
   it("accepts USB min length 8", () => {
@@ -40,6 +41,7 @@ describe("encrypted sync-state", () => {
     process.env.ABRA_SKIP_BIOMETRICS = "1";
     process.env.ABRA_AUTH = "none";
     process.env.ABRA_HEADLESS_PASSPHRASE = "sync-state-test-passphrase";
+    setDefaultKdfForTests({ N: 16384 });
     resetPlatformForTests();
     await restoreMasterKey(master, "sync-state-test-passphrase");
     await getMasterKey();
@@ -47,6 +49,7 @@ describe("encrypted sync-state", () => {
 
   afterEach(() => {
     process.env = { ...envBackup };
+    setDefaultKdfForTests(null);
     resetPlatformForTests();
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });

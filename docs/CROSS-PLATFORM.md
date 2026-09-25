@@ -89,6 +89,18 @@ export interface PlatformKeystore {
 | Linux | [libsecret](https://wiki.gnome.org/Projects/Libsecret) via `secret-tool` or `keytar` | Passphrase-wrapped key file in `~/.abracadabra/master.key.enc` (unlock at `abra unlock`) |
 | Windows | Credential Manager via `keytar` or DPAPI | Same passphrase file fallback |
 
+### Passphrase-file keystore (`ABRA_KEYSTORE=passphrase-file`)
+
+Used for headless/SSH Linux when no OS credential store is available.
+
+| Topic | Behavior |
+|-------|----------|
+| Wrap format | **v2**: scrypt `N=2^17` (131072), `r=8`, `p=1`, AES-256-GCM with AAD binding `{format,version,kdf}`. v1 files (`N=2^14`, no AAD) still open; successful unlock with a ≥12-char passphrase re-wraps to v2 atomically. |
+| Passphrase minimum | **12 Unicode code points** (after NFKC) at creation / passphrase change. Existing shorter secrets still unlock (v1 stays until changed; USB restore of a short bundle passphrase is allowed with a stderr warning). |
+| Prompt | Passphrase is read from the controlling terminal (`/dev/tty`) with echo off — not from stdin pipes, env, or argv. Use `ssh -t` over SSH. `ABRA_HEADLESS_PASSPHRASE` is CI-only (`ABRA_SKIP_BIOMETRICS=1` or `ABRA_AUTH=none`). |
+| Session | `abra unlock` caches the **master key** in memory (TTL); the plaintext passphrase is **not** cached. Reboot / new process → locked. |
+| Unlock backoff | After 5 consecutive wrong passphrases, exponential delay before the next try (`2^(failures-5)` seconds, cap 15 minutes). Never a hard lockout; counter in `unlock-attempts.json` (speed bump only — scrypt is the real cost). |
+
 Use one npm dependency where possible:
 
 - [`keytar`](https://github.com/atom/node-keytar) — Keychain / Secret Service / Credential Vault (native addon; needs prebuilds for CI).
@@ -312,6 +324,7 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 | 2026-09-01 | A1–A5 landed: `src/platform/*`, vault + call sites wired |
 | 2026-09-01 | Tier 1 B–E (except README + CI): keytar, passphrase-file, password auth, unlock/lock, doctor |
 | 2026-09-25 | Linux PolKit per-reveal gate (`auth-polkit`, policy + `install-polkit.sh`); password prompt → stderr |
+| 2026-09-25 | Passphrase-file H1: v2 wrap (scrypt 2^17 + AAD), tty-only prompt, no cached passphrase, unlock backoff |
 
 ---
 
