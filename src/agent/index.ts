@@ -10,6 +10,7 @@ export {
   stopAgent,
   lockAgent,
   agentStatus,
+  installSignalHandlers,
   type StartAgentOpts,
   type AuthorizePeerFn,
 } from "./server.js";

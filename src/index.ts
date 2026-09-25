@@ -22,6 +22,7 @@ import {
   cmdCartridgeRestore,
 } from "./commands/cartridge.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
+import { startAgent, lockAgent, installSignalHandlers } from "./agent/index.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
@@ -223,8 +224,26 @@ program
 
 program
   .command("lock")
-  .description("Clear in-memory unlock session (passphrase-file keystore)")
-  .action(cmdLock);
+  .description("Clear passphrase unlock session and lock the abra agent (if running)")
+  .action(async () => {
+    cmdLock();
+    try {
+      await lockAgent();
+      console.error("✓ abra-agent locked");
+    } catch {
+      /* no agent running */
+    }
+  });
+
+program
+  .command("agent")
+  .description("Run the per-user vault agent (holds unlocked key in memory; idle lock)")
+  .action(async () => {
+    installSignalHandlers();
+    const { socketPath } = await startAgent();
+    console.error(`abra-agent listening on ${socketPath}`);
+    await new Promise(() => {});
+  });
 
 program
   .command("unlock-status")

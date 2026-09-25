@@ -418,7 +418,8 @@ export function getRunningAgentForTests(): typeof running {
   return running;
 }
 
-function installSignalHandlers(): void {
+/** Stop the agent (lock + remove socket) on SIGTERM/SIGINT/SIGHUP. */
+export function installSignalHandlers(): void {
   const shutdown = async (sig: string) => {
     logOp("signal", sig);
     try {
