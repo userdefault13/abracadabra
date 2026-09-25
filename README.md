@@ -170,7 +170,7 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
 | `abra treasury init [--force]` | Create user-funded abra treasury wallet (`__abra_treasury__`) |
 | `abra treasury address` / `status` | Public address / Base USDC + ETH balances |
-| `abra treasury pay --to 0x… --amount 0.008 --reason "…"` | Touch ID gated Base USDC spend |
+| `abra treasury pay --to 0x… --amount 0.008 --reason "…"` `[--asset usdc\|eth]` `[--dry-run]` `[--json]` | Touch ID gated Base USDC or native ETH spend |
 | `abra refill <project> [--dry-run]` | Sweep a project wallet's Base USDC back into the treasury (alias of `treasury refill`) |
 
 ### Injecting secrets into a deploy
@@ -375,7 +375,7 @@ own scoped, revocable token instead of sharing the admin one.
 ## Abra treasury (user-funded spends)
 
 A reserved vault project (`__abra_treasury__`) holds a **user-funded** Base mainnet
-wallet — separate from any founder wallet. Agents and projects request USDC payments;
+wallet — separate from any founder wallet. Agents and projects request USDC or ETH payments;
 every spend pops **Touch ID** with the amount, destination, and reason.
 
 ```sh
@@ -383,6 +383,8 @@ abra treasury init                 # create wallet once (prints address)
 abra treasury status               # address + USDC + ETH (gas)
 # Fund the printed address on Base with USDC + a tiny bit of ETH for gas, then:
 abra treasury pay --to 0x… --amount 0.008 --reason "cron402 bazaar settle"
+abra treasury pay --asset eth --to 0x… --amount 0.0006 --reason "gas for deployer"
+abra treasury pay --asset eth --to 0x… --amount 0.0006 --reason "…" --dry-run
 ```
 
 When the treasury runs low, pull USDC back from a project wallet you created with

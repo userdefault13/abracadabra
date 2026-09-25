@@ -6,7 +6,7 @@ description: >-
   ABRA_KEY is already set for this project. Covers discovering key names, reading
   secrets the human has scoped to this agent (issued abra key or Touch ID grant),
   key issue/scope/revoke, health checks, keygen/connectors, USB/LAN sync, cartridge
-  checkpoints, and treasury USDC payments (Touch ID). Do not use for generic env var,
+  checkpoints, and treasury USDC/ETH payments (Touch ID). Do not use for generic env var,
   API token, wallet, or SSH key questions, or for other vaults or .env files. Never
   print secret values in chat.
 ---
@@ -249,7 +249,7 @@ Register once (`.mcp.json` / Claude Desktop):
 | `generate_cloudflare_token` | Scoped CF token → vault |
 | `generate_ssh_key` | ed25519 → vault |
 | `treasury_status` | Treasury address + Base USDC/ETH (no key) |
-| `request_treasury_payment` | Touch ID → pay Base USDC from treasury |
+| `request_treasury_payment` | Touch ID → pay Base USDC from treasury (CLI also supports `--asset eth`) |
 
 `get_secrets` args example:
 
@@ -317,7 +317,7 @@ abra issue <provider> <project> # mint provider vars into project
 After generate/issue, fetch via `get_secrets` / API key within your scope — do not ask
 the human to paste the new value into chat.
 
-## 5b. Abra treasury (user-funded USDC)
+## 5b. Abra treasury (user-funded USDC / ETH)
 
 Reserved project `__abra_treasury__` — **not** the founder wallet. Human funds it;
 agents request spends. Every pay pops Touch ID with amount + destination + reason.
@@ -327,6 +327,9 @@ Never print `TREASURY_PRIVATE_KEY`.
 abra treasury init
 abra treasury status          # tell human the address to fund (Base USDC + tiny ETH)
 # do NOT pay from an empty treasury
+abra treasury pay --to 0x… --amount 0.008 --reason "…"           # USDC (default)
+abra treasury pay --asset eth --to 0x… --amount 0.0006 --reason "…"
+abra treasury pay --asset eth --to 0x… --amount 0.0006 --reason "…" --dry-run
 abra refill <project> --dry-run   # treasury low? see what a project wallet (EVM_ADDRESS) can give back
 abra refill <project>             # one Touch ID: auto gas top-up + USDC sweep into the treasury
 ## 5a. Push vault vars into Vercel env
