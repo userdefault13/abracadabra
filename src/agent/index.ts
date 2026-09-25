@@ -29,6 +29,7 @@ export {
   saveVaultViaAgent,
   shouldTryAgent,
   isAgentUnavailable,
+  clientVaultBinding,
   AgentClientError,
 } from "./client.js";
 export { AgentState } from "./state.js";

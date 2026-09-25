@@ -1,4 +1,5 @@
 import net from "node:net";
+import path from "node:path";
 import crypto from "node:crypto";
 import {
   isAgentEnabled,
@@ -11,8 +12,11 @@ import {
   type AgentResponse,
   type AgentStatusBody,
   type AgentErrorCode,
+  type AgentVaultBinding,
 } from "./protocol.js";
 import type { Vault } from "../core/vault.js";
+import { vaultFile } from "../core/paths.js";
+import { resolveKeystoreBackend } from "../platform/env.js";
 
 export class AgentClientError extends Error {
   constructor(
@@ -28,11 +32,20 @@ export function isAgentUnavailable(err: unknown): boolean {
   if (err instanceof AgentClientError) {
     return (
       err.code === "unavailable" ||
+      err.code === "mismatch" ||
       err.code === "timeout" ||
       err.code === "connect"
     );
   }
   return false;
+}
+
+/** Client-side vault path + keystore binding for agent vault I/O. */
+export function clientVaultBinding(): AgentVaultBinding {
+  return {
+    vaultPath: path.resolve(vaultFile()),
+    keystoreBackend: resolveKeystoreBackend(),
+  };
 }
 
 const DEFAULT_CONNECT_MS = 500;
@@ -54,8 +67,13 @@ export async function agentRequest(
     | { op: "status" }
     | { op: "unlock" }
     | { op: "lock" }
-    | { op: "vault.load" }
-    | { op: "vault.save"; vault: Vault }
+    | { op: "vault.load"; vaultPath?: string; keystoreBackend?: string }
+    | {
+        op: "vault.save";
+        vault: Vault;
+        vaultPath?: string;
+        keystoreBackend?: string;
+      }
   ),
   opts?: AgentClientOpts,
 ): Promise<AgentResponse> {
@@ -162,7 +180,8 @@ export async function agentLock(opts?: AgentClientOpts): Promise<void> {
 export type VaultLoadResult = { empty: true } | { vault: Vault };
 
 export async function agentVaultLoad(opts?: AgentClientOpts): Promise<VaultLoadResult> {
-  const res = await agentRequest({ op: "vault.load" }, opts);
+  const binding = clientVaultBinding();
+  const res = await agentRequest({ op: "vault.load", ...binding }, opts);
   if (!res.ok) {
     throw new AgentClientError(res.error, res.code);
   }
@@ -178,7 +197,8 @@ export async function agentVaultSave(
   vault: Vault,
   opts?: AgentClientOpts,
 ): Promise<void> {
-  const res = await agentRequest({ op: "vault.save", vault }, opts);
+  const binding = clientVaultBinding();
+  const res = await agentRequest({ op: "vault.save", vault, ...binding }, opts);
   if (!res.ok) {
     throw new AgentClientError(res.error, res.code);
   }

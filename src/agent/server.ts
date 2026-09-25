@@ -30,6 +30,7 @@ import {
   type Vault,
 } from "../core/vault.js";
 import { vaultFile } from "../core/paths.js";
+import { resolveKeystoreBackend } from "../platform/env.js";
 
 export type { AgentStatusBody };
 
@@ -40,6 +41,8 @@ export interface StartAgentOpts {
   resolveMasterKey?: ResolveMasterKeyFn;
   /** Injectable vault.enc path (defaults to vaultFile()). */
   vaultPath?: () => string;
+  /** Injectable keystore backend id (defaults to resolveKeystoreBackend()). */
+  keystoreBackend?: () => string;
 }
 
 let running: {
@@ -47,6 +50,7 @@ let running: {
   state: AgentState;
   socketPath: string;
   vaultPath: () => string;
+  keystoreBackend: () => string;
 } | null = null;
 
 function logOp(op: string, detail?: string): void {
@@ -58,9 +62,41 @@ function fail(id: string, code: AgentErrorCode, error: string): AgentResponse {
   return { v: PROTOCOL_VERSION, id, ok: false, error, code };
 }
 
+/** Refuse vault I/O that would touch a different vault / keystore than this agent. */
+function checkVaultBinding(
+  id: string,
+  req: { vaultPath?: string; keystoreBackend?: string },
+  agentVaultPath: string,
+  agentKeystore: string,
+): AgentResponse | null {
+  const clientPath =
+    typeof req.vaultPath === "string" && req.vaultPath.trim()
+      ? path.resolve(req.vaultPath)
+      : "";
+  const expectedPath = path.resolve(agentVaultPath);
+  if (!clientPath || clientPath !== expectedPath) {
+    return fail(
+      id,
+      "mismatch",
+      "Vault path does not match this agent (client should fall back to direct keystore)",
+    );
+  }
+  const clientKs =
+    typeof req.keystoreBackend === "string" ? req.keystoreBackend : "";
+  if (!clientKs || clientKs !== agentKeystore) {
+    return fail(
+      id,
+      "mismatch",
+      "Keystore backend does not match this agent (client should fall back to direct keystore)",
+    );
+  }
+  return null;
+}
+
 async function handleRequest(
   state: AgentState,
   vaultPath: () => string,
+  keystoreBackend: () => string,
   req: AgentRequest,
 ): Promise<AgentResponse> {
   const { id, op } = req;
@@ -87,6 +123,13 @@ async function handleRequest(
         return { v: PROTOCOL_VERSION, id, ok: true, op: "lock" };
       }
       case "vault.load": {
+        const bindErr = checkVaultBinding(
+          id,
+          req,
+          vaultPath(),
+          keystoreBackend(),
+        );
+        if (bindErr) return bindErr;
         if (state.isLocked()) {
           return fail(id, "locked", "Agent is locked");
         }
@@ -103,6 +146,13 @@ async function handleRequest(
         return { v: PROTOCOL_VERSION, id, ok: true, op: "vault.load", vault };
       }
       case "vault.save": {
+        const bindErr = checkVaultBinding(
+          id,
+          req,
+          vaultPath(),
+          keystoreBackend(),
+        );
+        if (bindErr) return bindErr;
         if (state.isLocked()) {
           return fail(id, "locked", "Agent is locked");
         }
@@ -118,10 +168,19 @@ async function handleRequest(
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const code: AgentErrorCode =
-      e && typeof e === "object" && "code" in e && (e as { code: string }).code === "locked"
-        ? "locked"
-        : "internal";
+    // Unlock / resolveMasterKey failures → unavailable so clients fall back
+    // to the direct keystore path (never mint via agent on keyring lock).
+    let code: AgentErrorCode = "internal";
+    if (
+      e &&
+      typeof e === "object" &&
+      "code" in e &&
+      (e as { code: string }).code === "locked"
+    ) {
+      code = "locked";
+    } else if (op === "unlock") {
+      code = "unavailable";
+    }
     logOp(op, `error=${code}`);
     return fail(id, code, msg);
   }
@@ -130,6 +189,7 @@ async function handleRequest(
 function attachConnection(
   state: AgentState,
   vaultPath: () => string,
+  keystoreBackend: () => string,
   socket: net.Socket,
 ): void {
   let buf = Buffer.alloc(0);
@@ -173,7 +233,7 @@ function attachConnection(
         reply(fail(id, "bad_request", "Invalid request"));
         continue;
       }
-      void handleRequest(state, vaultPath, raw).then(reply);
+      void handleRequest(state, vaultPath, keystoreBackend, raw).then(reply);
     }
   });
 
@@ -228,12 +288,13 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     onIdleLock: () => logOp("idle-lock"),
   });
   const vaultPath = opts?.vaultPath ?? (() => vaultFile());
+  const keystoreBackend = opts?.keystoreBackend ?? (() => resolveKeystoreBackend());
 
   const prevUmask = process.umask(0o077);
   let server: net.Server;
   try {
     server = net.createServer((socket) => {
-      attachConnection(state, vaultPath, socket);
+      attachConnection(state, vaultPath, keystoreBackend, socket);
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -252,7 +313,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     process.umask(prevUmask);
   }
 
-  running = { server, state, socketPath, vaultPath };
+  running = { server, state, socketPath, vaultPath, keystoreBackend };
   logOp("listen", socketPath);
   return { socketPath, state };
 }

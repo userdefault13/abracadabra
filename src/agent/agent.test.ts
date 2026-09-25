@@ -22,8 +22,11 @@ import {
   agentRequest,
   loadVaultViaAgent,
   shouldTryAgent,
+  isAgentUnavailable,
+  AgentClientError,
 } from "./client.js";
 import { emptyVault, loadVault, saveVault, type Vault } from "../core/vault.js";
+import { VaultLockedError } from "../platform/keystore-passphrase.js";
 
 function makeKey(): Buffer {
   return crypto.randomBytes(32);
@@ -247,9 +250,6 @@ describe("abra agent", () => {
       vaultPath: () => vaultPath,
     });
     await agentUnlock({ socketPath });
-    const huge = emptyVault();
-    // Build a vault larger than MAX would be expensive; instead craft a raw oversized request
-    // by calling with a tiny max via direct net — use agentRequest with huge id padding is not enough.
     // Status never includes key material:
     const res = await agentRequest({ op: "status" }, { socketPath });
     expect(res.ok).toBe(true);
@@ -257,6 +257,137 @@ describe("abra agent", () => {
       expect(res.status).not.toHaveProperty("key");
       expect(res.status).not.toHaveProperty("masterKey");
     }
+  });
+
+  it("matching vault path + keystore round-trips via loadVault/saveVault", async () => {
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => path.resolve(vaultPath),
+    });
+    const v = emptyVault();
+    v.projects.round = {
+      createdAt: 1,
+      vars: { R: { value: "via-agent", secret: true, updatedAt: 1 } },
+    };
+    await saveVault(v);
+    expect(fs.existsSync(vaultPath)).toBe(true);
+    const loaded = await loadVault();
+    expect(loaded.projects.round.vars.R.value).toBe("via-agent");
+  });
+
+  it("different ABRA_DIR → mismatch; client falls back; agent vault.enc unchanged", async () => {
+    const agentDir = path.join(tmpDir, "ag");
+    const clientDir = path.join(tmpDir, "cl");
+    fs.mkdirSync(agentDir, { mode: 0o700 });
+    fs.mkdirSync(clientDir, { mode: 0o700 });
+    const agentVault = path.join(agentDir, "vault.enc");
+
+    process.env.ABRA_DIR = agentDir;
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => agentVault,
+    });
+    await agentUnlock({ socketPath });
+    const seed = emptyVault();
+    seed.projects.agent = {
+      createdAt: 1,
+      vars: { A: { value: "agent-only", secret: true, updatedAt: 1 } },
+    };
+    await agentVaultSave(seed, { socketPath });
+    const agentBytesBefore = fs.readFileSync(agentVault);
+
+    process.env.ABRA_DIR = clientDir;
+    process.env.ABRA_HEADLESS_PASSPHRASE = "fallback-mismatch-pass";
+    const { writeMasterKeyFile } = await import("../platform/master-key-file.js");
+    const { unlockSession } = await import("../platform/session.js");
+    const { resetPlatformForTests } = await import("../platform/index.js");
+    resetPlatformForTests();
+    const clientKey = makeKey();
+    writeMasterKeyFile(clientKey, "fallback-mismatch-pass");
+    unlockSession(clientKey, "fallback-mismatch-pass");
+
+    await expect(agentVaultLoad({ socketPath })).rejects.toMatchObject({
+      code: "mismatch",
+    });
+    expect(
+      isAgentUnavailable(new AgentClientError("vault path mismatch", "mismatch")),
+    ).toBe(true);
+
+    const v = emptyVault();
+    v.projects.client = {
+      createdAt: 1,
+      vars: { C: { value: "client-v", secret: true, updatedAt: 1 } },
+    };
+    await saveVault(v);
+    expect(fs.existsSync(path.join(clientDir, "vault.enc"))).toBe(true);
+    expect(fs.readFileSync(agentVault).equals(agentBytesBefore)).toBe(true);
+
+    const loaded = await loadVault();
+    expect(loaded.projects.client.vars.C.value).toBe("client-v");
+    expect(loaded.projects.agent).toBeUndefined();
+  });
+
+  it("keystore backend mismatch → mismatch (unavailable)", async () => {
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => path.resolve(vaultPath),
+      keystoreBackend: () => "keytar",
+    });
+    // Client env is passphrase-file
+    await expect(agentVaultLoad({ socketPath })).rejects.toMatchObject({
+      code: "mismatch",
+    });
+  });
+
+  it("missing vaultPath in request → mismatch", async () => {
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => path.resolve(vaultPath),
+    });
+    await agentUnlock({ socketPath });
+    const res = await agentRequest({ op: "vault.load" }, { socketPath });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("mismatch");
+  });
+
+  it("unlock failure → unavailable; loadVault/saveVault fall back to direct path", async () => {
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => {
+        throw new VaultLockedError();
+      },
+      vaultPath: () => path.resolve(vaultPath),
+    });
+
+    await expect(agentUnlock({ socketPath })).rejects.toMatchObject({
+      code: "unavailable",
+    });
+    expect(
+      isAgentUnavailable(new AgentClientError("locked vault", "unavailable")),
+    ).toBe(true);
+
+    process.env.ABRA_HEADLESS_PASSPHRASE = "unlock-fail-pass";
+    const { writeMasterKeyFile } = await import("../platform/master-key-file.js");
+    const { unlockSession } = await import("../platform/session.js");
+    const { resetPlatformForTests } = await import("../platform/index.js");
+    resetPlatformForTests();
+    const key = makeKey();
+    writeMasterKeyFile(key, "unlock-fail-pass");
+    unlockSession(key, "unlock-fail-pass");
+
+    const v = emptyVault();
+    v.projects.fb = {
+      createdAt: 1,
+      vars: { K: { value: "direct-after-unlock-fail", secret: true, updatedAt: 1 } },
+    };
+    await saveVault(v);
+    expect(fs.existsSync(vaultPath)).toBe(true);
+    const loaded = await loadVault();
+    expect(loaded.projects.fb.vars.K.value).toBe("direct-after-unlock-fail");
   });
 });
 

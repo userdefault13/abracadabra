@@ -17,17 +17,39 @@ export interface AgentStatusBody {
 export type AgentErrorCode =
   | "locked"
   | "unavailable"
+  | "mismatch"
   | "bad_request"
   | "oversized"
   | "internal"
   | "already_running";
 
+/** Vault I/O binding — client must match the agent's vault path + keystore. */
+export interface AgentVaultBinding {
+  /** Absolute path to the client's vault.enc (path.resolve(vaultFile())). */
+  vaultPath: string;
+  /** Client's resolveKeystoreBackend() result. */
+  keystoreBackend: string;
+}
+
 export type AgentRequest =
   | { v: typeof PROTOCOL_VERSION; id: string; op: "status" }
   | { v: typeof PROTOCOL_VERSION; id: string; op: "unlock" }
   | { v: typeof PROTOCOL_VERSION; id: string; op: "lock" }
-  | { v: typeof PROTOCOL_VERSION; id: string; op: "vault.load" }
-  | { v: typeof PROTOCOL_VERSION; id: string; op: "vault.save"; vault: Vault };
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
+      op: "vault.load";
+      vaultPath?: string;
+      keystoreBackend?: string;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
+      op: "vault.save";
+      vault: Vault;
+      vaultPath?: string;
+      keystoreBackend?: string;
+    };
 
 export type AgentResponse =
   | {

@@ -375,12 +375,13 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
 | Socket perms | `0600` after listen |
 | Protocol | Newline-delimited JSON (`status`, `unlock`, `lock`, `vault.load`, `vault.save`) — **never** sends the master key to clients |
+| Vault binding | `vault.load` / `vault.save` include the client's resolved `vaultPath` + `keystoreBackend`; agent refuses (`mismatch`) if they differ from its own — client falls back to direct I/O |
 | Idle lock | Default **15 min** (`ABRA_AGENT_IDLE_SECONDS`); activity = vault ops |
 | Crypto | Agent encrypts/decrypts `vault.enc` with the same AES-256-GCM helpers as `core/vault.ts` |
 
 **Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent).
 
-If the socket is missing, connect times out (~500ms), or the agent returns unavailable, `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path.
+If the socket is missing, connect times out (~500ms), unlock fails (keyring locked / `VaultLockedError`), or the agent returns `unavailable` / `mismatch`, `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path. The agent never mints a master key on unlock failure.
 
 ### Unlock vs reveal approval
 
@@ -398,6 +399,12 @@ cp packaging/linux/abra-agent.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now abra-agent
 ```
+
+Unit highlights (`packaging/linux/abra-agent.service`):
+
+- `RuntimeDirectory=abra` + `RuntimeDirectoryMode=0700` — creates `$XDG_RUNTIME_DIR/abra` (`%t/abra`) so `ProtectSystem=strict` does not need `ReadWritePaths=%t/abra` (that fails if the dir is missing under a read-only runtime mount).
+- `ReadWritePaths=-%h/.abracadabra` — leading `-` so a missing vault dir does not fail the unit.
+- `ProtectSystem` / `ProtectHome` / `PrivateTmp` in **user** units rely on unprivileged user namespaces (verify live). Session bus at `%t/bus` must stay connectable for Secret Service / keytar.
 
 Runnable entry (no CLI subcommand yet): `node dist/agent/server.js`.
 
