@@ -317,7 +317,7 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 
 ## Linux: PolKit approval gate
 
-On Linux, interactive secret reveals (CLI `get`, MCP `get_secrets`, Cloudflare mint, etc.) go through `authenticate()` → `PlatformAuth`. When PolKit is available, the default backend is **`polkit`** (per-reveal system prompt, similar to 1Password on Linux / Touch ID on macOS). Otherwise abracadabra falls back to the TTY **password** confirm prompt and prints a one-line stderr hint.
+On Linux, interactive secret reveals (CLI `get`, MCP `get_secrets`, Cloudflare mint, etc.) go through `authenticate()` → `PlatformAuth`. The default backend on Linux is **always `polkit`** (per-reveal system prompt, similar to 1Password on Linux / Touch ID on macOS). If `pkcheck` or the policy file is missing, every reveal is **denied** with an actionable error pointing at `sudo scripts/install-polkit.sh` — there is no automatic fallback to the password prompt.
 
 ### Install the policy
 
@@ -341,16 +341,16 @@ Requires `pkcheck` (usually `/usr/bin/pkcheck` from the `polkit` package).
 |-----------|--------------|
 | `ABRA_AUTH` set | that value (`polkit` / `password` / `none` / …) |
 | `ABRA_SKIP_BIOMETRICS=1` | `none` |
-| Linux + `pkcheck` + policy present | `polkit` |
-| Linux otherwise | `password` (+ one-time stderr warning) |
+| Linux | `polkit` (reveals denied until `pkcheck` + policy are installed) |
+| Windows / other | `password` |
 
-`ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
+`ABRA_AUTH=password` on Linux is an **explicit, less-safe opt-in** (press-Enter confirm, no identity check); it is never selected automatically. `abra doctor` flags a missing policy as a failure. `ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
 
 ### MCP / headless
 
 MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless or plain SSH sessions without an agent are denied.
 
-Password-prompt fallback writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit or a scoped API key for agents.
+The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit or a scoped API key for agents.
 
 ### Omarchy / Quickshell
 

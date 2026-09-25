@@ -60,12 +60,49 @@ describe("PolkitAuth", () => {
 
   it("denies without exec when pkcheck binary missing", async () => {
     const execFile = vi.fn<ExecFileFn>();
-    const auth = new PolkitAuth({
-      execFile,
-      existsSync: () => false,
-    });
-    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(/pkcheck not found/);
+    const auth = authWith(execFile, (p) => p.endsWith("dev.abracadabra.policy"));
+    const err = auth.authenticate({ reason: "reveal" });
+    await expect(err).rejects.toThrow(/PolKit approval denied — reveal\. PolKit is not set up \(pkcheck not found/);
+    await expect(err).rejects.toThrow(/sudo scripts\/install-polkit\.sh/);
+    await expect(err).rejects.toThrow(/ABRA_AUTH=password/);
     expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("denies without exec when policy file missing", async () => {
+    const execFile = vi.fn<ExecFileFn>();
+    const auth = authWith(execFile, (p) => p === "/usr/bin/pkcheck");
+    const err = auth.authenticate({ reason: "reveal" });
+    await expect(err).rejects.toThrow(/PolKit is not set up \(polkit policy missing/);
+    await expect(err).rejects.toThrow(/sudo scripts\/install-polkit\.sh/);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("denies without exec when both pkcheck and policy missing", async () => {
+    const execFile = vi.fn<ExecFileFn>();
+    const auth = authWith(execFile, () => false);
+    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(
+      /sudo scripts\/install-polkit\.sh/,
+    );
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("ignores probe test override — real (injected) filesystem check still denies", async () => {
+    setProbePolkitForTests(() => ({ ok: true, pkcheck: "/mock", policy: "/mock.policy" }));
+    const execFile = vi.fn<ExecFileFn>();
+    const auth = authWith(execFile, () => false);
+    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(/PolKit is not set up/);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("execs pkcheck when both policy and pkcheck are present", async () => {
+    const execFile = vi.fn<ExecFileFn>().mockResolvedValue({ stdout: "", stderr: "" });
+    const auth = authWith(
+      execFile,
+      (p) => p === "/usr/local/bin/pkcheck" || p === "/etc/polkit-1/actions/dev.abracadabra.policy",
+    );
+    await expect(auth.authenticate({ reason: "reveal" })).resolves.toBeUndefined();
+    expect(execFile).toHaveBeenCalledTimes(1);
+    expect(execFile.mock.calls[0][0]).toBe("/usr/local/bin/pkcheck");
   });
 
   it("denies without exec when getuid is unavailable", async () => {
