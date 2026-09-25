@@ -34,7 +34,8 @@ vi.mock("../agent/index.js", async (importOriginal) => {
   return {
     ...actual,
     shouldTryAgent: vi.fn(() => true),
-    resolveAgentSocketPath: vi.fn(() => "/tmp/abra-test-agent.sock"),
+    // Overridden per test with a path inside the test's temp dir.
+    resolveAgentSocketPath: vi.fn(() => ""),
     agentStatus: vi.fn(async () => ({
       locked: false,
       idleRemainingMs: 1000,
@@ -87,7 +88,8 @@ describe("isInterpreterBasename", () => {
   });
 });
 
-describe("cmdGrant CLI", () => {
+// Grants are Linux/unix-only (abra-agent unix socket; exec bits) — same as agent tests.
+describe.skipIf(process.platform === "win32")("cmdGrant CLI", () => {
   let tmp = "";
   let exePath = "";
 
@@ -96,7 +98,9 @@ describe("cmdGrant CLI", () => {
     exePath = path.join(tmp, "client-bin");
     fs.writeFileSync(exePath, "#!/bin/sh\n");
     fs.chmodSync(exePath, 0o755);
-    fs.writeFileSync("/tmp/abra-test-agent.sock", "");
+    const fakeSock = path.join(tmp, "agent.sock");
+    fs.writeFileSync(fakeSock, "");
+    vi.mocked(agent.resolveAgentSocketPath).mockReturnValue(fakeSock);
     vi.mocked(platform.authenticate).mockClear();
     vi.mocked(agent.agentGrantAdd).mockClear();
     vi.mocked(agent.agentStatus).mockResolvedValue({
@@ -110,11 +114,6 @@ describe("cmdGrant CLI", () => {
   afterEach(() => {
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
-    try {
-      fs.unlinkSync("/tmp/abra-test-agent.sock");
     } catch {
       /* ignore */
     }
