@@ -2,6 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { vaultFile, ensureDir } from "./paths.js";
 import { getKeystore } from "../platform/index.js";
+import { resolveMasterKey } from "./masterKey.js";
 
 export interface VarEntry {
   value: string;
@@ -67,7 +68,9 @@ export interface EncryptedFile {
   iv: string;
   tag: string;
   data: string;
-}export function emptyVault(): Vault {
+}
+
+export function emptyVault(): Vault {
   return { version: 1, projects: {}, connections: {} };
 }
 
@@ -108,7 +111,7 @@ function decrypt(file: unknown, key: Buffer): Vault {
 }
 
 export async function loadVault(): Promise<Vault> {
-  const key = await getKeystore().getOrCreateMasterKey();
+  const key = await resolveMasterKey(getKeystore());
   if (!fs.existsSync(vaultFile())) return emptyVault();
   const raw = JSON.parse(fs.readFileSync(vaultFile(), "utf8"));
   const vault = decrypt(raw, key);
@@ -119,7 +122,7 @@ export async function loadVault(): Promise<Vault> {
 
 export async function saveVault(vault: Vault): Promise<void> {
   ensureDir();
-  const key = await getKeystore().getOrCreateMasterKey();
+  const key = await resolveMasterKey(getKeystore());
   const enc = encrypt(vault, key);
   const file = vaultFile();
   const tmp = `${file}.tmp`;
