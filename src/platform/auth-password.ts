@@ -14,6 +14,10 @@ export class PasswordPromptAuth implements PlatformAuth {
         `abracadabra: approval required — ${req.reason}. Run from a TTY or set ABRA_AUTH=none for CI (unsafe).`,
       );
     }
-    await promptHidden(`abracadabra: ${req.reason}\nPress Enter after reading (type anything to confirm): `);
+    // stderr only — never stdout (MCP JSON-RPC uses stdout).
+    await promptHidden(
+      `abracadabra: ${req.reason}\nPress Enter after reading (type anything to confirm): `,
+      process.stderr,
+    );
   }
 }

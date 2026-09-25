@@ -4,9 +4,11 @@ import { KeytarKeystore } from "./keystore-keytar.js";
 import { PassphraseFileKeystore } from "./keystore-passphrase.js";
 import { MacOSTouchIdAuth } from "./auth-macos.js";
 import { PasswordPromptAuth } from "./auth-password.js";
+import { PolkitAuth, probePolkit, setProbePolkitForTests } from "./auth-polkit.js";
 import { NoAuth } from "./auth-none.js";
 import {
   biometricsSkipped,
+  resetAuthEnvForTests,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
@@ -24,6 +26,7 @@ export { biometricsSkipped, resolveAuthBackend, resolveKeystoreBackend } from ".
 export { lockSession, isSessionUnlocked } from "./session.js";
 export { VaultLockedError } from "./keystore-passphrase.js";
 export { probeKeytar } from "./keystore-keytar.js";
+export { probePolkit, setProbePolkitForTests } from "./auth-polkit.js";
 
 let keystoreSingleton: PlatformKeystore | null = null;
 let authSingleton: PlatformAuth | null = null;
@@ -33,6 +36,8 @@ export function resetPlatformForTests(): void {
   keystoreSingleton = null;
   authSingleton = null;
   resetSessionForTests();
+  resetAuthEnvForTests();
+  setProbePolkitForTests(null);
 }
 
 export function createKeystore(): PlatformKeystore {
@@ -60,6 +65,11 @@ export function createAuth(): PlatformAuth {
         throw new Error(`ABRA_AUTH=macos-touchid requires macOS. ${UNSUPPORTED_PLATFORM_HINT}`);
       }
       return new MacOSTouchIdAuth();
+    case "polkit":
+      if (process.platform !== "linux") {
+        throw new Error(`ABRA_AUTH=polkit requires Linux. ${UNSUPPORTED_PLATFORM_HINT}`);
+      }
+      return new PolkitAuth();
     case "password":
       return new PasswordPromptAuth();
     case "none":
@@ -128,10 +138,17 @@ export function platformInfo(): {
 
 export async function platformHealth(): Promise<{
   keytar?: { ok: boolean; detail?: string };
+  polkit?: { ok: boolean; pkcheck?: string; policy?: string; detail?: string };
 }> {
-  const out: { keytar?: { ok: boolean; detail?: string } } = {};
+  const out: {
+    keytar?: { ok: boolean; detail?: string };
+    polkit?: { ok: boolean; pkcheck?: string; policy?: string; detail?: string };
+  } = {};
   if (resolveKeystoreBackend() === "keytar") {
     out.keytar = await probeKeytar();
+  }
+  if (process.platform === "linux" || resolveAuthBackend() === "polkit") {
+    out.polkit = probePolkit();
   }
   return out;
 }

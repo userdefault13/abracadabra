@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>abracadabra</vendor>
+  <vendor_url>https://github.com/userdefault13/abracadabra</vendor_url>
+  <icon_name>dialog-password</icon_name>
+
+  <action id="dev.abracadabra.reveal">
+    <description>Reveal secrets from the abracadabra vault</description>
+    <message>Authentication is required to reveal secrets from the abracadabra vault</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- auth_self: prompt every time. Do not use auth_self_keep (no caching). -->
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

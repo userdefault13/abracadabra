@@ -31,14 +31,28 @@ export async function cmdDoctor(): Promise<void> {
     }
   }
 
+  const health = await platformHealth();
+
   if (info.keystore === "keytar") {
-    const health = await platformHealth();
     if (health.keytar?.ok) {
       ok("keytar credential store reachable");
     } else {
       warn(`keytar unavailable: ${health.keytar?.detail ?? "unknown"}`);
       warn("fallback: export ABRA_KEYSTORE=passphrase-file");
       fails++;
+    }
+  }
+
+  if (health.polkit) {
+    if (health.polkit.ok) {
+      ok(`polkit ready (${health.polkit.pkcheck}; ${health.polkit.policy})`);
+    } else if (info.auth === "polkit") {
+      warn(`polkit selected but not ready: ${health.polkit.detail ?? "unknown"}`);
+      warn("install: sudo scripts/install-polkit.sh");
+      fails++;
+    } else if (process.platform === "linux") {
+      warn(`polkit unavailable: ${health.polkit.detail ?? "unknown"}`);
+      warn("install: sudo scripts/install-polkit.sh (or rely on password prompt)");
     }
   }
 
