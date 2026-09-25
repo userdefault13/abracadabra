@@ -32,7 +32,7 @@ function makeKey(): Buffer {
   return crypto.randomBytes(32);
 }
 
-describe("abra agent", () => {
+describe.skipIf(process.platform === "win32")("abra agent", () => {
   const envBackup = { ...process.env };
   let tmpDir = "";
   let socketPath = "";
@@ -393,17 +393,66 @@ describe("abra agent", () => {
 
 describe("isAgentEnabled", () => {
   const envBackup = { ...process.env };
+  const originalPlatform = process.platform;
+
+  function setPlatform(platform: NodeJS.Platform): void {
+    Object.defineProperty(process, "platform", {
+      value: platform,
+      configurable: true,
+    });
+  }
 
   afterEach(() => {
     process.env = { ...envBackup };
+    Object.defineProperty(process, "platform", {
+      value: originalPlatform,
+      configurable: true,
+    });
   });
 
-  it("ABRA_AGENT=0 disables", () => {
-    process.env.ABRA_AGENT = "0";
+  it("win32 default → false", () => {
+    setPlatform("win32");
+    delete process.env.ABRA_AGENT;
+    delete process.env.XDG_RUNTIME_DIR;
     expect(isAgentEnabled()).toBe(false);
   });
 
-  it("ABRA_AGENT=1 enables", () => {
+  it("win32 with ABRA_AGENT=1 → false", () => {
+    setPlatform("win32");
+    process.env.ABRA_AGENT = "1";
+    expect(isAgentEnabled()).toBe(false);
+  });
+
+  it("win32 with XDG_RUNTIME_DIR set → false", () => {
+    setPlatform("win32");
+    delete process.env.ABRA_AGENT;
+    process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+    expect(isAgentEnabled()).toBe(false);
+  });
+
+  it("linux with XDG_RUNTIME_DIR → true", () => {
+    setPlatform("linux");
+    delete process.env.ABRA_AGENT;
+    process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+    expect(isAgentEnabled()).toBe(true);
+  });
+
+  it("linux ABRA_AGENT=0 → false", () => {
+    setPlatform("linux");
+    process.env.ABRA_AGENT = "0";
+    process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+    expect(isAgentEnabled()).toBe(false);
+  });
+
+  it("darwin default → false", () => {
+    setPlatform("darwin");
+    delete process.env.ABRA_AGENT;
+    delete process.env.XDG_RUNTIME_DIR;
+    expect(isAgentEnabled()).toBe(false);
+  });
+
+  it("darwin ABRA_AGENT=1 → true", () => {
+    setPlatform("darwin");
     process.env.ABRA_AGENT = "1";
     expect(isAgentEnabled()).toBe(true);
   });

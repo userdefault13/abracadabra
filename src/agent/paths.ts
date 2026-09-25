@@ -8,12 +8,14 @@ export const DEFAULT_IDLE_SECONDS = 15 * 60;
  * Whether vault I/O should try the background agent.
  *
  * - `ABRA_AGENT=0` — always off
- * - `ABRA_AGENT=1` — opt-in (any platform; pair with `ABRA_AGENT_SOCKET` in tests)
+ * - win32 — always off (unsupported: no POSIX uid/modes; unix sockets differ)
+ * - `ABRA_AGENT=1` — opt-in on darwin/linux (pair with `ABRA_AGENT_SOCKET` in tests)
  * - default — on only on Linux when `XDG_RUNTIME_DIR` is set
  */
 export function isAgentEnabled(): boolean {
   const flag = process.env.ABRA_AGENT?.trim();
   if (flag === "0") return false;
+  if (process.platform === "win32") return false;
   if (flag === "1") return true;
   return process.platform === "linux" && !!process.env.XDG_RUNTIME_DIR?.trim();
 }
