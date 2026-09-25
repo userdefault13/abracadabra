@@ -27,7 +27,7 @@ export async function cmdDoctor(): Promise<void> {
 
   if (info.headless.headless && info.keystore !== "passphrase-file") {
     warn(
-      "headless session with non-passphrase-file keystore — secret reveals will be DENIED. Set ABRA_KEYSTORE=passphrase-file (migration via `abra keystore migrate` coming)",
+      "headless session with non-passphrase-file keystore — secret reveals will be DENIED. Set ABRA_KEYSTORE=passphrase-file (run: abra keystore migrate --to passphrase-file)",
     );
     fails++;
   }

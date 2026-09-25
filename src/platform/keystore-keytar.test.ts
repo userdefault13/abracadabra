@@ -104,4 +104,38 @@ describe("KeytarKeystore", () => {
     const storedB64 = mockKeytar.setPassword.mock.calls[0][2] as string;
     expect(Buffer.from(storedB64, "base64").equals(got)).toBe(true);
   });
+
+  it("deleteMasterKey: deletes then verifies getPassword null", async () => {
+    mockKeytar.deletePassword.mockResolvedValue(true);
+    mockKeytar.getPassword.mockResolvedValue(null);
+    const ks = new KeytarKeystore();
+    await ks.deleteMasterKey();
+    expect(mockKeytar.deletePassword).toHaveBeenCalledWith(
+      KEYTAR_SERVICE,
+      expect.any(String),
+    );
+    expect(mockKeytar.getPassword).toHaveBeenCalledWith(
+      KEYTAR_SERVICE,
+      expect.any(String),
+    );
+  });
+
+  it("deleteMasterKey: readback still present -> unavailable", async () => {
+    mockKeytar.deletePassword.mockResolvedValue(true);
+    mockKeytar.getPassword.mockResolvedValue(crypto.randomBytes(32).toString("base64"));
+    const ks = new KeytarKeystore();
+    await expect(ks.deleteMasterKey()).rejects.toMatchObject({
+      name: "KeystoreError",
+      kind: "unavailable",
+    });
+  });
+
+  it("deleteMasterKey: locked-like throw -> locked", async () => {
+    mockKeytar.deletePassword.mockRejectedValue(new Error("keyring is locked"));
+    const ks = new KeytarKeystore();
+    await expect(ks.deleteMasterKey()).rejects.toMatchObject({
+      name: "KeystoreError",
+      kind: "locked",
+    });
+  });
 });

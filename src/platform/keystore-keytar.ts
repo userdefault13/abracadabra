@@ -75,6 +75,24 @@ export class KeytarKeystore implements PlatformKeystore {
       throw new Error("Failed to verify master key in credential store");
     }
   }
+
+  async deleteMasterKey(): Promise<void> {
+    try {
+      const keytar = await loadKeytar();
+      await keytar.deletePassword(KEYTAR_SERVICE, ACCOUNT);
+      const readback = await keytar.getPassword(KEYTAR_SERVICE, ACCOUNT);
+      if (readback != null) {
+        throw new KeystoreError(
+          "unavailable",
+          "Failed to verify master key deletion from credential store",
+          "Unlock your system keyring, or retry from your desktop session",
+        );
+      }
+    } catch (e) {
+      if (e instanceof KeystoreError) throw e;
+      throw classifyKeytarThrow(e);
+    }
+  }
 }
 
 export async function probeKeytar(): Promise<{ ok: boolean; detail?: string }> {

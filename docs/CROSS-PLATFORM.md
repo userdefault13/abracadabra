@@ -101,6 +101,25 @@ Used for headless/SSH Linux when no OS credential store is available.
 | Session | `abra unlock` caches the **master key** in memory (TTL); the plaintext passphrase is **not** cached. Reboot / new process → locked. |
 | Unlock backoff | After 5 consecutive wrong passphrases, exponential delay before the next try (`2^(failures-5)` seconds, cap 15 minutes). Never a hard lockout; counter in `unlock-attempts.json` (speed bump only — scrypt is the real cost). |
 
+#### Migrating keytar → passphrase-file
+
+Use when you need headless Linux (SSH / systemd) with `ABRA_KEYSTORE=passphrase-file` + the `passphrase` approval backend, but the master key still lives in keytar (Secret Service / Credential Vault).
+
+```sh
+# Prefer a backup first
+abra usb backup
+
+# Run from the graphical session where PolKit / the keyring work,
+# or over `ssh -t` with ABRA_AUTH=polkit and a TTY agent (e.g. pkttyagent)
+abra keystore migrate --to passphrase-file
+```
+
+- The master key bytes do **not** change — only the wrap moves into `master.key.enc` (v2). `vault.enc` is untouched.
+- **Keep-by-default:** without `--remove-old`, the keytar copy stays. While it exists, any same-user process with an unlocked keyring can still read the key. Remove later with `abra keystore migrate --to passphrase-file --remove-old` (types `delete` on `/dev/tty` after verify).
+- Then: `export ABRA_KEYSTORE=passphrase-file` (shell profile + `Environment=ABRA_KEYSTORE=passphrase-file` in the abra-agent unit) and `abra doctor`.
+
+macOS keychain → passphrase-file is not supported yet.
+
 Use one npm dependency where possible:
 
 - [`keytar`](https://github.com/atom/node-keytar) — Keychain / Secret Service / Credential Vault (native addon; needs prebuilds for CI).
@@ -373,7 +392,7 @@ Requires `pkcheck` (usually `/usr/bin/pkcheck` from the `polkit` package).
 | Session | Keystore | Auth |
 |---------|----------|------|
 | Headless | `passphrase-file` | `passphrase` |
-| Headless | `keytar` (default) / other | `polkit` → **denied** (no dialog); set `ABRA_KEYSTORE=passphrase-file` (`abra keystore migrate` coming) |
+| Headless | `keytar` (default) / other | `polkit` → **denied** (no dialog); set `ABRA_KEYSTORE=passphrase-file` (run: `abra keystore migrate --to passphrase-file`) |
 | Graphical | any | `polkit` |
 
 **Passphrase approval (`ABRA_AUTH=passphrase` or auto headless + passphrase-file):**

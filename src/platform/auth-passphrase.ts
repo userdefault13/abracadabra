@@ -42,7 +42,7 @@ export class PassphraseAuth implements PlatformAuth {
     const keystore = resolveKeystoreBackend();
     if (keystore !== "passphrase-file") {
       throw new Error(
-        `abracadabra: approval denied — ABRA_AUTH=passphrase requires ABRA_KEYSTORE=passphrase-file (current keystore: ${keystore}). Migration from keytar is coming via \`abra keystore migrate\`.`,
+        `abracadabra: approval denied — ABRA_AUTH=passphrase requires ABRA_KEYSTORE=passphrase-file (current keystore: ${keystore}). Run: abra keystore migrate --to passphrase-file`,
       );
     }
 

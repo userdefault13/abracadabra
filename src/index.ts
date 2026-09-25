@@ -22,6 +22,7 @@ import {
   cmdCartridgeRestore,
 } from "./commands/cartridge.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
+import { cmdKeystoreMigrate } from "./commands/keystore-migrate.js";
 import { startAgent, lockAgent, installSignalHandlers } from "./agent/index.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
@@ -216,6 +217,25 @@ program
   .command("doctor")
   .description("Environment checklist (platform, keystore, vault)")
   .action(cmdDoctor);
+
+{
+  const keystore = program
+    .command("keystore")
+    .description("Manage the vault master-key keystore backend");
+  keystore
+    .command("migrate")
+    .description("Migrate the vault master key to another keystore backend")
+    .requiredOption("--to <backend>", "target backend (passphrase-file)")
+    .option("--remove-old", "remove the keytar copy after verified migration")
+    .action(async (opts: { to: string; removeOld?: boolean }) => {
+      try {
+        await cmdKeystoreMigrate(opts);
+      } catch (err) {
+        console.error(`\x1b[31m✗ ${err instanceof Error ? err.message : String(err)}\x1b[0m`);
+        process.exit(1);
+      }
+    });
+}
 
 program
   .command("unlock")
