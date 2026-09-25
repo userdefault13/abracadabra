@@ -70,26 +70,31 @@ function resolvePolicy(exists: ExistsFn = existsSync): string | undefined {
 /**
  * Prefer `pid,start_time,uid` (polkit ≥ 0.112) to avoid the CVE-2013-4288 race
  * on bare-pid subjects. start_time is /proc/self/stat field 22; fall back to
- * plain pid only if /proc cannot be parsed.
+ * plain pid only if /proc cannot be parsed (no uid required for that path).
  */
 export function resolvePolkitSubject(
   deps: Pick<PolkitAuthDeps, "readFileSync" | "getuid" | "pid"> = {},
 ): string {
   const pid = deps.pid ?? process.pid;
-  const getuid = deps.getuid ?? (() => process.getuid?.() ?? 0);
   const read = deps.readFileSync ?? readFileSync;
+  let startTime: string | undefined;
   try {
     const stat = read("/proc/self/stat", "utf8");
     const closeParen = stat.lastIndexOf(")");
     if (closeParen < 0) return String(pid);
     // Fields after comm (field 2): index 0 = field 3 … index 19 = field 22 (starttime).
     const afterComm = stat.slice(closeParen + 2).trimStart().split(/\s+/);
-    const startTime = afterComm[19];
-    if (!startTime || !/^\d+$/.test(startTime)) return String(pid);
-    return `${pid},${startTime},${getuid()}`;
+    const field = afterComm[19];
+    if (!field || !/^\d+$/.test(field)) return String(pid);
+    startTime = field;
   } catch {
     return String(pid);
   }
+  const getuidFn = deps.getuid ?? process.getuid;
+  if (typeof getuidFn !== "function") {
+    throw new Error("process.getuid is unavailable");
+  }
+  return `${pid},${startTime},${getuidFn()}`;
 }
 
 export function probePolkit(deps: Pick<PolkitAuthDeps, "existsSync"> = {}): PolkitProbeResult {
@@ -135,7 +140,14 @@ export class PolkitAuth implements PlatformAuth {
       );
     }
 
-    const subject = resolvePolkitSubject(this.deps);
+    const getuid = this.deps.getuid ?? process.getuid;
+    if (typeof getuid !== "function") {
+      throw new Error(
+        `abracadabra: PolKit approval denied — ${req.reason}. process.getuid is unavailable.`,
+      );
+    }
+
+    const subject = resolvePolkitSubject({ ...this.deps, getuid });
     const timeoutSeconds = Math.max(req.timeoutSeconds ?? 30, MIN_PKCHECK_TIMEOUT_SECONDS);
     const execFile = this.deps.execFile ?? (DEFAULT_EXEC as ExecFileFn);
     const args = [
@@ -179,13 +191,20 @@ function denyError(reason: string, err: unknown): Error {
     return new Error(`${prefix}. not authorized (pkcheck exit 1).`);
   }
   if (status === 2) {
-    return new Error(`${prefix}. authentication dismissed or failed (pkcheck exit 2).`);
+    return new Error(
+      `${prefix}. authorization requires a challenge but user interaction was not allowed (pkcheck exit 2).`,
+    );
   }
   if (status === 3) {
-    return new Error(`${prefix}. polkit error (pkcheck exit 3).`);
+    return new Error(`${prefix}. the authentication dialog was dismissed (pkcheck exit 3).`);
   }
-  if (status === 126 || status === 127) {
-    return new Error(`${prefix}. pkcheck could not be executed (exit ${status}).`);
+  if (status === 126) {
+    return new Error(`${prefix}. pkcheck could not be executed (exit 126).`);
+  }
+  if (status === 127) {
+    return new Error(
+      `${prefix}. an error occurred while checking authorization (pkcheck exit 127).`,
+    );
   }
   const msg = err instanceof Error ? err.message : String(err);
   return new Error(`${prefix}. ${msg}`);

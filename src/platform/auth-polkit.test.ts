@@ -31,11 +31,17 @@ describe("PolkitAuth", () => {
     expect(execFile).toHaveBeenCalledTimes(1);
   });
 
-  it.each([1, 2, 3])("denies on exit %i", async (status) => {
+  it.each([
+    [1, /not authorized \(pkcheck exit 1\)/],
+    [
+      2,
+      /authorization requires a challenge but user interaction was not allowed \(pkcheck exit 2\)/,
+    ],
+    [3, /the authentication dialog was dismissed \(pkcheck exit 3\)/],
+    [127, /an error occurred while checking authorization \(pkcheck exit 127\)/],
+  ] as const)("denies on exit %i with man-page message", async (status, msg) => {
     const execFile = vi.fn<ExecFileFn>().mockRejectedValue(Object.assign(new Error("fail"), { status }));
-    await expect(authWith(execFile).authenticate({ reason: "reveal FOO" })).rejects.toThrow(
-      /PolKit approval denied.*reveal FOO/,
-    );
+    await expect(authWith(execFile).authenticate({ reason: "reveal FOO" })).rejects.toThrow(msg);
   });
 
   it("denies on ENOENT spawn error", async () => {
@@ -59,6 +65,20 @@ describe("PolkitAuth", () => {
       existsSync: () => false,
     });
     await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(/pkcheck not found/);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("denies without exec when getuid is unavailable", async () => {
+    const execFile = vi.fn<ExecFileFn>();
+    const auth = new PolkitAuth({
+      execFile,
+      existsSync: () => true,
+      // Non-function wins over process.getuid (?? only skips null/undefined)
+      getuid: false as unknown as () => number,
+    });
+    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(
+      /getuid is unavailable/,
+    );
     expect(execFile).not.toHaveBeenCalled();
   });
 
