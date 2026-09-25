@@ -375,17 +375,27 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
 | Socket perms | `0600` after listen |
 | Protocol | Newline-delimited JSON (`status`, `unlock`, `lock`, `vault.load`, `vault.save`) — **never** sends the master key to clients |
+| Peer check | Sensitive ops (`unlock`, `vault.load`, `vault.save`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cmdline,environ}`. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
 | Vault binding | `vault.load` / `vault.save` include the client's resolved `vaultPath` + `keystoreBackend`; agent refuses (`mismatch`) if they differ from its own — client falls back to direct I/O |
 | Idle lock | Default **15 min** (`ABRA_AGENT_IDLE_SECONDS`); activity = vault ops |
 | Crypto | Agent encrypts/decrypts `vault.enc` with the same AES-256-GCM helpers as `core/vault.ts` |
 
-**Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent). **Windows is unsupported** — `isAgentEnabled()` always returns false on win32 (even with `ABRA_AGENT=1`).
+**Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent). **Windows is unsupported** — `isAgentEnabled()` always returns false on win32 (even with `ABRA_AGENT=1`). **Sensitive agent ops are Linux-only** (no `/proc` / `ss` peer check elsewhere); on macOS with `ABRA_AGENT=1`, unlock/vault I/O return `forbidden_peer` and the client falls back to the direct keystore.
 
-If the socket is missing, connect times out (~500ms), unlock fails (keyring locked / `VaultLockedError`), or the agent returns `unavailable` / `mismatch`, `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path. The agent never mints a master key on unlock failure.
+If the socket is missing, connect times out (~500ms), unlock fails (keyring locked / `VaultLockedError`), the peer is rejected (`forbidden_peer`), or the agent returns `unavailable` / `mismatch`, `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path. The agent never mints a master key on unlock failure.
 
 ### Unlock vs reveal approval
 
-Agent **unlock** is a keystore read into agent memory. It does **not** satisfy PolKit / `authenticate()` reveal gates. CLI/MCP still call `authenticate()` before revealing secrets. Same-uid processes can talk to the socket (same trust boundary as today’s keyring); peer-credential checks (`SO_PEERCRED`) are deferred.
+Agent **unlock** is a keystore read into agent memory. It does **not** satisfy PolKit / `authenticate()` reveal gates. CLI/MCP still call `authenticate()` before revealing secrets.
+
+Sensitive socket ops are limited to the abra CLI peer (see Peer check above). That blocks casual same-uid dumpers (e.g. a compromised npm `postinstall`) without a PolKit prompt. It is **not** a full same-user security boundary. Residual risks if an attacker already runs as your uid:
+
+- `kernel.yama.ptrace_scope=0` → ptrace / debugger attach to the agent or CLI
+- reading `/proc/<pid>/mem` when permitted
+- `LD_PRELOAD` / compromised `node` binary shared with the agent
+- rewriting abracadabra’s installed files (`dist/index.js`) so a “valid” CLI peer is malicious
+
+Treat the agent as a convenience lock for the login session, not as protection against a hostile same-uid process with full local privilege.
 
 Raw-key callers (USB/LAN sync, cartridge checkpoint, keychain re-export) keep using `getMasterKey()` directly — there is no key-export op on the agent socket.
 

@@ -33,6 +33,7 @@ export function isAgentUnavailable(err: unknown): boolean {
     return (
       err.code === "unavailable" ||
       err.code === "mismatch" ||
+      err.code === "forbidden_peer" ||
       err.code === "timeout" ||
       err.code === "connect"
     );

@@ -18,6 +18,7 @@ export type AgentErrorCode =
   | "locked"
   | "unavailable"
   | "mismatch"
+  | "forbidden_peer"
   | "bad_request"
   | "oversized"
   | "internal"

@@ -18,6 +18,7 @@ import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   isAgentRequest,
+  type AgentOp,
   type AgentRequest,
   type AgentResponse,
   type AgentStatusBody,
@@ -31,8 +32,20 @@ import {
 } from "../core/vault.js";
 import { vaultFile } from "../core/paths.js";
 import { resolveKeystoreBackend } from "../platform/env.js";
+import {
+  authorizePeer as defaultAuthorizePeer,
+  type PeerAuthResult,
+  type PeerCheckDeps,
+} from "./peer.js";
 
 export type { AgentStatusBody };
+
+/** Ops that return key material or unlock the in-memory master key. */
+const SENSITIVE_OPS = new Set<AgentOp>(["unlock", "vault.load", "vault.save"]);
+
+export type AuthorizePeerFn = (
+  socket: net.Socket,
+) => Promise<PeerAuthResult>;
 
 export interface StartAgentOpts {
   socketPath?: string;
@@ -43,6 +56,13 @@ export interface StartAgentOpts {
   vaultPath?: () => string;
   /** Injectable keystore backend id (defaults to resolveKeystoreBackend()). */
   keystoreBackend?: () => string;
+  /**
+   * Peer authorization for sensitive ops. Default: Linux ss+/proc check.
+   * Tests may inject a stub; non-Linux without an injection always rejects.
+   */
+  authorizePeer?: AuthorizePeerFn;
+  /** Extra deps for the default Linux peer check (tests). */
+  peerCheckDeps?: PeerCheckDeps;
 }
 
 let running: {
@@ -51,6 +71,7 @@ let running: {
   socketPath: string;
   vaultPath: () => string;
   keystoreBackend: () => string;
+  authorizePeer: AuthorizePeerFn;
 } | null = null;
 
 function logOp(op: string, detail?: string): void {
@@ -93,16 +114,41 @@ function checkVaultBinding(
   return null;
 }
 
+async function requireAbraCliPeer(
+  id: string,
+  op: AgentOp,
+  socket: net.Socket,
+  authorize: AuthorizePeerFn,
+): Promise<AgentResponse | null> {
+  const result = await authorize(socket);
+  if (result.ok) return null;
+  // Log op + reason only — never full cmdline or env.
+  logOp(op, `forbidden_peer reason=${result.reason}`);
+  return fail(
+    id,
+    "forbidden_peer",
+    "Peer is not the abra CLI (client should fall back to direct keystore)",
+  );
+}
+
 async function handleRequest(
   state: AgentState,
   vaultPath: () => string,
   keystoreBackend: () => string,
+  authorize: AuthorizePeerFn,
+  socket: net.Socket,
   req: AgentRequest,
 ): Promise<AgentResponse> {
   const { id, op } = req;
   try {
+    if (SENSITIVE_OPS.has(op)) {
+      const peerErr = await requireAbraCliPeer(id, op, socket, authorize);
+      if (peerErr) return peerErr;
+    }
+
     switch (op) {
       case "status": {
+        // Same-uid status is safe: locked + idleRemainingMs only (no secrets).
         logOp("status");
         return {
           v: PROTOCOL_VERSION,
@@ -118,6 +164,7 @@ async function handleRequest(
         return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock" };
       }
       case "lock": {
+        // Same-uid lock only reduces access (zeroes the in-memory key).
         logOp("lock");
         state.lock();
         return { v: PROTOCOL_VERSION, id, ok: true, op: "lock" };
@@ -190,6 +237,7 @@ function attachConnection(
   state: AgentState,
   vaultPath: () => string,
   keystoreBackend: () => string,
+  authorize: AuthorizePeerFn,
   socket: net.Socket,
 ): void {
   let buf = Buffer.alloc(0);
@@ -233,7 +281,14 @@ function attachConnection(
         reply(fail(id, "bad_request", "Invalid request"));
         continue;
       }
-      void handleRequest(state, vaultPath, keystoreBackend, raw).then(reply);
+      void handleRequest(
+        state,
+        vaultPath,
+        keystoreBackend,
+        authorize,
+        socket,
+        raw,
+      ).then(reply);
     }
   });
 
@@ -261,6 +316,9 @@ async function probeExistingAgent(socketPath: string): Promise<boolean> {
 /**
  * Start the per-user abra agent (unix socket). Holds the master key in memory
  * after unlock; does not call authenticate() / PolKit.
+ *
+ * Sensitive ops (`unlock`, `vault.load`, `vault.save`) require an abra CLI peer
+ * (Linux ss+/proc check; fail closed on non-Linux / ambiguity).
  */
 export async function startAgent(opts?: StartAgentOpts): Promise<{
   socketPath: string;
@@ -289,12 +347,16 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
   });
   const vaultPath = opts?.vaultPath ?? (() => vaultFile());
   const keystoreBackend = opts?.keystoreBackend ?? (() => resolveKeystoreBackend());
+  const peerDeps = opts?.peerCheckDeps;
+  const authorize: AuthorizePeerFn =
+    opts?.authorizePeer ??
+    ((socket) => defaultAuthorizePeer(socket, peerDeps));
 
   const prevUmask = process.umask(0o077);
   let server: net.Server;
   try {
     server = net.createServer((socket) => {
-      attachConnection(state, vaultPath, keystoreBackend, socket);
+      attachConnection(state, vaultPath, keystoreBackend, authorize, socket);
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -313,7 +375,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     process.umask(prevUmask);
   }
 
-  running = { server, state, socketPath, vaultPath, keystoreBackend };
+  running = { server, state, socketPath, vaultPath, keystoreBackend, authorizePeer: authorize };
   logOp("listen", socketPath);
   return { socketPath, state };
 }
