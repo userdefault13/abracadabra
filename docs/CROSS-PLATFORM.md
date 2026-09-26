@@ -98,7 +98,7 @@ Used for headless/SSH Linux when no OS credential store is available.
 | Wrap format | **v2**: scrypt `N=2^17` (131072), `r=8`, `p=1`, AES-256-GCM with AAD binding `{format,version,kdf}`. v1 files (`N=2^14`, no AAD) still open; successful unlock with a ≥12-char passphrase re-wraps to v2 atomically. |
 | Passphrase minimum | **12 Unicode code points** (after NFKC) at creation / passphrase change. Existing shorter secrets still unlock (v1 stays until changed; USB restore of a short bundle passphrase is allowed with a stderr warning). |
 | Prompt | Passphrase is read from the controlling terminal (`/dev/tty`) with echo off — not from stdin pipes, env, or argv. Use `ssh -t` over SSH. `ABRA_HEADLESS_PASSPHRASE` is CI-only (`ABRA_SKIP_BIOMETRICS=1` or `ABRA_AUTH=none`). |
-| Session | `abra unlock` caches the **master key** in memory (TTL); the plaintext passphrase is **not** cached. Reboot / new process → locked. |
+| Session | `abra unlock` caches the **master key** in memory (TTL); the plaintext passphrase is **not** cached. Reboot / new process → locked. With **abra-agent** running, `abra unlock` also pushes the key into the agent so subsequent CLI processes need no prompt for vault I/O (see [abra-agent with passphrase-file](#abra-agent-with-passphrase-file) below). |
 | Unlock backoff | After 5 consecutive wrong passphrases, exponential delay before the next try (`2^(failures-5)` seconds, cap 15 minutes). Never a hard lockout; counter in `unlock-attempts.json` (speed bump only — scrypt is the real cost). |
 
 #### Migrating keytar → passphrase-file
@@ -421,7 +421,7 @@ Optional. You can configure **pam-u2f** so the polkit-1 PAM stack accepts a secu
 
 ## Linux: abra-agent (per-user key-holding agent)
 
-Modelled on 1Password’s Linux design: a **background user agent** holds the unlocked vault master key in memory and **actually locks** (idle + explicit), so `abra` commands stop each reading a login-unlocked Secret Service / keyring entry.
+Modelled on 1Password’s Linux design: a **background user agent** holds the unlocked vault master key in memory and **actually locks** (idle + absolute max age + sleep + explicit), so `abra` commands stop each reading a login-unlocked Secret Service / keyring entry — or, with passphrase-file, stop each re-prompting.
 
 ### Overview
 
@@ -430,19 +430,22 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Socket | `$XDG_RUNTIME_DIR/abra/agent.sock` (override: `ABRA_AGENT_SOCKET`) |
 | Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
 | Socket perms | `0600` after listen |
-| Protocol | Newline-delimited JSON (`status`, `unlock`, `lock`, `vault.load`, `vault.save`) — **never** sends the master key to clients |
-| Peer check | Sensitive ops (`unlock`, `vault.load`, `vault.save`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Relative argv[1] is resolved against the peer's `/proc/<pid>/cwd` before realpath. Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cwd,cmdline,environ}`. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
-| Vault binding | `vault.load` / `vault.save` include the client's resolved `vaultPath` + `keystoreBackend`; agent refuses (`mismatch`) if they differ from its own — client falls back to direct I/O |
+| Protocol | Newline-delimited JSON (`status`, `unlock`, `unlock.key`, `lock`, `vault.load`, `vault.save`) — **never** sends the master key to clients. `unlock.key` is the only path that carries key material, and only **CLI → agent**. |
+| Peer check | Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Relative argv[1] is resolved against the peer's `/proc/<pid>/cwd` before realpath. Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cwd,cmdline,environ}`. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
+| Vault binding | `vault.load` / `vault.save` / `unlock.key` include the client's resolved `vaultPath` + `keystoreBackend`; agent refuses (`mismatch`) if they differ from its own — client falls back to direct I/O |
 | Idle lock | Default **15 min** (`ABRA_AGENT_IDLE_SECONDS`); activity = vault ops |
+| Max age | Absolute **8 h** ceiling (`ABRA_AGENT_MAX_AGE_SECONDS`, values > 8h clamped); activity never extends it |
+| Sleep lock | Linux: subprocess watches logind `PrepareForSleep(true)` via `/usr/bin/gdbus` (preferred) or `/usr/bin/dbus-monitor`; locks the agent. Best-effort (no logind inhibitor). Graceful no-op if binaries missing |
 | Crypto | Agent encrypts/decrypts `vault.enc` with the same AES-256-GCM helpers as `core/vault.ts` |
+| Fresh process | Always starts **locked**; no key file on disk for agent state — after reboot everything stays locked until `abra unlock` |
 
 **Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent). **Windows is unsupported** — `isAgentEnabled()` always returns false on win32 (even with `ABRA_AGENT=1`). **Sensitive agent ops are Linux-only** (no `/proc` / `ss` peer check elsewhere); on macOS with `ABRA_AGENT=1`, unlock/vault I/O return `forbidden_peer` and the client falls back to the direct keystore.
 
-If the socket is missing, connect times out (~500ms), unlock fails (keyring locked / `VaultLockedError`), the peer is rejected (`forbidden_peer`), or the agent returns `unavailable` / `mismatch`, `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path. The agent never mints a master key on unlock failure.
+If the socket is missing, connect times out (~500ms), unlock fails (keyring locked / `VaultLockedError`), the peer is rejected (`forbidden_peer`), the agent returns `unavailable` / `mismatch` / `locked` (passphrase-file agent waiting for `abra unlock`), `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path. The agent never mints a master key on unlock failure.
 
 ### Unlock vs reveal approval
 
-Agent **unlock** is a keystore read into agent memory. It does **not** satisfy PolKit / `authenticate()` reveal gates. CLI/MCP still call `authenticate()` before revealing secrets.
+Agent **unlock** is a keystore read (keytar) or a CLI-pushed key (passphrase-file) into agent memory. It does **not** satisfy PolKit / `authenticate()` reveal gates. CLI/MCP still call `authenticate()` before revealing secrets — under `ABRA_AUTH=passphrase` that means a **per-reveal** passphrase prompt even while the agent holds the key.
 
 Sensitive socket ops are limited to the abra CLI peer (see Peer check above). That blocks casual same-uid dumpers (e.g. a compromised npm `postinstall`) without a PolKit prompt. It is **not** a full same-user security boundary. Residual risks if an attacker already runs as your uid:
 
@@ -455,15 +458,33 @@ Treat the agent as a convenience lock for the login session, not as protection a
 
 Raw-key callers (USB/LAN sync, cartridge checkpoint, keychain re-export) keep using `getMasterKey()` directly — there is no key-export op on the agent socket.
 
+### abra-agent with passphrase-file
+
+With `ABRA_KEYSTORE=passphrase-file`, each CLI process has its own in-memory session — `abra unlock` in one process does not help the next. The agent holds the key between commands.
+
+**Flow:**
+
+1. Start the agent (`systemctl --user start abra-agent` or `abra agent`). It starts **locked**.
+2. On a terminal, run `abra unlock`. The CLI decrypts `master.key.enc` (tty `promptHidden`; with `ABRA_AUTH=passphrase` that single prompt is also the approval — otherwise authenticate first, then prompt).
+3. If an agent socket is reachable, the CLI pushes the 32-byte key via `unlock.key` over the peer-checked socket (**CLI → agent only**; never agent → client). This is the one place key material crosses the socket.
+4. Later `abra run` / vault ops use `vault.load` / `vault.save` with no passphrase prompt. Reveals still call `authenticate()` per reveal.
+5. Locks: idle **15m**, absolute max **8h**, `abra lock`, logind sleep (`PrepareForSleep(true)`), and process exit / reboot (no persistence).
+
+The bare `unlock` op (no key) on a passphrase-file agent returns `locked` with “run: abra unlock (on a terminal)” — it never calls the passphrase keystore (which could prompt). Clients treat that as unavailable and fall back to the direct path (`VaultLockedError`).
+
+**Sleep watch subprocess:** Node has no native D-Bus addon in this tree. The agent spawns `/usr/bin/gdbus monitor …` (or `/usr/bin/dbus-monitor`) with no shell. The systemd unit already allows `AF_UNIX` (system bus). A logind inhibitor is **not** taken — lock is best-effort right before suspend. If neither binary exists, the agent logs once and continues without sleep lock.
+
 ### systemd --user
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp packaging/linux/abra-agent.service ~/.config/systemd/user/
 # Edit ExecStart to absolute /usr/bin/node + absolute …/dist/agent/server.js
+# For passphrase-file, uncomment Environment=ABRA_KEYSTORE=passphrase-file in the unit
 # (do not rely on mise/nvm PATH in the user manager)
 systemctl --user daemon-reload
 systemctl --user enable --now abra-agent
+abra unlock   # on a terminal — pushes key into the agent
 ```
 
 Unit highlights (`packaging/linux/abra-agent.service`):
@@ -471,12 +492,12 @@ Unit highlights (`packaging/linux/abra-agent.service`):
 - `RuntimeDirectory=abra` + `RuntimeDirectoryMode=0700` — creates `$XDG_RUNTIME_DIR/abra` (`%t/abra`) so `ProtectSystem=strict` does not need `ReadWritePaths=%t/abra` (that fails if the dir is missing under a read-only runtime mount).
 - `ReadWritePaths=-%h/.abracadabra` — leading `-` so a missing vault dir does not fail the unit.
 - `ProtectSystem` / `ProtectHome` / `PrivateTmp` in **user** units rely on unprivileged user namespaces (verify live). Session bus at `%t/bus` must stay connectable for Secret Service / keytar.
+- Sleep lock needs `/usr/bin/gdbus` (or dbus-monitor) executable; no `SystemCallFilter` is set that would block that spawn.
 
-Runnable entry (no CLI subcommand yet): `node dist/agent/server.js`.
+CLI:
 
-### Pending CLI (not wired in `src/index.ts` yet)
+- `abra agent` — foreground agent (signal handlers; sleep watch on Linux)
+- `abra unlock` — passphrase-file: unlock local session + push key to agent when reachable
+- `abra lock` — clear local session and lock the agent when present
 
-- `abra agent` — start/status foreground helper
-- `abra lock` — should also lock the agent when present (today’s `abra lock` only clears the passphrase-file session)
-
-See packaging unit comments for hardening notes (`LimitCORE=0`, no `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX` for D-Bus/keytar).
+See packaging unit comments for hardening notes (`LimitCORE=0`, no `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX` for D-Bus/keytar/gdbus).

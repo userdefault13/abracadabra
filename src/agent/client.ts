@@ -34,6 +34,7 @@ export function isAgentUnavailable(err: unknown): boolean {
       err.code === "unavailable" ||
       err.code === "mismatch" ||
       err.code === "forbidden_peer" ||
+      err.code === "locked" ||
       err.code === "timeout" ||
       err.code === "connect"
     );
@@ -67,6 +68,12 @@ export async function agentRequest(
   req: { id?: string } & (
     | { op: "status" }
     | { op: "unlock" }
+    | {
+        op: "unlock.key";
+        key: string;
+        vaultPath?: string;
+        keystoreBackend?: string;
+      }
     | { op: "lock" }
     | { op: "vault.load"; vaultPath?: string; keystoreBackend?: string }
     | {
@@ -171,6 +178,33 @@ export async function agentUnlock(opts?: AgentClientOpts): Promise<void> {
   }
 }
 
+/**
+ * Push a master key into a passphrase-file agent (`unlock.key`).
+ * Caller owns `key` and should zero-fill after this returns.
+ * Never logs or echoes the key.
+ */
+export async function agentUnlockKey(
+  key: Buffer,
+  opts?: AgentClientOpts & { binding?: AgentVaultBinding },
+): Promise<void> {
+  if (!Buffer.isBuffer(key) || key.length !== 32) {
+    throw new AgentClientError("key must be a 32-byte Buffer", "bad_request");
+  }
+  const binding = opts?.binding ?? clientVaultBinding();
+  const res = await agentRequest(
+    {
+      op: "unlock.key",
+      key: key.toString("base64"),
+      vaultPath: binding.vaultPath,
+      keystoreBackend: binding.keystoreBackend,
+    },
+    opts,
+  );
+  if (!res.ok) {
+    throw new AgentClientError(res.error, res.code);
+  }
+}
+
 export async function agentLock(opts?: AgentClientOpts): Promise<void> {
   const res = await agentRequest({ op: "lock" }, opts);
   if (!res.ok) {
@@ -207,7 +241,11 @@ export async function agentVaultSave(
 
 /**
  * Load vault via agent: unlock if locked, then vault.load.
- * Throws AgentClientError — caller should fall back on unavailable/connect/timeout.
+ * Throws AgentClientError — caller should fall back on unavailable/connect/timeout/locked.
+ *
+ * For passphrase-file agents, bare `unlock` returns `locked` (no prompt). That
+ * surfaces as AgentClientError(locked), which isAgentUnavailable treats as
+ * fallback-to-direct (caller gets VaultLockedError from the keystore).
  */
 export async function loadVaultViaAgent(opts?: AgentClientOpts): Promise<Vault> {
   const empty = async (): Promise<Vault> => {

@@ -6,12 +6,20 @@ export const PROTOCOL_VERSION = 1 as const;
 /** Max NDJSON frame size (bytes). Vault JSON must fit under this. */
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
-export type AgentOp = "status" | "unlock" | "lock" | "vault.load" | "vault.save";
+export type AgentOp =
+  | "status"
+  | "unlock"
+  | "unlock.key"
+  | "lock"
+  | "vault.load"
+  | "vault.save";
 
 export interface AgentStatusBody {
   locked: boolean;
   /** Milliseconds until idle lock; null when locked or no idle timer. */
   idleRemainingMs: number | null;
+  /** Milliseconds until absolute max-age lock; null when locked. */
+  maxAgeRemainingMs: number | null;
 }
 
 export type AgentErrorCode =
@@ -35,6 +43,15 @@ export interface AgentVaultBinding {
 export type AgentRequest =
   | { v: typeof PROTOCOL_VERSION; id: string; op: "status" }
   | { v: typeof PROTOCOL_VERSION; id: string; op: "unlock" }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
+      op: "unlock.key";
+      /** Base64-encoded 32-byte master key. Never echoed in responses. */
+      key: string;
+      vaultPath?: string;
+      keystoreBackend?: string;
+    }
   | { v: typeof PROTOCOL_VERSION; id: string; op: "lock" }
   | {
       v: typeof PROTOCOL_VERSION;
@@ -61,6 +78,7 @@ export type AgentResponse =
       status: AgentStatusBody;
     }
   | { v: typeof PROTOCOL_VERSION; id: string; ok: true; op: "unlock" }
+  | { v: typeof PROTOCOL_VERSION; id: string; ok: true; op: "unlock.key" }
   | { v: typeof PROTOCOL_VERSION; id: string; ok: true; op: "lock" }
   | {
       v: typeof PROTOCOL_VERSION;
@@ -97,6 +115,8 @@ export function isAgentRequest(raw: unknown): raw is AgentRequest {
     case "lock":
     case "vault.load":
       return true;
+    case "unlock.key":
+      return typeof r.key === "string";
     case "vault.save":
       return r.vault !== undefined && typeof r.vault === "object";
     default:
