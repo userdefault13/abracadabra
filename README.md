@@ -563,16 +563,26 @@ abra usb sync -v /Volumes/STICK        # pulls A's projects
 
 # back on A, after editing on both sides
 abra usb sync                          # 3-way merge against last-synced snapshot
-abra usb sync --dry-run                # preview only
+abra usb sync --dry-run                # preview only (lists conflicts + DELETE project …)
 abra usb sync --theirs                 # force-resolve conflicts with the USB copy
+abra usb sync --allow-deletes          # required to apply whole-project deletions
 ```
 
-Merge rules: additions/deletions propagate both ways; edits to the same var
-resolve by newest `updatedAt`. True conflicts (same key edited on both sides,
-or edited-vs-deleted) prompt per-key showing both values with timestamps.
-`~/.abracadabra/sync-state.json` stores an **AES-256-GCM encrypted** snapshot of the
-last synced vault (sealed with the same master key as `vault.enc`, mode `0600`)
-so merges work offline without leaving plaintext secrets on disk.
+Merge rules: additions propagate both ways. When **both** sides changed the same
+key relative to the per-peer base (including no base), it is always a conflict
+(interactive prompt, or `--ours` / `--theirs`) — never silent newer-wins.
+Only-one-side-changed keeps auto-merging. Whole-project deletions against the
+sync base require `--allow-deletes` (or typing `delete` on a TTY); otherwise
+nothing is written. Approvals (Touch ID) happen **before** any local write
+(vault, bundle, `latest.json`, sync-state). New backup passphrases must be
+**≥ 12 characters** (opening older shorter bundles still works, with a warning).
+
+`~/.abracadabra/sync-state.json` stores an **AES-256-GCM encrypted** per-peer
+base (format v2: `peers[usb:<lineageId>|lan:<deviceId>]`). A stale/mismatched
+base (or legacy v1) is ignored → additive merge only (nothing deleted). Each
+device has a non-secret `~/.abracadabra/device-id`; USB bundles carry a
+`lineageId` preserved across refreshes. Over LAN the host also refuses a push that would remove
+whole projects from it unless it was started with `abra usb host --allow-deletes`.
 
 ### LAN sync (same merge, no stick)
 

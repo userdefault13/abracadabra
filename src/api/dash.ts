@@ -246,8 +246,8 @@ interface UsbBackupBody {
 /** POST /api/usb/backup {volume, passphrase} — Touch ID gated */
 export async function usbBackup(body: UsbBackupBody, res: ServerResponse): Promise<void> {
   const volume = body.volume?.trim();
-  if (!volume || !body.passphrase || body.passphrase.length < 8) {
-    send(res, 400, { error: "expected {volume, passphrase (min 8 chars)}" });
+  if (!volume || !body.passphrase || body.passphrase.length < 12) {
+    send(res, 400, { error: "expected {volume, passphrase (min 12 chars)}" });
     return;
   }
   const { createBackup } = await import("../commands/usb.js");
@@ -265,6 +265,7 @@ interface UsbSyncBody extends UsbBackupBody {
   target?: string;
   apply?: boolean;
   force?: "ours" | "theirs";
+  allowDeletes?: boolean;
 }
 
 /**
@@ -273,18 +274,23 @@ interface UsbSyncBody extends UsbBackupBody {
  *  - apply=true  → merge + write; 409 with conflicts[] when unresolved
  */
 export async function usbSync(body: UsbSyncBody, res: ServerResponse): Promise<void> {
-  if (!body.passphrase || body.passphrase.length < 8) {
-    send(res, 400, { error: "expected {passphrase, target?, apply?, force?}" });
+  if (!body.passphrase || body.passphrase.length < 1) {
+    send(res, 400, { error: "expected {passphrase, target?, apply?, force?, allowDeletes?}" });
     return;
   }
-  const { previewSync, applySync } = await import("../commands/usb.js");
+  const { previewSync, applySync, UsbProjectDeleteError } = await import("../commands/usb.js");
   try {
     if (body.apply) {
       if (body.force && body.force !== "ours" && body.force !== "theirs") {
         send(res, 400, { error: 'force must be "ours" or "theirs"' });
         return;
       }
-      const result = await applySync(body.target?.trim() || undefined, body.passphrase, body.force);
+      const result = await applySync(
+        body.target?.trim() || undefined,
+        body.passphrase,
+        body.force,
+        body.allowDeletes === true,
+      );
       send(res, 200, { ok: true, ...result, report: result.report, conflicts: [] });
     } else {
       const preview = await previewSync(body.target?.trim() || undefined, body.passphrase);
@@ -292,6 +298,11 @@ export async function usbSync(body: UsbSyncBody, res: ServerResponse): Promise<v
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof UsbProjectDeleteError || (err as { projects?: unknown })?.projects) {
+      const delErr = err as Error & { projects: string[] };
+      send(res, 409, { error: msg, projectDeletions: delErr.projects });
+      return;
+    }
     if ((err as { conflicts?: unknown })?.conflicts) {
       const conflictErr = err as Error & { conflicts: { scope: string; key: string; newest: string; ours?: string; theirs?: string }[] };
       send(res, 409, { error: msg, conflicts: conflictErr.conflicts });
@@ -356,6 +367,7 @@ interface UsbLanSyncBody {
   fingerprint?: string;
   apply?: boolean;
   force?: "ours" | "theirs";
+  allowDeletes?: boolean;
 }
 
 /** POST /api/usb/lan-sync */
@@ -363,7 +375,7 @@ export async function usbLanSync(body: UsbLanSyncBody, res: ServerResponse): Pro
   const host = body.host?.trim();
   const pin = body.pin?.trim();
   if (!host || !pin || !/^\d{6}$/.test(pin)) {
-    send(res, 400, { error: "expected {host, pin (6 digits), fingerprint, apply?, force?}" });
+    send(res, 400, { error: "expected {host, pin (6 digits), fingerprint, apply?, force?, allowDeletes?}" });
     return;
   }
   if (!body.fingerprint?.trim()) {
@@ -373,14 +385,17 @@ export async function usbLanSync(body: UsbLanSyncBody, res: ServerResponse): Pro
     });
     return;
   }
-  const { previewLanSync, applyLanSync } = await import("../commands/usb.js");
+  const { previewLanSync, applyLanSync, LanConflictError } = await import("../commands/usb.js");
+  const { LanProjectDeleteError } = await import("../usb/lan-client.js");
   try {
     if (body.apply) {
       if (body.force && body.force !== "ours" && body.force !== "theirs") {
         send(res, 400, { error: 'force must be "ours" or "theirs"' });
         return;
       }
-      const result = await applyLanSync(host, pin, body.force, body.fingerprint);
+      const result = await applyLanSync(host, pin, body.force, body.fingerprint, {
+        allowDeletes: body.allowDeletes === true,
+      });
       send(res, 200, { ok: true, ...result, conflicts: [] });
     } else {
       const preview = await previewLanSync(host, pin, body.fingerprint);
@@ -388,7 +403,12 @@ export async function usbLanSync(body: UsbLanSyncBody, res: ServerResponse): Pro
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if ((err as { conflicts?: unknown })?.conflicts) {
+    if (err instanceof LanProjectDeleteError || (err as { projects?: unknown })?.projects) {
+      const delErr = err as Error & { projects: string[] };
+      send(res, 409, { error: msg, projectDeletions: delErr.projects });
+      return;
+    }
+    if (err instanceof LanConflictError || (err as { conflicts?: unknown })?.conflicts) {
       const conflictErr = err as Error & {
         conflicts: { scope: string; key: string; newest: string; ours?: string; theirs?: string }[];
       };

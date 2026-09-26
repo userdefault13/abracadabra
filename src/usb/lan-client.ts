@@ -20,7 +20,10 @@ import {
   threeWayMerge,
   loadSyncState,
   saveSyncState,
+  lanPeerId,
+  formatProjectDeletionLines,
   type Resolutions,
+  type ProjectDeletion,
 } from "../core/sync.js";
 import {
   fingerprintFromDer,
@@ -53,6 +56,7 @@ export interface LanSyncPreview {
   report: string[];
   conflicts: ConflictInfo[];
   needsResolution: boolean;
+  projectDeletions: ProjectDeletion[];
 }
 
 const FP_REQUIRED =
@@ -317,7 +321,10 @@ async function pushBundle(
 const SCOPED_HOST_MSG =
   "host is sharing a scoped (read-only) session — rerun with --project <name>";
 
-function openRemoteVault(bundle: BackupBundle, pin: string): Vault {
+function openRemotePayload(
+  bundle: BackupBundle,
+  pin: string,
+): { vault: Vault; deviceId?: string } {
   let payload;
   try {
     payload = openBundle(bundle, pin);
@@ -325,7 +332,10 @@ function openRemoteVault(bundle: BackupBundle, pin: string): Vault {
     if (err instanceof ScopedBundleError) throw new Error(SCOPED_HOST_MSG);
     throw new Error("Wrong PIN for sealed bundle");
   }
-  return decryptEnvelope(payload.vaultEnc, Buffer.from(payload.masterKey, "base64"));
+  return {
+    vault: decryptEnvelope(payload.vaultEnc, Buffer.from(payload.masterKey, "base64")),
+    deviceId: payload.meta.deviceId,
+  };
 }
 
 function isVaultLocked(err: unknown): boolean {
@@ -363,6 +373,12 @@ export class LanConflictError extends Error {
   }
 }
 
+export class LanProjectDeleteError extends Error {
+  constructor(public projects: string[]) {
+    super(`project deletion(s) require --allow-deletes: ${projects.join(", ")}`);
+  }
+}
+
 export async function previewLanSync(
   target: string,
   pin: string,
@@ -370,14 +386,23 @@ export async function previewLanSync(
 ): Promise<LanSyncPreview> {
   const fp = requireFingerprint(expectedFingerprint);
   const { bundle } = await pullBundle(target, pin, fp);
-  const remote: Vault = openRemoteVault(bundle, pin);
+  const { vault: remote, deviceId } = openRemotePayload(bundle, pin);
   const local = await loadVault();
-  const base = (await loadSyncState())?.base ?? null;
-  const { conflicts, report } = threeWayMerge(local, remote, base, new Map(), "LAN peer");
+  const peerId = lanPeerId(deviceId);
+  const base = (await loadSyncState(peerId))?.base ?? null;
+  const { conflicts, report, projectDeletions } = threeWayMerge(
+    local,
+    remote,
+    base,
+    new Map(),
+    "LAN peer",
+  );
+  const deleteLines = formatProjectDeletionLines(projectDeletions, "LAN peer");
   return {
-    report,
+    report: [...deleteLines, ...report.filter((l) => !/was deleted on/.test(l))],
     conflicts: conflicts.map(toConflictInfo),
     needsResolution: conflicts.length > 0,
+    projectDeletions,
   };
 }
 
@@ -386,12 +411,14 @@ export async function applyLanSync(
   pin: string,
   force?: "ours" | "theirs",
   expectedFingerprint?: string,
+  opts?: { allowDeletes?: boolean },
 ): Promise<{ changed: boolean; report: string[] }> {
   const fp = requireFingerprint(expectedFingerprint);
   const { bundle } = await pullBundle(target, pin, fp);
-  const remote: Vault = openRemoteVault(bundle, pin);
+  const { vault: remote, deviceId } = openRemotePayload(bundle, pin);
   const local = await loadVault();
-  const base = (await loadSyncState())?.base ?? null;
+  const peerId = lanPeerId(deviceId);
+  const base = (await loadSyncState(peerId))?.base ?? null;
   const resolutions: Resolutions = new Map();
   if (force) {
     const probe = threeWayMerge(local, remote, base, new Map(), "LAN peer");
@@ -399,7 +426,7 @@ export async function applyLanSync(
       resolutions.set(`${c.scope}/${c.key}`, force === "theirs" ? c.theirs : c.ours);
     }
   }
-  const { merged, conflicts, report } = threeWayMerge(
+  const { merged, conflicts, report, projectDeletions } = threeWayMerge(
     local,
     remote,
     base,
@@ -407,21 +434,26 @@ export async function applyLanSync(
     "LAN peer",
   );
   if (conflicts.length > 0 && !force) throw new LanConflictError(conflicts.map(toConflictInfo));
+  if (projectDeletions.length > 0 && !opts?.allowDeletes) {
+    throw new LanProjectDeleteError(projectDeletions.map((d) => d.project));
+  }
 
-  if (report.length === 0) {
-    await saveSyncState(local);
+  // One approval covers sync-state write, vault write, and push.
+  await authenticate("abracadabra: sync vault over LAN");
+
+  if (report.length === 0 && projectDeletions.length === 0) {
+    await saveSyncState(peerId, local);
     const masterKey = await getMasterKey();
     const out = sealBundle(encryptVault(local, masterKey), masterKey, pin);
     await pushBundle(target, pin, out, fp);
     return { changed: false, report: [] };
   }
 
-  await authenticate("abracadabra: sync vault over LAN");
   await saveVault(merged);
   const masterKey = await getMasterKey();
   const out = sealBundle(encryptVault(merged, masterKey), masterKey, pin);
   await pushBundle(target, pin, out, fp);
-  await saveSyncState(merged);
+  await saveSyncState(peerId, merged);
   return { changed: true, report };
 }
 

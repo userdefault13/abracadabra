@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
-/** USB local stick backups (device in your pocket). */
-export const USB_PASSPHRASE_MIN = 8;
+/** USB / file backup bundles (new seals). Opening older short passphrases still works. */
+export const USB_PASSPHRASE_MIN = 12;
 
 /**
  * Cloud `--full` checkpoints are offline-attackable if the sealed blob is fetched.
@@ -26,7 +26,16 @@ const COMMON_WEAK = new Set(
 
 export function assertUsbPassphrase(passphrase: string): void {
   if (passphrase.length < USB_PASSPHRASE_MIN) {
-    throw new Error(`Passphrase must be at least ${USB_PASSPHRASE_MIN} characters`);
+    throw new Error("Passphrase must be at least 12 characters");
+  }
+}
+
+/** Warn once when opening/syncing a legacy bundle sealed with a short passphrase. */
+export function warnIfShortBundlePassphrase(passphrase: string): void {
+  if (passphrase.length < USB_PASSPHRASE_MIN) {
+    console.error(
+      "bundle passphrase is shorter than 12 characters — consider re-creating the backup",
+    );
   }
 }
 

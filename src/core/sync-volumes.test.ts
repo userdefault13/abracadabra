@@ -46,6 +46,16 @@ describe("threeWayMerge", () => {
     expect(report.some((r) => r.includes("USB") || r.includes("var"))).toBe(true);
   });
 
+  it("both sides changed → conflict (no silent newer-wins)", () => {
+    const base = vault({ a: { createdAt: 1, vars: { K: entry("base", 1) } } });
+    const ours = vault({ a: { createdAt: 1, vars: { K: entry("ours", 10) } } });
+    const theirs = vault({ a: { createdAt: 1, vars: { K: entry("theirs", 20) } } });
+    const { conflicts, merged } = threeWayMerge(ours, theirs, base, new Map(), "peer");
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].key).toBe("K");
+    expect(merged.projects.a.vars.K).toBeUndefined();
+  });
+
   it("respects manual resolutions", () => {
     const base = vault({ a: { createdAt: 1, vars: { K: entry("base", 1) } } });
     const ours = vault({ a: { createdAt: 1, vars: { K: entry("ours", 5) } } });

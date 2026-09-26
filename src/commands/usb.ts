@@ -17,15 +17,20 @@ import {
   openAnyBundle,
   readBundleFile,
 } from "../core/backup.js";
-import type { BackupBundle, ScopedBundlePayload } from "../core/backup.js";
+import type { BackupBundle, BundlePayload, ScopedBundlePayload } from "../core/backup.js";
 import { syncStateFile } from "../core/paths.js";
 import {
   threeWayMerge,
   loadSyncState,
   saveSyncState,
+  usbPeerId,
+  formatProjectDeletionLines,
   type Resolutions,
   type Conflict,
+  type ProjectDeletion,
 } from "../core/sync.js";
+import { assertUsbPassphrase, warnIfShortBundlePassphrase } from "../core/passphrase.js";
+import crypto from "node:crypto";
 import {
   assertScopeNamesAllowed,
   validateScope,
@@ -48,6 +53,7 @@ import {
   scopedLanSync,
   fetchLanInfo,
   LanConflictError,
+  LanProjectDeleteError,
   parseHostPort,
 } from "../usb/lan-client.js";
 
@@ -142,8 +148,10 @@ function writeBundleToDir(
   vaultEnc: { iv: string; tag: string; data: string },
   masterKey: Buffer,
   passphrase: string,
+  opts?: { lineageId?: string },
 ): string {
-  const bundle = sealBundle(vaultEnc, masterKey, passphrase);
+  const lineageId = opts?.lineageId ?? crypto.randomUUID();
+  const bundle = sealBundle(vaultEnc, masterKey, passphrase, { lineageId });
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const file = path.join(dir, `backup-${stamp}.abrabak`);
@@ -214,6 +222,7 @@ async function openAnyWithPrompts(
     try {
       const opened = openAnyBundle(bundle, pass);
       activePassphrase = pass;
+      warnIfShortBundlePassphrase(pass);
       return opened;
     } catch {
       if (attempt === 3) fail("Wrong passphrase (3 attempts)");
@@ -235,6 +244,11 @@ export class UsbConflictError extends Error {
   }
 }
 export class UsbWrongPassphraseError extends Error {}
+export class UsbProjectDeleteError extends Error {
+  constructor(public projects: string[]) {
+    super(`project deletion(s) require --allow-deletes: ${projects.join(", ")}`);
+  }
+}
 
 export interface VolumeInfo {
   name: string;
@@ -255,6 +269,7 @@ export interface SyncPreview {
   report: string[];
   conflicts: ConflictInfo[];
   needsResolution: boolean;
+  projectDeletions: ProjectDeletion[];
 }
 
 function maskValue(v: string): string {
@@ -276,6 +291,25 @@ function toConflictInfo(c: Conflict): ConflictInfo {
   return { scope: c.scope, key: c.key, newest, ours, theirs };
 }
 
+async function gateProjectDeletions(
+  deletions: ProjectDeletion[],
+  allowDeletes: boolean | undefined,
+  interactive: boolean,
+): Promise<void> {
+  if (deletions.length === 0) return;
+  if (allowDeletes) return;
+  const names = deletions.map((d) => d.project);
+  if (interactive && process.stdin.isTTY && process.stdout.isTTY) {
+    console.log(red(`\n⚠ Project deletion(s): ${names.join(", ")}`));
+    const answer = await prompt("Type 'delete' to allow removing these projects (or abort): ");
+    if (answer.trim() !== "delete") {
+      throw new UsbProjectDeleteError(names);
+    }
+    return;
+  }
+  throw new UsbProjectDeleteError(names);
+}
+
 export function listVolumes(): VolumeInfo[] {
   return mountedVolumes().map((mount) => {
     const dir = bundleDirFor(mount);
@@ -292,6 +326,7 @@ export function listVolumes(): VolumeInfo[] {
 }
 
 export async function createBackup(targetDirOrVolume: string, passphrase: string): Promise<string> {
+  assertUsbPassphrase(passphrase);
   await authenticate("abracadabra: export encrypted USB backup");
   const vault = await loadVault();
   const masterKey = await getMasterKey();
@@ -309,6 +344,10 @@ interface PreparedSync {
   report: string[];
   conflictInfos: ConflictInfo[];
   hasConflicts: boolean;
+  projectDeletions: ProjectDeletion[];
+  peerId: string | null;
+  lineageId: string;
+  remotePayload: BundlePayload;
 }
 
 async function prepareSync(
@@ -316,8 +355,8 @@ async function prepareSync(
   passphrase: string,
   force?: "ours" | "theirs",
 ): Promise<PreparedSync> {
+  warnIfShortBundlePassphrase(passphrase);
   const localVault = await loadVault();
-  const base = (await loadSyncState())?.base ?? null;
   let latestFile: string | null;
   try {
     latestFile = resolveLatest(target);
@@ -327,11 +366,13 @@ async function prepareSync(
   if (!latestFile) throw new UsbNoBackupError("No abra backup found on any mounted volume");
 
   let remoteVault: Vault;
+  let remotePayload: BundlePayload;
   try {
     const opened = openAnyBundle(readBundleFile(latestFile), passphrase);
     if (opened.kind === "scoped") {
       throw new Error(SCOPED_BUNDLE_MSG);
     }
+    remotePayload = opened.payload;
     remoteVault = decryptEnvelope(
       opened.payload.vaultEnc,
       Buffer.from(opened.payload.masterKey, "base64"),
@@ -341,6 +382,10 @@ async function prepareSync(
     throw new UsbWrongPassphraseError("Wrong passphrase for the backup bundle");
   }
 
+  const lineageId = remotePayload.meta.lineageId ?? crypto.randomUUID();
+  const peerId = usbPeerId(remotePayload.meta.lineageId);
+  const base = (await loadSyncState(peerId))?.base ?? null;
+
   const resolutions: Resolutions = new Map();
   if (force) {
     const probe = threeWayMerge(localVault, remoteVault, base, new Map(), "USB");
@@ -348,7 +393,7 @@ async function prepareSync(
       resolutions.set(`${c.scope}/${c.key}`, force === "theirs" ? c.theirs : c.ours);
     }
   }
-  const { merged, conflicts, report } = threeWayMerge(
+  const { merged, conflicts, report, projectDeletions } = threeWayMerge(
     localVault,
     remoteVault,
     base,
@@ -361,6 +406,10 @@ async function prepareSync(
     report,
     conflictInfos: conflicts.map(toConflictInfo),
     hasConflicts: conflicts.length > 0,
+    projectDeletions,
+    peerId,
+    lineageId,
+    remotePayload,
   };
 }
 
@@ -369,30 +418,46 @@ export async function previewSync(
   passphrase: string,
 ): Promise<SyncPreview> {
   const p = await prepareSync(target, passphrase);
-  return { report: p.report, conflicts: p.conflictInfos, needsResolution: p.hasConflicts };
+  const deleteLines = formatProjectDeletionLines(p.projectDeletions, "USB");
+  return {
+    report: [...deleteLines, ...p.report.filter((l) => !/was deleted on/.test(l))],
+    conflicts: p.conflictInfos,
+    needsResolution: p.hasConflicts,
+    projectDeletions: p.projectDeletions,
+  };
 }
 
 export async function applySync(
   target: string | undefined,
   passphrase: string,
   force?: "ours" | "theirs",
+  allowDeletes?: boolean,
 ): Promise<{ changed: boolean; file?: string; report: string[] }> {
   const p = await prepareSync(target, passphrase, force);
   if (p.hasConflicts && !force) throw new UsbConflictError(p.conflictInfos);
-  if (p.report.length === 0) {
-    await saveSyncState(await loadVault());
+  await gateProjectDeletions(p.projectDeletions, allowDeletes, false);
+
+  // One approval covers the whole apply (including already-in-sync sync-state write).
+  await authenticate("abracadabra: sync vault with USB backup");
+
+  if (p.report.length === 0 && p.projectDeletions.length === 0) {
+    await saveSyncState(p.peerId, await loadVault());
     return { changed: false, file: path.basename(p.latestFile), report: [] };
   }
-  await authenticate("abracadabra: sync vault with USB backup");
+
   await saveVault(p.merged);
   const masterKey = await getMasterKey();
+  // Prefer existing lineage; mint only when refreshing a legacy bundle without one.
+  const lineageId = p.remotePayload.meta.lineageId ?? p.lineageId;
+  const peerId = usbPeerId(lineageId);
   const file = writeBundleToDir(
     path.dirname(p.latestFile),
     encryptVault(p.merged, masterKey),
     masterKey,
     passphrase,
+    { lineageId },
   );
-  await saveSyncState(p.merged);
+  await saveSyncState(peerId, p.merged);
   console.log(`✓ dash/usb: synced — refreshed ${path.basename(file)}`);
   return { changed: true, file: path.basename(file), report: p.report };
 }
@@ -441,16 +506,14 @@ async function applyScopedFileMerge(
 
 /**
  * Write a scoped project backup under `<dir>/abracadabra/scoped-*.abrabak`.
- * Does not touch `latest.json`. Passphrase must be ≥ 8 characters.
+ * Does not touch `latest.json`. Passphrase must be ≥ 12 characters.
  */
 export async function createScopedBackup(
   dir: string,
   projects: string[],
   passphrase: string,
 ): Promise<string> {
-  if (passphrase.length < 8) {
-    throw new Error("Passphrase must be at least 8 characters");
-  }
+  assertUsbPassphrase(passphrase);
   const scope = assertScopeNamesAllowed(projects);
   await authenticate(
     `abracadabra: export scoped backup of project(s) ${scope.join(", ")}`,
@@ -485,6 +548,7 @@ export {
   scopedLanSync,
   fetchLanInfo,
   LanConflictError,
+  LanProjectDeleteError,
 };
 
 export function registerUsbCommands(program: Command): void {
@@ -561,6 +625,7 @@ export function registerUsbCommands(program: Command): void {
     .option("--port <number>", "listen port", String(LAN_DEFAULT_PORT))
     .option("--ttl <seconds>", "session lifetime", String(LAN_DEFAULT_TTL_MS / 1000))
     .option("--no-advertise", "skip mDNS advertisement")
+    .option("--allow-deletes", "accept a peer push that removes whole projects from this host", false)
     .option(
       "-p, --project <name>",
       "share only this project (repeatable; scoped, read-only)",
@@ -573,6 +638,7 @@ export function registerUsbCommands(program: Command): void {
         ttl: string;
         advertise: boolean;
         project: string[];
+        allowDeletes: boolean;
       }) => {
         try {
           const projects = opts.project?.length ? opts.project : undefined;
@@ -581,6 +647,7 @@ export function registerUsbCommands(program: Command): void {
             ttlMs: Number(opts.ttl) * 1000,
             advertise: opts.advertise,
             projects,
+            allowDeletes: opts.allowDeletes,
           });
           console.log(green("✦ LAN sync host running"));
           console.log(`  PIN:          ${bold(handle.pin)}`);
@@ -645,13 +712,12 @@ export function registerUsbCommands(program: Command): void {
         if (opts.project?.length) {
           assertScopeNamesAllowed(opts.project); // refuse reserved names before prompting
           const pass1 = await promptHidden(
-            "Passphrase for the backup bundle (min 8 chars, hidden): ",
+            "Passphrase for the backup bundle (min 12 chars, hidden): ",
           );
-          if (pass1.length < 8) fail("Passphrase must be at least 8 characters");
-          if (pass1.length < 12) {
-            console.log(
-              yellow("⚠ passphrase is under 12 characters — 12+ recommended for scoped bundles"),
-            );
+          try {
+            assertUsbPassphrase(pass1);
+          } catch (err) {
+            fail(err);
           }
           if ((await promptHidden("Repeat passphrase: ")) !== pass1) fail("Passphrases do not match");
 
@@ -667,8 +733,12 @@ export function registerUsbCommands(program: Command): void {
         const vault = await loadVault();
         const masterKey = await getMasterKey();
 
-        const pass1 = await promptHidden("Passphrase for the backup bundle (min 8 chars, hidden): ");
-        if (pass1.length < 8) fail("Passphrase must be at least 8 characters");
+        const pass1 = await promptHidden("Passphrase for the backup bundle (min 12 chars, hidden): ");
+        try {
+          assertUsbPassphrase(pass1);
+        } catch (err) {
+          fail(err);
+        }
         if ((await promptHidden("Repeat passphrase: ")) !== pass1) fail("Passphrases do not match");
 
         const file = writeBundleToDir(dir, encryptVault(vault, masterKey), masterKey, pass1);
@@ -758,6 +828,11 @@ export function registerUsbCommands(program: Command): void {
     .option("--dry-run", "show what would change without writing anything", false)
     .option("--theirs", "auto-resolve all conflicts with the remote version", false)
     .option("--ours", "auto-resolve all conflicts with this machine's version (default for scoped)", false)
+    .option(
+      "--allow-deletes",
+      "allow whole-project deletions detected against the per-peer sync base",
+      false,
+    )
     .action(
       async (opts: {
         volume?: string;
@@ -769,6 +844,7 @@ export function registerUsbCommands(program: Command): void {
         dryRun: boolean;
         theirs: boolean;
         ours: boolean;
+        allowDeletes: boolean;
       }) => {
         try {
           const forceMode = opts.theirs ? ("theirs" as const) : opts.ours ? ("ours" as const) : undefined;
@@ -857,16 +933,24 @@ export function registerUsbCommands(program: Command): void {
             if (opts.dryRun) {
               const preview = await previewLanSync(target, pin, opts.fingerprint);
               console.log(`\nSyncing against LAN ${dim(target)}`);
-              if (preview.report.length === 0) console.log(green("✓ Already in sync"));
-              else for (const line of preview.report) console.log(`  ${line}`);
+              if (preview.report.length === 0 && preview.projectDeletions.length === 0) {
+                console.log(green("✓ Already in sync"));
+              } else {
+                for (const line of preview.report) console.log(`  ${line}`);
+              }
               if (preview.needsResolution) {
                 console.log(yellow(`⚠ ${preview.conflicts.length} conflict(s) — use --ours/--theirs`));
+                for (const c of preview.conflicts) {
+                  console.log(`  ${c.scope}/${c.key} (newest: ${c.newest})`);
+                }
               }
               console.log(dim("\n(dry run — nothing written)"));
               return;
             }
 
-            const result = await applyLanSync(target, pin, forceMode, opts.fingerprint);
+            const result = await applyLanSync(target, pin, forceMode, opts.fingerprint, {
+              allowDeletes: opts.allowDeletes,
+            });
             if (result.report.length === 0) console.log(green("✓ Already in sync"));
             else {
               for (const line of result.report) console.log(`  ${line}`);
@@ -898,14 +982,16 @@ export function registerUsbCommands(program: Command): void {
               return;
             }
 
-            // Full bundle path (existing behavior)
+            // Full bundle path
             if (projects) {
               fail("full vault bundles do not support --project; use a scoped bundle or LAN scoped host");
             }
+            const pass = await cachedPassphrase();
+            warnIfShortBundlePassphrase(pass);
             const payload = opened.payload;
             const localVault = await loadVault();
-            const state = await loadSyncState();
-            const base = state?.base ?? null;
+            const peerId = usbPeerId(payload.meta.lineageId);
+            const base = (await loadSyncState(peerId))?.base ?? null;
             if (!base) {
               console.log(
                 yellow("⚠ no previous sync snapshot — first sync can only pull/push whole projects"),
@@ -918,8 +1004,38 @@ export function registerUsbCommands(program: Command): void {
             );
 
             const first = threeWayMerge(localVault, remoteVault, base, new Map(), "USB");
+
+            console.log(`\nSyncing against ${dim(path.basename(latest))}`);
+
+            if (opts.dryRun) {
+              if (first.report.length === 0 && first.projectDeletions.length === 0) {
+                console.log(green("✓ Already in sync"));
+              } else {
+                for (const line of formatProjectDeletionLines(first.projectDeletions, "USB")) {
+                  console.log(`  ${line}`);
+                }
+                for (const line of first.report.filter((l) => !/was deleted on/.test(l))) {
+                  console.log(`  ${line}`);
+                }
+              }
+              if (first.conflicts.length > 0) {
+                console.log(yellow(`⚠ ${first.conflicts.length} conflict(s)`));
+                for (const c of first.conflicts) {
+                  const info = toConflictInfo(c);
+                  console.log(`  ${info.scope}/${info.key} (newest: ${info.newest})`);
+                }
+              }
+              console.log(dim("\n(dry run — nothing written)"));
+              return;
+            }
+
+            // Non-dry-run: also show DELETE lines before interactive confirm
+            for (const line of formatProjectDeletionLines(first.projectDeletions, "USB")) {
+              console.log(`  ${line}`);
+            }
+
             const resolutions = await collectResolutions(first.conflicts, forceMode);
-            const { merged, report } = threeWayMerge(
+            const { merged, report, projectDeletions } = threeWayMerge(
               localVault,
               remoteVault,
               base,
@@ -927,34 +1043,33 @@ export function registerUsbCommands(program: Command): void {
               "USB",
             );
 
-            console.log(`\nSyncing against ${dim(path.basename(latest))}`);
-            if (report.length === 0) {
+            await gateProjectDeletions(projectDeletions, opts.allowDeletes, true);
+
+            if (report.length === 0 && projectDeletions.length === 0) {
               console.log(green("✓ Already in sync"));
-              if (!opts.dryRun) await saveSyncState(localVault);
+              await authenticate("abracadabra: update USB backup");
+              await saveSyncState(peerId, localVault);
               return;
             }
             for (const line of report) console.log(`  ${line}`);
 
-            if (opts.dryRun) {
-              console.log(dim("\n(dry run — nothing written)"));
-              return;
-            }
-
-            await saveVault(merged);
             await authenticate("abracadabra: update USB backup");
+            await saveVault(merged);
             const masterKey = await getMasterKey();
+            const lineageId = payload.meta.lineageId ?? crypto.randomUUID();
             const file = writeBundleToDir(
               path.dirname(latest),
               encryptVault(merged, masterKey),
               masterKey,
-              await cachedPassphrase(),
+              pass,
+              { lineageId },
             );
-            await saveSyncState(merged);
+            await saveSyncState(usbPeerId(lineageId), merged);
             console.log(green(`✓ Sync complete — USB refreshed (${path.basename(file)})`));
             return;
           }
 
-          // No backup yet — initial full backup (existing behavior)
+          // No backup yet — initial full backup
           if (projects) {
             fail("no backup found — create a scoped backup with: abra usb backup -f <dir> --project …");
           }
@@ -966,11 +1081,22 @@ export function registerUsbCommands(program: Command): void {
           }
           await authenticate("abracadabra: export encrypted backup to USB");
           const dir = bundleDirFor(opts.volume ?? (await pickVolume()));
-          const pass = await promptHidden("Choose a passphrase for the backup bundle (hidden): ");
-          if (pass.length < 8) fail("Passphrase must be at least 8 characters");
+          const pass = await promptHidden("Choose a passphrase for the backup bundle (min 12 chars, hidden): ");
+          try {
+            assertUsbPassphrase(pass);
+          } catch (err) {
+            fail(err);
+          }
           const masterKey = await getMasterKey();
-          const file = writeBundleToDir(dir, encryptVault(localVault, masterKey), masterKey, pass);
-          await saveSyncState(localVault);
+          const lineageId = crypto.randomUUID();
+          const file = writeBundleToDir(
+            dir,
+            encryptVault(localVault, masterKey),
+            masterKey,
+            pass,
+            { lineageId },
+          );
+          await saveSyncState(usbPeerId(lineageId), localVault);
           console.log(green(`✓ Initial backup written: ${file}`));
         } catch (err) {
           if (err instanceof LanConflictError) {
@@ -979,6 +1105,9 @@ export function registerUsbCommands(program: Command): void {
               console.error(`  ${c.scope}/${c.key} (newest: ${c.newest})`);
             }
             process.exit(1);
+          }
+          if (err instanceof UsbProjectDeleteError) {
+            fail(err);
           }
           fail(err);
         }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
 import type { Project } from "./vault.js";
+import { getOrCreateDeviceId } from "./device-id.js";
 
 /**
  * A passphrase-encrypted, portable backup of the vault.
@@ -21,6 +22,10 @@ export interface VaultEnvelope {
 export interface BundleMeta {
   createdAt: number;
   hostname: string;
+  /** Non-secret id of the sealing device (for per-peer sync bases). */
+  deviceId?: string;
+  /** Stable id for a USB/file backup lineage (minted on first write, preserved on refresh). */
+  lineageId?: string;
 }
 
 interface KdfParams {
@@ -140,12 +145,22 @@ export function sealBundle(
   vaultEnc: VaultEnvelope,
   masterKey: Buffer,
   passphrase: string,
-  opts?: { kdf?: Partial<Pick<KdfParams, "N" | "r" | "p" | "keyLen">> },
+  opts?: {
+    kdf?: Partial<Pick<KdfParams, "N" | "r" | "p" | "keyLen">>;
+    deviceId?: string;
+    lineageId?: string;
+  },
 ): BackupBundle {
+  const meta: BundleMeta = {
+    createdAt: Date.now(),
+    hostname: os.hostname(),
+    deviceId: opts?.deviceId ?? getOrCreateDeviceId(),
+  };
+  if (opts?.lineageId) meta.lineageId = opts.lineageId;
   const payload: BundlePayload = {
     vaultEnc,
     masterKey: masterKey.toString("base64"),
-    meta: { createdAt: Date.now(), hostname: os.hostname() },
+    meta,
   };
   return sealPayload(payload, passphrase, opts);
 }
@@ -162,7 +177,11 @@ export function sealScopedBundle(
     version: 1,
     scope: [...scope],
     projects,
-    meta: { createdAt: Date.now(), hostname: os.hostname() },
+    meta: {
+      createdAt: Date.now(),
+      hostname: os.hostname(),
+      deviceId: getOrCreateDeviceId(),
+    },
   };
   return sealPayload(payload, passphrase, { ...opts, kind: "scoped-projects" });
 }
