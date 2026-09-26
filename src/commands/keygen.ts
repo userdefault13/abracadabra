@@ -18,7 +18,7 @@ interface KeygenWallet {
   private_key: string;
 }
 
-async function castNewWallet(): Promise<KeygenWallet> {
+export async function castNewWallet(): Promise<KeygenWallet> {
   try {
     const { stdout } = await execFileAsync("cast", ["wallet", "new", "--json"]);
     const parsed = JSON.parse(stdout) as KeygenWallet[];

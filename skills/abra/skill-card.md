@@ -27,3 +27,8 @@ vault → (optional License/cartridge) → lockfile cron402-mcp via `abra run` �
 ## Install
 
 ClawHub: `userdefault13/abracadabra` · CLI: `abra serve` / `abra mcp` · companion: cron402 skill for scheduled URL fires.
+
+## Shared / cross-app secrets
+
+No global keystore — every key needs a project. For secrets not tied to one app:
+`abra project new general` then `abra set general <KEY>`.
