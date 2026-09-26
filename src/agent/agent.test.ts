@@ -584,6 +584,24 @@ describe("isAgentEnabled", () => {
     expect(isAgentEnabled()).toBe(false);
   });
 
+  it("linux XDG unset + missing /run/user → false (injected lstat)", () => {
+    setPlatform("linux");
+    delete process.env.ABRA_AGENT;
+    delete process.env.XDG_RUNTIME_DIR;
+    const err = new Error("ENOENT") as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    expect(
+      isAgentEnabled({
+        env: {},
+        platform: "linux",
+        getuid: () => 1000,
+        lstatSync: () => {
+          throw err;
+        },
+      }),
+    ).toBe(false);
+  });
+
   it("darwin default → false", () => {
     setPlatform("darwin");
     delete process.env.ABRA_AGENT;

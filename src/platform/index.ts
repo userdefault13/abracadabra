@@ -12,6 +12,7 @@ import {
   biometricsSkipped,
   detectHeadlessSession,
   keystoreSelectionReason,
+  resolveAbraDirFromEnv,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
@@ -45,11 +46,57 @@ export { probePolkit, setProbePolkitForTests } from "./auth-polkit.js";
 
 let keystoreSingleton: PlatformKeystore | null = null;
 let authSingleton: PlatformAuth | null = null;
+let autoDetectNoticeEmitted = false;
+
+/** Injectable deps for hermetic auto-detect stderr notice tests. */
+export type KeystoreAutoDetectNoticeDeps = {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  isTTY?: boolean | null;
+  stderrWrite?: (chunk: string) => void;
+  abraDir?: () => string;
+  selectionReason?: () => string;
+};
+
+/**
+ * Once per process: warn on stderr when Linux auto-detected passphrase-file
+ * in a non-interactive process (systemd / pipes). Never stdout (abra get/env).
+ * Suppress with ABRA_QUIET=1.
+ */
+export function maybeWarnKeystoreAutoDetect(
+  deps: KeystoreAutoDetectNoticeDeps = {},
+): void {
+  if (autoDetectNoticeEmitted) return;
+  const env = deps.env ?? process.env;
+  if (env.ABRA_QUIET === "1") return;
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "linux") return;
+  if (env.ABRA_KEYSTORE) return;
+  const reason =
+    deps.selectionReason?.() ?? keystoreSelectionReason(env, platform);
+  if (!reason.startsWith("auto-detected")) return;
+  const isTTY =
+    deps.isTTY !== undefined ? deps.isTTY : process.stdin.isTTY;
+  if (isTTY) return;
+
+  autoDetectNoticeEmitted = true;
+  const dir = deps.abraDir?.() ?? resolveAbraDirFromEnv(env);
+  const write =
+    deps.stderrWrite ??
+    ((chunk: string) => {
+      process.stderr.write(chunk);
+    });
+  write(
+    `abra: keystore auto-detected as passphrase-file (master.key.enc in ${dir}); ` +
+      `set ABRA_KEYSTORE explicitly in units — see docs/LINUX-HEADLESS.md#upgrading-existing-units\n`,
+  );
+}
 
 /** Test hook — reset cached platform backends. */
 export function resetPlatformForTests(): void {
   keystoreSingleton = null;
   authSingleton = null;
+  autoDetectNoticeEmitted = false;
   resetSessionForTests();
   setProbePolkitForTests(null);
 }
@@ -98,7 +145,11 @@ export function createAuth(): PlatformAuth {
 }
 
 export function getKeystore(): PlatformKeystore {
-  keystoreSingleton ??= createKeystore();
+  if (!keystoreSingleton) {
+    // Notice only on real instantiation (not resolveKeystoreBackend / doctor).
+    maybeWarnKeystoreAutoDetect();
+    keystoreSingleton = createKeystore();
+  }
   return keystoreSingleton;
 }
 

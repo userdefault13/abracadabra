@@ -45,7 +45,11 @@
 #
 # Dependent units that need the vault unlocked can wait, e.g.:
 #   ExecStartPre=/usr/bin/abra agent status --wait --timeout 600
-# or a oneshot that runs `abra unlock` on a TTY, then the wait.
+# or unlock on a TTY (Tailscale / non-interactive SSH often needs mise on PATH):
+#   ssh -t <host> 'PATH=$HOME/.local/share/mise/shims:$PATH abra unlock'
+#   # or: packaging/linux/abra-unlock → ~/.local/bin/abra-unlock
+# then the wait. See docs/LINUX-HEADLESS.md#upgrading-existing-units and
+# docs/LINUX-HEADLESS.md#tailscale-ssh--non-interactive-ssh.
 #
 # Sleep lock: agent spawns /usr/bin/gdbus (or /usr/bin/dbus-monitor) to watch
 # logind PrepareForSleep. RestrictAddressFamilies includes AF_UNIX for that

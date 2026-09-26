@@ -472,7 +472,7 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 
 | Piece | Detail |
 |-------|--------|
-| Socket | `$XDG_RUNTIME_DIR/abra/agent.sock` (override: `ABRA_AGENT_SOCKET`) |
+| Socket | `$XDG_RUNTIME_DIR/abra/agent.sock`, or `/run/user/<uid>/abra/agent.sock` when `XDG_RUNTIME_DIR` is unset and `/run/user/<uid>` is a `0700` dir owned by you (override: `ABRA_AGENT_SOCKET`) |
 | Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
 | Socket perms | `0600` after listen |
 | Protocol | Newline-delimited JSON (`status`, `unlock`, `unlock.key`, `lock`, `vault.load`, `vault.save`, `grant.add` / `grant.list` / `grant.revoke` / `grant.check`) — **never** sends the master key to clients. `unlock.key` is the only path that carries key material, and only **CLI → agent**. Grants are metadata only (exe path + inode + project + expiry). |
@@ -484,7 +484,7 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Crypto | Agent encrypts/decrypts `vault.enc` with the same AES-256-GCM helpers as `core/vault.ts` |
 | Fresh process | Always starts **locked**; no key file on disk for agent state — after reboot everything stays locked until `abra unlock` |
 
-**Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent). **Windows is unsupported** — `isAgentEnabled()` always returns false on win32 (even with `ABRA_AGENT=1`). **Sensitive agent ops are Linux-only** (no `/proc` / `ss` peer check elsewhere); on macOS with `ABRA_AGENT=1`, unlock/vault I/O return `forbidden_peer` and the client falls back to the direct keystore.
+**Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set **or** a validated `/run/user/<uid>` fallback resolves (real directory, not a symlink, owned by you, mode `0700`). Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent). **Windows is unsupported** — `isAgentEnabled()` always returns false on win32 (even with `ABRA_AGENT=1`). **Sensitive agent ops are Linux-only** (no `/proc` / `ss` peer check elsewhere); on macOS with `ABRA_AGENT=1`, unlock/vault I/O return `forbidden_peer` and the client falls back to the direct keystore. Non-interactive SSH (e.g. Tailscale) often omits `XDG_RUNTIME_DIR` — see [LINUX-HEADLESS.md](./LINUX-HEADLESS.md#tailscale-ssh--non-interactive-ssh).
 
 If the socket is missing, connect times out (~500ms), unlock fails (keyring locked / `VaultLockedError`), the peer is rejected (`forbidden_peer`), the agent returns `unavailable` / `mismatch` / `locked` (passphrase-file agent waiting for `abra unlock`), `loadVault` / `saveVault` **fall back** to the direct `resolveMasterKey(getKeystore())` path. The agent never mints a master key on unlock failure.
 
@@ -536,7 +536,10 @@ cp "$PKG/packaging/linux/abra-agent.service" ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now abra-agent
 sudo loginctl enable-linger "$USER"   # optional: survive logout / no GUI seat
-ssh -t <host> abra unlock             # TTY required for hidden passphrase prompt
+# Tailscale / non-interactive SSH often omits mise PATH; XDG_RUNTIME_DIR falls
+# back to /run/user/<uid> when valid — see docs/LINUX-HEADLESS.md
+ssh -t <host> 'PATH=$HOME/.local/share/mise/shims:$PATH abra unlock'
+# or: ssh -t <host> ~/.local/bin/abra-unlock
 ```
 
 Unit highlights (`packaging/linux/abra-agent.service`):
