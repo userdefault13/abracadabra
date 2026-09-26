@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { PassphraseAuth, sanitizeAuthReason } from "./auth-passphrase.js";
+import { PassphraseAuth, sanitizeAuthReason, NoTtyApprovalError, isNoTtyApprovalDenial } from "./auth-passphrase.js";
 import { writeMasterKeyFile, setDefaultKdfForTests } from "./master-key-file.js";
 import {
   getSessionMasterKey,
@@ -139,15 +139,23 @@ describe("PassphraseAuth", () => {
     expect(fake.writes().filter((w) => w.includes("Vault passphrase")).length).toBe(2);
   });
 
-  it("no TTY → exact denial, zero prompts, counter unchanged", async () => {
+  it("no TTY → NoTtyApprovalError, zero prompts, counter unchanged", async () => {
     let opens = 0;
     setOpenTtyForTests(() => {
       opens++;
       throw new NoTerminalError();
     });
     const auth = new PassphraseAuth();
-    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(
-      "abracadabra: approval denied — passphrase approval needs a terminal: use ssh -t (MCP/API access while headless comes with `abra grant`)",
+    let caught: unknown;
+    try {
+      await auth.authenticate({ reason: "reveal" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(NoTtyApprovalError);
+    expect(isNoTtyApprovalDenial(caught)).toBe(true);
+    expect((caught as Error).message).toBe(
+      "abracadabra: approval denied — passphrase approval needs a terminal: use ssh -t (for headless MCP/API, pre-approve with `abra grant --project <P> --caller <exe> --ttl <≤8h>`)",
     );
     expect(opens).toBe(1);
     expect(loadUnlockAttempts().failures).toBe(0);

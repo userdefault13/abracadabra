@@ -10,9 +10,22 @@ import {
 import { unlockSession } from "./session.js";
 
 const NO_TTY_DENIAL =
-  "abracadabra: approval denied — passphrase approval needs a terminal: use ssh -t (MCP/API access while headless comes with `abra grant`)";
+  "abracadabra: approval denied — passphrase approval needs a terminal: use ssh -t (for headless MCP/API, pre-approve with `abra grant --project <P> --caller <exe> --ttl <≤8h>`)";
 
 const REASON_MAX = 200;
+
+/** Thrown when passphrase approval cannot open a controlling terminal. */
+export class NoTtyApprovalError extends Error {
+  constructor(message = NO_TTY_DENIAL) {
+    super(message);
+    this.name = "NoTtyApprovalError";
+  }
+}
+
+/** True only for the no-TTY passphrase denial (not wrong passphrase / backoff). */
+export function isNoTtyApprovalDenial(err: unknown): boolean {
+  return err instanceof NoTtyApprovalError;
+}
 
 /**
  * Sanitize a reason string before writing it to a tty: strip ANSI escapes and
@@ -63,7 +76,7 @@ export class PassphraseAuth implements PlatformAuth {
       passphrase = await promptHidden(prompt);
     } catch (err) {
       if (isNoTerminalError(err)) {
-        throw new Error(NO_TTY_DENIAL);
+        throw new NoTtyApprovalError();
       }
       throw err;
     }

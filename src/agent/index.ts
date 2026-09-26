@@ -33,6 +33,10 @@ export {
   agentLock,
   agentVaultLoad,
   agentVaultSave,
+  agentGrantAdd,
+  agentGrantList,
+  agentGrantRevoke,
+  agentGrantCheck,
   loadVaultViaAgent,
   saveVaultViaAgent,
   shouldTryAgent,
@@ -42,6 +46,14 @@ export {
 } from "./client.js";
 export { AgentState } from "./state.js";
 export { PROTOCOL_VERSION, MAX_FRAME_BYTES } from "./protocol.js";
+export {
+  GrantStore,
+  GRANT_TTL_MIN_SECONDS,
+  GRANT_TTL_MAX_SECONDS,
+  type Grant,
+  type GrantCaller,
+  type GrantListItem,
+} from "./grants.js";
 export {
   startSleepWatch,
   type SleepWatchFactory,
