@@ -439,6 +439,41 @@ async function applyScopedFileMerge(
   return { changed: true, report: lines };
 }
 
+/**
+ * Write a scoped project backup under `<dir>/abracadabra/scoped-*.abrabak`.
+ * Does not touch `latest.json`. Passphrase must be ≥ 8 characters.
+ */
+export async function createScopedBackup(
+  dir: string,
+  projects: string[],
+  passphrase: string,
+): Promise<string> {
+  if (passphrase.length < 8) {
+    throw new Error("Passphrase must be at least 8 characters");
+  }
+  const scope = assertScopeNamesAllowed(projects);
+  await authenticate(
+    `abracadabra: export scoped backup of project(s) ${scope.join(", ")}`,
+  );
+  const vault = await loadVault();
+  const validated = validateScope(vault, scope);
+  const extracted = extractScopedProjects(vault, validated);
+  return writeScopedBundleToDir(bundleDirFor(dir), extracted, validated, passphrase);
+}
+
+/** Open a scoped `.abrabak` and merge it into the local vault (no sync-state). */
+export async function mergeScopedBundleFile(
+  file: string,
+  passphrase: string,
+  opts: { projects?: string[]; theirs?: boolean; dryRun?: boolean } = {},
+): Promise<{ changed: boolean; report: string[] }> {
+  const opened = openAnyBundle(readBundleFile(file), passphrase);
+  if (opened.kind !== "scoped") {
+    throw new Error("not a scoped bundle");
+  }
+  return applyScopedFileMerge(opened.payload, opts);
+}
+
 // Re-export LAN helpers for dash
 export {
   startLanHost,
@@ -603,19 +638,12 @@ export function registerUsbCommands(program: Command): void {
     )
     .action(async (opts: { volume?: string; file?: string; project: string[] }) => {
       try {
-        const dir = bundleDirFor(
-          opts.file ?? opts.volume ?? (await pickVolume("Where should the backup go?")),
-        );
+        const target =
+          opts.file ?? opts.volume ?? (await pickVolume("Where should the backup go?"));
+        const dir = bundleDirFor(target);
 
         if (opts.project?.length) {
-          const scope = assertScopeNamesAllowed(opts.project);
-          await authenticate(
-            `abracadabra: export scoped backup of project(s) ${scope.join(", ")}`,
-          );
-          const vault = await loadVault();
-          const validated = validateScope(vault, scope);
-          const projects = extractScopedProjects(vault, validated);
-
+          assertScopeNamesAllowed(opts.project); // refuse reserved names before prompting
           const pass1 = await promptHidden(
             "Passphrase for the backup bundle (min 8 chars, hidden): ",
           );
@@ -627,7 +655,7 @@ export function registerUsbCommands(program: Command): void {
           }
           if ((await promptHidden("Repeat passphrase: ")) !== pass1) fail("Passphrases do not match");
 
-          const file = writeScopedBundleToDir(dir, projects, validated, pass1);
+          const file = await createScopedBackup(target, opts.project, pass1);
           console.log(green(`✓ Scoped backup written: ${file}`));
           console.log(
             dim(`  merge with: abra usb sync -f ${file} [--project …] [--dry-run]`),
@@ -672,7 +700,9 @@ export function registerUsbCommands(program: Command): void {
             `\nScoped backup from ${bold(opened.payload.meta.hostname)} — ${new Date(opened.payload.meta.createdAt).toLocaleString()}`,
           );
           console.log(`  scope: ${opened.payload.scope.join(", ")}`);
-          const result = await applyScopedFileMerge(opened.payload, { theirs: false });
+          const result = await mergeScopedBundleFile(latest, await cachedPassphrase(), {
+            theirs: false,
+          });
           for (const line of result.report) console.log(`  ${line}`);
           if (!result.changed) console.log(green("✓ already in sync (scoped)"));
           else console.log(green("✓ Scoped merge complete"));
@@ -852,7 +882,7 @@ export function registerUsbCommands(program: Command): void {
             const opened = await openAnyWithPrompts(readBundleFile(latest));
             if (opened.kind === "scoped") {
               console.log(`\nScoped sync against ${dim(path.basename(latest))}`);
-              const result = await applyScopedFileMerge(opened.payload, {
+              const result = await mergeScopedBundleFile(latest, await cachedPassphrase(), {
                 projects,
                 theirs: opts.theirs === true,
                 dryRun: opts.dryRun,

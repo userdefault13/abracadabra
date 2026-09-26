@@ -587,7 +587,7 @@ abra usb host                  # Touch ID → prints PIN, full fingerprint, ip:p
 
 # computer B
 abra usb peers                 # optional: discover hosts
-abra usb sync --lan --fingerprint <fp>            # pick a peer, enter PIN
+abra usb sync --lan            # pick a peer (fingerprint taken from its mDNS record), enter PIN
 abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --pin 482910 --dry-run
 abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --pin 482910 --theirs
 ```

@@ -4,31 +4,39 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import https from "node:https";
+import { Command } from "commander";
 import type { Vault, Project } from "../core/vault.js";
-import { saveVault, loadVault, TREASURY_PROJECT } from "../core/vault.js";
+import { saveVault, loadVault, TREASURY_PROJECT, encryptVault } from "../core/vault.js";
 import {
   sealScopedBundle,
+  sealBundle,
   openAnyBundle,
-  readBundleFile,
+  openBundle,
+  ScopedBundleError,
 } from "../core/backup.js";
 import { vaultFile, syncStateFile } from "../core/paths.js";
-import {
-  mergeScopedProjects,
-  assertScopeNamesAllowed,
-  extractScopedProjects,
-  validateScope,
-} from "../core/sync-scope.js";
+import { extractScopedProjects } from "../core/sync-scope.js";
 import { createEphemeralTls } from "../core/tls-ephemeral.js";
 import * as platform from "../platform/index.js";
 import { setDefaultKdfForTests } from "../platform/master-key-file.js";
 
 const skipWin = process.platform === "win32";
+const FILE_PASS = "filepassphrase1";
 
 vi.mock("../platform/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../platform/index.js")>();
   return {
     ...actual,
     authenticate: vi.fn(async () => {}),
+  };
+});
+
+vi.mock("../core/prompt.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../core/prompt.js")>();
+  return {
+    ...actual,
+    prompt: vi.fn(async () => "yes"),
+    promptHidden: vi.fn(async () => FILE_PASS),
   };
 });
 
@@ -60,10 +68,23 @@ function cleanupTemp(tmp: string, envBackup: NodeJS.ProcessEnv) {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+function listFilesRecursive(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const name of fs.readdirSync(dir)) {
+    const full = path.join(dir, name);
+    const st = fs.statSync(full);
+    if (st.isDirectory()) out.push(...listFilesRecursive(full).map((f) => path.join(name, f)));
+    else out.push(name);
+  }
+  return out.sort();
+}
+
 describe.runIf(!skipWin)("LAN scoped sync", () => {
   const envBackup = { ...process.env };
   let tmp = "";
   let hostHandle: { stop: () => Promise<void>; pin: string; fingerprint: string; port: number; scope?: string[] } | null = null;
+  let exitSpy: ReturnType<typeof vi.spyOn> | null = null;
 
   beforeEach(() => {
     vi.mocked(platform.authenticate).mockClear();
@@ -71,6 +92,10 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
   });
 
   afterEach(async () => {
+    if (exitSpy) {
+      exitSpy.mockRestore();
+      exitSpy = null;
+    }
     if (hostHandle) {
       try {
         await Promise.race([
@@ -124,9 +149,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     const status = getLanHostStatus()!;
     expect(status.scope).toEqual(["gotchibot"]);
 
-    // Pull via client path (fingerprint verified), then inspect with openAnyBundle
-    // by re-sealing from extract — instead, use a raw pull through scopedLanSync dry-run
-    // and separately seal/open from host extract to assert payload shape.
     const { openAnyBundle: openAny, sealScopedBundle: sealScoped } = await import(
       "../core/backup.js"
     );
@@ -145,7 +167,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     expect(JSON.stringify(opened.payload)).not.toContain("apiKeys");
     expect(Object.keys(opened.payload.projects)).not.toContain("other");
 
-    // Also confirm live /lan/pull returns a scoped bundle the client can open
     const { scopedLanSync } = await import("../usb/lan-client.js");
     const result = await scopedLanSync(`127.0.0.1:${status.port}`, status.pin, {
       projects: ["gotchibot"],
@@ -176,7 +197,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
       startLanHost({ advertise: false, projects: ["nosuch"], port: 0 }),
     ).rejects.toThrow(/unknown project/);
 
-    // Server must not be listening
     const { getLanHostStatus } = await import("../usb/lan-host.js");
     expect(getLanHostStatus()).toBeNull();
   });
@@ -207,7 +227,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
       }),
     ).rejects.toThrow(/outside host scope|LAN pull failed \(403\)/);
 
-    // Client-side refusal if payload somehow contains unrequested names
     const tooWide = sealScopedBundle(
       {
         gotchibot: { createdAt: 1, vars: { A: entry("1") } },
@@ -246,7 +265,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     const authAfterStart = vi.mocked(platform.authenticate).mock.calls.length;
     expect(authAfterStart).toBe(authCallsBefore + 1);
 
-    // Direct push without reading through client
     const pushRes = await new Promise<{ status: number; json: unknown }>((resolve, reject) => {
       const body = JSON.stringify({ bundle: { format: "abracadabra-backup" } });
       const req = https.request(
@@ -279,7 +297,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     });
     expect(pushRes.status).toBe(403);
     expect((pushRes.json as { error: string }).error).toMatch(/read-only/);
-    // No additional authenticate from push
     expect(vi.mocked(platform.authenticate).mock.calls.length).toBe(authAfterStart);
 
     const after = fs.readFileSync(vaultPath);
@@ -287,7 +304,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
   });
 
   it("e+f+g+k+l: merge rules, dry-run, no sync-state, auth once", async () => {
-    // Standalone HTTPS server serving a fixed scoped bundle (avoids ABRA_DIR clash with host).
     const hostProjects: Record<string, Project> = {
       gotchibot: {
         createdAt: 1,
@@ -397,7 +413,6 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     expect(merged.connections?.x).toBeDefined();
     expect(fs.existsSync(syncStateFile())).toBe(false);
 
-    // reset local and take --theirs
     await saveVault({
       version: 1,
       projects: {
@@ -453,12 +468,10 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     await expect(fetchLanInfo(`127.0.0.1:${port}`)).rejects.toThrow(/fingerprint/);
     await expect(applyLanSync(`127.0.0.1:${port}`, "123456")).rejects.toThrow(/fingerprint/);
 
-    // Legacy short prefix of the real fingerprint should warn + connect
     const fullHex = tlsMaterial.fingerprint.replace(/[^0-9A-Fa-f]/g, "");
     const short = fullHex.slice(0, 16);
     const warn = vi.spyOn(console, "error").mockImplementation(() => {});
     handlerInvoked = false;
-    // Will fail later (not a real lan host) but handler SHOULD be invoked after fp match
     try {
       await fetchLanInfo(`127.0.0.1:${port}`, short);
     } catch {
@@ -488,13 +501,11 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     const status = getLanHostStatus()!;
     expect(status.scope).toBeUndefined();
 
-    // /lan/info has scoped:false proto:2
     const { fetchLanInfo } = await import("../usb/lan-client.js");
     const info = await fetchLanInfo(`127.0.0.1:${status.port}`, status.fingerprint);
     expect(info.scoped).toBe(false);
     expect(info.proto).toBe(2);
 
-    // Client on same vault — already in sync path still pushes
     const { applyLanSync } = await import("../usb/lan-client.js");
     const result = await applyLanSync(
       `127.0.0.1:${status.port}`,
@@ -503,16 +514,22 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
       status.fingerprint,
     );
     expect(result.report).toEqual([]);
-    // Host stops after successful push
     expect(getLanHostStatus()).toBeNull();
     hostHandle = null;
   });
 
-  it("h: scoped FILE bundle backup merge restore; no latest.json", async () => {
+  it("h: createScopedBackup + mergeScopedBundleFile", async () => {
     const vault: Vault = {
       version: 1,
       projects: {
-        gotchibot: { createdAt: 1, vars: { A: entry("from-bundle") } },
+        gotchibot: {
+          createdAt: 1,
+          vars: {
+            A: entry("from-bundle"),
+            NEW: entry("n"),
+            CONFLICT: entry("bundle-conflict", true, 5),
+          },
+        },
         other: { createdAt: 1, vars: { Z: entry("keep") } },
       },
     };
@@ -521,70 +538,217 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
 
     const dir = path.join(tmp, "usbout");
     fs.mkdirSync(dir, { recursive: true });
-    // Simulate scoped backup write
-    assertScopeNamesAllowed(["gotchibot"]);
-    const v = await loadVault();
-    const scope = validateScope(v, ["gotchibot"]);
-    const projects = extractScopedProjects(v, scope);
-    const bundle = sealScopedBundle(projects, scope, "filepassphrase1");
-    const stamp = "2020-01-01T00-00-00";
-    const file = path.join(dir, "abracadabra", `scoped-${stamp}.abrabak`);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(bundle), { mode: 0o600 });
-    expect(fs.existsSync(path.join(dir, "abracadabra", "latest.json"))).toBe(false);
+    const abraDir = path.join(dir, "abracadabra");
+    fs.mkdirSync(abraDir, { recursive: true });
+    const priorLatest = JSON.stringify({ file: "backup-old.abrabak", createdAt: 1 });
+    fs.writeFileSync(path.join(abraDir, "latest.json"), priorLatest);
+    fs.writeFileSync(path.join(abraDir, "backup-old.abrabak"), "{}");
 
-    // Change local gotchibot and keep other
+    const { createScopedBackup, mergeScopedBundleFile } = await import("../commands/usb.js");
+
+    const beforeRefuse = listFilesRecursive(dir);
+    await expect(createScopedBackup(dir, [TREASURY_PROJECT], FILE_PASS)).rejects.toThrow(/refused/);
+    await expect(createScopedBackup(dir, ["nosuch"], FILE_PASS)).rejects.toThrow(/unknown project/);
+    expect(listFilesRecursive(dir)).toEqual(beforeRefuse);
+
+    const file = await createScopedBackup(dir, ["gotchibot"], FILE_PASS);
+    expect(file).toMatch(/[/\\]abracadabra[/\\]scoped-.*\.abrabak$/);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(fs.readFileSync(path.join(abraDir, "latest.json"), "utf8")).toBe(priorLatest);
+
+    await saveVault({
+      version: 1,
+      projects: {
+        gotchibot: {
+          createdAt: 1,
+          vars: {
+            A: entry("local-a"),
+            LOCAL: entry("stay"),
+            CONFLICT: entry("local-conflict", true, 1),
+          },
+        },
+        other: { createdAt: 1, vars: { Z: entry("keep") } },
+      },
+    });
+    const vaultPath = vaultFile();
+    const beforeDry = fs.readFileSync(vaultPath);
+    const masterDry = (await platform.getMasterKey()).toString("base64");
+
+    const dry = await mergeScopedBundleFile(file, FILE_PASS, { dryRun: true });
+    expect(dry.changed).toBe(true);
+    expect(Buffer.compare(fs.readFileSync(vaultPath), beforeDry)).toBe(0);
+    expect((await platform.getMasterKey()).toString("base64")).toBe(masterDry);
+    expect(fs.existsSync(syncStateFile())).toBe(false);
+
+    const merged = await mergeScopedBundleFile(file, FILE_PASS, {});
+    expect(merged.changed).toBe(true);
+    const after = await loadVault();
+    expect(after.projects.other.vars.Z.value).toBe("keep");
+    expect(after.projects.gotchibot.vars.LOCAL.value).toBe("stay");
+    expect(after.projects.gotchibot.vars.NEW.value).toBe("n");
+    expect(after.projects.gotchibot.vars.A.value).toBe("local-a");
+    expect(after.projects.gotchibot.vars.CONFLICT.value).toBe("local-conflict");
+    expect(fs.existsSync(syncStateFile())).toBe(false);
+    expect((await platform.getMasterKey()).toString("base64")).toBe(masterBefore);
+
+    await saveVault({
+      version: 1,
+      projects: {
+        gotchibot: {
+          createdAt: 1,
+          vars: {
+            A: entry("local-a"),
+            LOCAL: entry("stay"),
+            CONFLICT: entry("local-conflict", true, 1),
+          },
+        },
+        other: { createdAt: 1, vars: { Z: entry("keep") } },
+      },
+    });
+    const theirs = await mergeScopedBundleFile(file, FILE_PASS, { theirs: true });
+    expect(theirs.changed).toBe(true);
+    const afterTheirs = await loadVault();
+    expect(afterTheirs.projects.gotchibot.vars.CONFLICT.value).toBe("bundle-conflict");
+    expect(afterTheirs.projects.other.vars.Z.value).toBe("keep");
+
+    const fullBundle = sealBundle(
+      encryptVault(await loadVault(), await platform.getMasterKey()),
+      await platform.getMasterKey(),
+      FILE_PASS,
+    );
+    const fullPath = path.join(abraDir, "full-test.abrabak");
+    fs.writeFileSync(fullPath, JSON.stringify(fullBundle));
+    await expect(mergeScopedBundleFile(fullPath, FILE_PASS, {})).rejects.toThrow(
+      /not a scoped bundle/,
+    );
+    expect(fs.readFileSync(path.join(abraDir, "latest.json"), "utf8")).toBe(priorLatest);
+  });
+
+  it("h-cli: usb restore scoped file MERGES (does not overwrite)", async () => {
+    const vault: Vault = {
+      version: 1,
+      projects: {
+        gotchibot: { createdAt: 1, vars: { A: entry("from-bundle"), NEW: entry("n") } },
+        other: { createdAt: 1, vars: { Z: entry("keep") } },
+      },
+    };
+    ({ tmp } = await setupTempVault(vault));
+    const masterBefore = (await platform.getMasterKey()).toString("base64");
+    const { createScopedBackup, registerUsbCommands } = await import("../commands/usb.js");
+    const dir = path.join(tmp, "usbout");
+    const file = await createScopedBackup(dir, ["gotchibot"], FILE_PASS);
+
     await saveVault({
       version: 1,
       projects: {
         gotchibot: { createdAt: 1, vars: { A: entry("local-a"), LOCAL: entry("stay") } },
         other: { createdAt: 1, vars: { Z: entry("keep") } },
+        keepme: { createdAt: 1, vars: { K: entry("intact") } },
       },
     });
 
-    const opened = openAnyBundle(readBundleFile(file), "filepassphrase1");
-    expect(opened.kind).toBe("scoped");
-    if (opened.kind !== "scoped") return;
+    const promptMod = await import("../core/prompt.js");
+    vi.mocked(promptMod.promptHidden).mockResolvedValue(FILE_PASS);
+    vi.mocked(promptMod.prompt).mockResolvedValue("yes");
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code ?? 0})`);
+    }) as never);
 
-    const { merged, report, changed } = mergeScopedProjects(
-      await loadVault(),
-      opened.payload.projects,
-      {},
-    );
-    expect(changed).toBe(false); // A differs → conflict keep local; no new keys from host that aren't local... wait A conflicts, LOCAL stays, no HOST new keys. changed=false when only conflicts!
-    // Actually: A differs → conflict (keep local), no added/new → changed=false. Good.
-    expect(report.conflicts).toEqual([{ project: "gotchibot", key: "A" }]);
+    const program = new Command();
+    program.exitOverride();
+    registerUsbCommands(program);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await program.parseAsync(["node", "abra", "usb", "restore", file]);
+    log.mockRestore();
 
-    // Add a key only in bundle
-    const withNew = sealScopedBundle(
-      {
-        gotchibot: {
-          createdAt: 1,
-          vars: { A: entry("from-bundle"), NEW: entry("n") },
-        },
+    const after = await loadVault();
+    expect(after.projects.other.vars.Z.value).toBe("keep");
+    expect(after.projects.keepme.vars.K.value).toBe("intact");
+    expect(after.projects.gotchibot.vars.LOCAL.value).toBe("stay");
+    expect(after.projects.gotchibot.vars.NEW.value).toBe("n");
+    expect(after.projects.gotchibot.vars.A.value).toBe("local-a");
+    expect((await platform.getMasterKey()).toString("base64")).toBe(masterBefore);
+    expect(fs.existsSync(syncStateFile())).toBe(false);
+  });
+
+  it("h-cli: usb sync -f scoped --dry-run writes nothing", async () => {
+    const vault: Vault = {
+      version: 1,
+      projects: {
+        gotchibot: { createdAt: 1, vars: { A: entry("from-bundle"), NEW: entry("n") } },
+        other: { createdAt: 1, vars: { Z: entry("keep") } },
       },
+    };
+    ({ tmp } = await setupTempVault(vault));
+    const { createScopedBackup, registerUsbCommands } = await import("../commands/usb.js");
+    const dir = path.join(tmp, "usbout");
+    const file = await createScopedBackup(dir, ["gotchibot"], FILE_PASS);
+
+    await saveVault({
+      version: 1,
+      projects: {
+        gotchibot: { createdAt: 1, vars: { A: entry("local-a") } },
+        other: { createdAt: 1, vars: { Z: entry("keep") } },
+      },
+    });
+    const vaultPath = vaultFile();
+    const beforeBytes = fs.readFileSync(vaultPath);
+    const masterBefore = (await platform.getMasterKey()).toString("base64");
+
+    const promptMod = await import("../core/prompt.js");
+    vi.mocked(promptMod.promptHidden).mockResolvedValue(FILE_PASS);
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code ?? 0})`);
+    }) as never);
+
+    const program = new Command();
+    program.exitOverride();
+    registerUsbCommands(program);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await program.parseAsync(["node", "abra", "usb", "sync", "-f", file, "--dry-run"]);
+    log.mockRestore();
+
+    expect(Buffer.compare(fs.readFileSync(vaultPath), beforeBytes)).toBe(0);
+    expect((await platform.getMasterKey()).toString("base64")).toBe(masterBefore);
+    expect(fs.existsSync(syncStateFile())).toBe(false);
+  });
+
+  it("openBundle on scoped throws ScopedBundleError; applyLanSync vs scoped host refuses", async () => {
+    const vault: Vault = {
+      version: 1,
+      projects: {
+        gotchibot: { createdAt: 1, vars: { A: entry("host-a") } },
+        other: { createdAt: 1, vars: { Z: entry("keep") } },
+      },
+    };
+    ({ tmp } = await setupTempVault(vault));
+    const vaultPath = vaultFile();
+    const beforeBytes = fs.readFileSync(vaultPath);
+
+    const scoped = sealScopedBundle(
+      { gotchibot: { createdAt: 1, vars: { A: entry("x") } } },
       ["gotchibot"],
-      "filepassphrase1",
+      "pin-passphrase",
     );
-    const o2 = openAnyBundle(withNew, "filepassphrase1");
-    if (o2.kind !== "scoped") throw new Error("expected scoped");
-    const m2 = mergeScopedProjects(await loadVault(), o2.payload.projects, {});
-    expect(m2.merged.projects.other.vars.Z.value).toBe("keep");
-    expect(m2.merged.projects.gotchibot.vars.LOCAL.value).toBe("stay");
-    expect(m2.merged.projects.gotchibot.vars.NEW.value).toBe("n");
-    expect(m2.merged.projects.gotchibot.vars.A.value).toBe("local-a");
-    await saveVault(m2.merged);
+    expect(() => openBundle(scoped, "pin-passphrase")).toThrow(ScopedBundleError);
 
-    const masterAfter = (await platform.getMasterKey()).toString("base64");
-    expect(masterAfter).toBe(masterBefore);
-    expect(fs.existsSync(path.join(dir, "abracadabra", "latest.json"))).toBe(false);
-  });
-});
+    const { startLanHost, getLanHostStatus } = await import("../usb/lan-host.js");
+    hostHandle = await startLanHost({
+      advertise: false,
+      projects: ["gotchibot"],
+      port: 0,
+      ttlMs: 60_000,
+    });
+    const status = getLanHostStatus()!;
+    const hostVaultBefore = fs.readFileSync(vaultPath);
 
-describe("startLanHost port 0", () => {
-  // Ensure port:0 is supported — if not, tests above need a free port picker.
-  it("documents that lan-host listens on opts.port", () => {
-    // lan-host uses server.listen(port, ...) — port 0 is valid for ephemeral bind.
-    expect(true).toBe(true);
-  });
+    const { applyLanSync } = await import("../usb/lan-client.js");
+    await expect(
+      applyLanSync(`127.0.0.1:${status.port}`, status.pin, undefined, status.fingerprint),
+    ).rejects.toThrow(/scoped .*--project/);
+
+    expect(Buffer.compare(fs.readFileSync(vaultPath), beforeBytes)).toBe(0);
+    expect(Buffer.compare(fs.readFileSync(vaultPath), hostVaultBefore)).toBe(0);
+    expect(getLanHostStatus()).not.toBeNull();
+  }, 20_000);
 });
