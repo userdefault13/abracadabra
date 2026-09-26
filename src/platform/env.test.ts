@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   authSelectionReason,
@@ -276,7 +277,7 @@ describe("resolveAuthBackend other platforms", () => {
 
   it("resolveAbraDirFromEnv honors ABRA_DIR and HOME", () => {
     expect(resolveAbraDirFromEnv({ ABRA_DIR: " /custom/abra " })).toBe("/custom/abra");
-    expect(resolveAbraDirFromEnv({ HOME: "/home/u" })).toBe("/home/u/.abracadabra");
+    expect(resolveAbraDirFromEnv({ HOME: "/home/u" })).toBe(path.join("/home/u", ".abracadabra"));
   });
 
   it("keystoreSelectionReason", () => {
