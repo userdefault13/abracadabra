@@ -3,6 +3,12 @@ import crypto from "node:crypto";
 import { vaultFile, ensureDir } from "./paths.js";
 import { getKeystore } from "../platform/index.js";
 import { resolveMasterKey } from "./masterKey.js";
+import {
+  isAgentUnavailable,
+  loadVaultViaAgent,
+  saveVaultViaAgent,
+  shouldTryAgent,
+} from "../agent/client.js";
 
 export interface VarEntry {
   value: string;
@@ -80,7 +86,8 @@ export function assertConnection(vault: Vault, provider: string): Connection {
   return conn;
 }
 
-function encrypt(vault: Vault, key: Buffer): EncryptedFile {
+/** Shared AES-256-GCM encrypt — used by vault I/O and the abra agent. */
+export function encryptVault(vault: Vault, key: Buffer): EncryptedFile {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const plaintext = Buffer.from(JSON.stringify(vault), "utf8");
@@ -94,7 +101,8 @@ function encrypt(vault: Vault, key: Buffer): EncryptedFile {
   };
 }
 
-function decrypt(file: unknown, key: Buffer): Vault {
+/** Shared AES-256-GCM decrypt of a vault.enc envelope. */
+export function decryptVault(file: unknown, key: Buffer): Vault {
   const f = file as EncryptedFile;
   if (f.format !== "abracadabra-vault") throw new Error("Unrecognized vault file");
   const decipher = crypto.createDecipheriv(
@@ -110,24 +118,55 @@ function decrypt(file: unknown, key: Buffer): Vault {
   return JSON.parse(plaintext.toString("utf8")) as Vault;
 }
 
-export async function loadVault(): Promise<Vault> {
+/** Atomically persist an EncryptedFile to vault.enc (mode 0600). */
+export function writeEncryptedVaultFile(
+  enc: EncryptedFile,
+  file = vaultFile(),
+): void {
+  ensureDir();
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(enc, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+async function loadVaultDirect(): Promise<Vault> {
   const key = await resolveMasterKey(getKeystore());
   if (!fs.existsSync(vaultFile())) return emptyVault();
   const raw = JSON.parse(fs.readFileSync(vaultFile(), "utf8"));
-  const vault = decrypt(raw, key);
+  const vault = decryptVault(raw, key);
   vault.connections ??= {};
   vault.apiKeys ??= {};
   return vault;
 }
 
-export async function saveVault(vault: Vault): Promise<void> {
-  ensureDir();
+async function saveVaultDirect(vault: Vault): Promise<void> {
   const key = await resolveMasterKey(getKeystore());
-  const enc = encrypt(vault, key);
-  const file = vaultFile();
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(enc, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  const enc = encryptVault(vault, key);
+  writeEncryptedVaultFile(enc);
+}
+
+export async function loadVault(): Promise<Vault> {
+  if (shouldTryAgent()) {
+    try {
+      return await loadVaultViaAgent();
+    } catch (e) {
+      if (!isAgentUnavailable(e)) throw e;
+      // no socket / no answer / connect timeout → direct keystore path
+    }
+  }
+  return loadVaultDirect();
+}
+
+export async function saveVault(vault: Vault): Promise<void> {
+  if (shouldTryAgent()) {
+    try {
+      await saveVaultViaAgent(vault);
+      return;
+    } catch (e) {
+      if (!isAgentUnavailable(e)) throw e;
+    }
+  }
+  await saveVaultDirect(vault);
 }
 
 export function assertProject(vault: Vault, name: string): Project {
@@ -146,17 +185,12 @@ export function isReservedProjectName(name: string): boolean {
   return name.startsWith(RESERVED_PROJECT_PREFIX);
 }
 
-/** Encrypt a vault into the portable envelope shape (usb backup). */
-export function encryptVault(vault: Vault, key: Buffer): EncryptedFile {
-  return encrypt(vault, key);
-}
-
 /** Decrypt an envelope that came from outside this machine (usb restore/sync). */
 export function decryptEnvelope(
   env: { iv: string; tag: string; data: string },
   key: Buffer,
 ): Vault {
-  return decrypt({ format: "abracadabra-vault", version: 1, ...env }, key);
+  return decryptVault({ format: "abracadabra-vault", version: 1, ...env }, key);
 }
 
 /** Atomically persist an envelope to VAULT_FILE (usb restore). */
@@ -165,9 +199,11 @@ export function writeEncryptedFile(enc: {
   tag: string;
   data: string;
 }): void {
-  ensureDir();
-  const file = vaultFile();
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(enc, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  writeEncryptedVaultFile({
+    format: "abracadabra-vault",
+    version: 1,
+    iv: enc.iv,
+    tag: enc.tag,
+    data: enc.data,
+  });
 }
