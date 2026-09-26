@@ -1,7 +1,6 @@
 const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
 
 let cachedMasterKey: Buffer | null = null;
-let cachedPassphrase: string | null = null;
 let unlockExpiresAt = 0;
 
 function ttlMs(): number {
@@ -10,6 +9,13 @@ function ttlMs(): number {
   const sec = Number(raw);
   if (!Number.isFinite(sec) || sec <= 0) return DEFAULT_TTL_MS;
   return sec * 1000;
+}
+
+function zeroAndDrop(): void {
+  if (cachedMasterKey) {
+    cachedMasterKey.fill(0);
+    cachedMasterKey = null;
+  }
 }
 
 export function isSessionUnlocked(): boolean {
@@ -25,19 +31,19 @@ export function getSessionMasterKey(): Buffer | null {
   return isSessionUnlocked() ? cachedMasterKey : null;
 }
 
-export function getSessionPassphrase(): string | null {
-  return isSessionUnlocked() ? cachedPassphrase : null;
-}
-
-export function unlockSession(masterKey: Buffer, passphrase: string): void {
-  cachedMasterKey = masterKey;
-  cachedPassphrase = passphrase;
+/**
+ * Cache a copy of the master key for the session TTL.
+ * The plaintext passphrase is never stored — re-wrap flows must prompt again.
+ */
+export function unlockSession(masterKey: Buffer): void {
+  if (masterKey.length !== 32) throw new Error("Master key must be 32 bytes");
+  zeroAndDrop();
+  cachedMasterKey = Buffer.from(masterKey);
   unlockExpiresAt = Date.now() + ttlMs();
 }
 
 export function lockSession(): void {
-  cachedMasterKey = null;
-  cachedPassphrase = null;
+  zeroAndDrop();
   unlockExpiresAt = 0;
 }
 

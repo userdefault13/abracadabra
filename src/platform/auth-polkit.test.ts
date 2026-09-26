@@ -9,12 +9,26 @@ import {
   type ExecFileFn,
 } from "./auth-polkit.js";
 
+/** Graphical Linux env so CI runners without DISPLAY don't trip headless denial. */
+const GRAPHICAL_ENV: NodeJS.ProcessEnv = {
+  DISPLAY: ":0",
+  XDG_SESSION_TYPE: "x11",
+};
+
+const HEADLESS_ENV: NodeJS.ProcessEnv = {
+  SSH_CONNECTION: "10.0.0.1 22 10.0.0.2 22",
+};
+
 describe("PolkitAuth", () => {
   afterEach(() => {
     setProbePolkitForTests(null);
   });
 
-  function authWith(execFile: ExecFileFn, exists: (p: string) => boolean = () => true) {
+  function authWith(
+    execFile: ExecFileFn,
+    exists: (p: string) => boolean = () => true,
+    extra: { env?: NodeJS.ProcessEnv } = {},
+  ) {
     return new PolkitAuth({
       execFile,
       existsSync: exists,
@@ -22,6 +36,8 @@ describe("PolkitAuth", () => {
       readFileSync: () => "12345 (node) R 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 99999 0 0 0 0 0",
       getuid: () => 1000,
       pid: 12345,
+      platform: "linux",
+      env: extra.env ?? GRAPHICAL_ENV,
     });
   }
 
@@ -112,6 +128,8 @@ describe("PolkitAuth", () => {
       existsSync: () => true,
       // Non-function wins over process.getuid (?? only skips null/undefined)
       getuid: false as unknown as () => number,
+      platform: "linux",
+      env: GRAPHICAL_ENV,
     });
     await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(
       /getuid is unavailable/,
@@ -155,6 +173,45 @@ describe("PolkitAuth", () => {
     const auth = new PolkitAuth();
     expect(auth.id).toBe("polkit");
     expect(auth.supportsBiometrics()).toBe(false);
+  });
+
+  it("headless + auto-selected denies without pkcheck and mentions passphrase-file migrate", async () => {
+    const execFile = vi.fn<ExecFileFn>();
+    const auth = authWith(execFile, () => true, { env: HEADLESS_ENV });
+    await expect(auth.authenticate({ reason: "reveal FOO" })).rejects.toThrow(
+      /ABRA_KEYSTORE=passphrase-file/,
+    );
+    await expect(auth.authenticate({ reason: "reveal FOO" })).rejects.toThrow(
+      /abra keystore migrate/,
+    );
+    await expect(auth.authenticate({ reason: "reveal FOO" })).rejects.toThrow(
+      /Headless session/,
+    );
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("explicit ABRA_AUTH=polkit headless still calls pkcheck; denial carries headless hint", async () => {
+    const execFile = vi.fn<ExecFileFn>().mockRejectedValue(
+      Object.assign(new Error("fail"), { status: 1 }),
+    );
+    const auth = authWith(execFile, () => true, {
+      env: { ...HEADLESS_ENV, ABRA_AUTH: "polkit" },
+    });
+    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(/pkcheck exit 1/);
+    await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(
+      /ABRA_KEYSTORE=passphrase-file/,
+    );
+    expect(execFile).toHaveBeenCalled();
+  });
+
+  it("graphical session unchanged — allows on exit 0", async () => {
+    const execFile = vi.fn<ExecFileFn>().mockResolvedValue({ stdout: "", stderr: "" });
+    await expect(
+      authWith(execFile, () => true, {
+        env: { WAYLAND_DISPLAY: "wayland-0", XDG_SESSION_TYPE: "wayland" },
+      }).authenticate({ reason: "reveal" }),
+    ).resolves.toBeUndefined();
+    expect(execFile).toHaveBeenCalledTimes(1);
   });
 });
 

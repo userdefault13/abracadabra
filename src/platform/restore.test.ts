@@ -6,6 +6,7 @@ import path from "node:path";
 import { sealBundle, openBundle } from "../core/backup.js";
 import { encryptVault, loadVault, writeEncryptedFile } from "../core/vault.js";
 import { restoreMasterKey, resetPlatformForTests, getMasterKey } from "./index.js";
+import { setDefaultKdfForTests } from "./master-key-file.js";
 
 describe("restoreMasterKey (G2)", () => {
   const envBackup = { ...process.env };
@@ -19,11 +20,13 @@ describe("restoreMasterKey (G2)", () => {
     process.env.ABRA_SKIP_BIOMETRICS = "1";
     process.env.ABRA_AUTH = "none";
     process.env.ABRA_HEADLESS_PASSPHRASE = "restore-test-passphrase";
+    setDefaultKdfForTests({ N: 16384 });
     resetPlatformForTests();
   });
 
   afterEach(() => {
     process.env = { ...envBackup };
+    setDefaultKdfForTests(null);
     resetPlatformForTests();
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });

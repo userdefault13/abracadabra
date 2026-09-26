@@ -13,8 +13,30 @@ export async function cmdDoctor(): Promise<void> {
 
   ok(`platform ${info.platform}`);
   ok(`keystore backend ${info.keystore}`);
-  ok(`auth backend ${info.auth}`);
+  ok(`auth backend ${info.auth} (${info.authSelectionReason})`);
+
+  if (info.platform === "linux") {
+    ok(
+      `session headless: ${info.headless.headless ? "yes" : "no"} (${info.headless.reasons.join("; ")})`,
+    );
+  } else {
+    ok(`session headless: n/a (${info.platform})`);
+  }
+
   if (info.biometricsSkipped) warn("ABRA_SKIP_BIOMETRICS / ABRA_AUTH=none — no approval prompts");
+
+  if (info.headless.headless && info.keystore !== "passphrase-file") {
+    warn(
+      "headless session with non-passphrase-file keystore — secret reveals will be DENIED. Set ABRA_KEYSTORE=passphrase-file (run: abra keystore migrate --to passphrase-file)",
+    );
+    fails++;
+  }
+
+  if (info.auth === "passphrase") {
+    ok(
+      "reveals prompt for the vault passphrase on the terminal (ssh -t); MCP/API denied while headless",
+    );
+  }
 
   const vault = vaultFile();
   if (existsSync(vault)) {
@@ -50,10 +72,12 @@ export async function cmdDoctor(): Promise<void> {
       warn(`polkit not ready: ${health.polkit.detail ?? "unknown"}`);
       warn("secret reveals will be DENIED until the policy is installed: sudo scripts/install-polkit.sh");
       fails++;
-    } else if (process.platform === "linux") {
+    } else if (process.platform === "linux" && info.auth !== "passphrase") {
       warn(`polkit unavailable: ${health.polkit.detail ?? "unknown"} (auth=${info.auth} via ABRA_AUTH)`);
       warn("install: sudo scripts/install-polkit.sh, then unset ABRA_AUTH to use the PolKit gate");
     }
+  } else if (info.auth === "passphrase" && process.platform === "linux") {
+    ok("polkit not required (passphrase auth)");
   }
 
   if (info.keystore === "macos-keychain" && process.platform !== "darwin") {

@@ -89,6 +89,37 @@ export interface PlatformKeystore {
 | Linux | [libsecret](https://wiki.gnome.org/Projects/Libsecret) via `secret-tool` or `keytar` | Passphrase-wrapped key file in `~/.abracadabra/master.key.enc` (unlock at `abra unlock`) |
 | Windows | Credential Manager via `keytar` or DPAPI | Same passphrase file fallback |
 
+### Passphrase-file keystore (`ABRA_KEYSTORE=passphrase-file`)
+
+Used for headless/SSH Linux when no OS credential store is available.
+
+| Topic | Behavior |
+|-------|----------|
+| Wrap format | **v2**: scrypt `N=2^17` (131072), `r=8`, `p=1`, AES-256-GCM with AAD binding `{format,version,kdf}`. v1 files (`N=2^14`, no AAD) still open; successful unlock with a ≥12-char passphrase re-wraps to v2 atomically. |
+| Passphrase minimum | **12 Unicode code points** (after NFKC) at creation / passphrase change. Existing shorter secrets still unlock (v1 stays until changed; USB restore of a short bundle passphrase is allowed with a stderr warning). |
+| Prompt | Passphrase is read from the controlling terminal (`/dev/tty`) with echo off — not from stdin pipes, env, or argv. Use `ssh -t` over SSH. `ABRA_HEADLESS_PASSPHRASE` is CI-only (`ABRA_SKIP_BIOMETRICS=1` or `ABRA_AUTH=none`). |
+| Session | `abra unlock` caches the **master key** in memory (TTL); the plaintext passphrase is **not** cached. Reboot / new process → locked. |
+| Unlock backoff | After 5 consecutive wrong passphrases, exponential delay before the next try (`2^(failures-5)` seconds, cap 15 minutes). Never a hard lockout; counter in `unlock-attempts.json` (speed bump only — scrypt is the real cost). |
+
+#### Migrating keytar → passphrase-file
+
+Use when you need headless Linux (SSH / systemd) with `ABRA_KEYSTORE=passphrase-file` + the `passphrase` approval backend, but the master key still lives in keytar (Secret Service / Credential Vault).
+
+```sh
+# Prefer a backup first
+abra usb backup
+
+# Run from the graphical session where PolKit / the keyring work,
+# or over `ssh -t` with ABRA_AUTH=polkit and a TTY agent (e.g. pkttyagent)
+abra keystore migrate --to passphrase-file
+```
+
+- The master key bytes do **not** change — only the wrap moves into `master.key.enc` (v2). `vault.enc` is untouched.
+- **Keep-by-default:** without `--remove-old`, the keytar copy stays. While it exists, any same-user process with an unlocked keyring can still read the key. Remove later with `abra keystore migrate --to passphrase-file --remove-old` (types `delete` on `/dev/tty` after verify).
+- Then: `export ABRA_KEYSTORE=passphrase-file` (shell profile + `Environment=ABRA_KEYSTORE=passphrase-file` in the abra-agent unit) and `abra doctor`.
+
+macOS keychain → passphrase-file is not supported yet.
+
 Use one npm dependency where possible:
 
 - [`keytar`](https://github.com/atom/node-keytar) — Keychain / Secret Service / Credential Vault (native addon; needs prebuilds for CI).
@@ -312,6 +343,8 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 | 2026-09-01 | A1–A5 landed: `src/platform/*`, vault + call sites wired |
 | 2026-09-01 | Tier 1 B–E (except README + CI): keytar, passphrase-file, password auth, unlock/lock, doctor |
 | 2026-09-25 | Linux PolKit per-reveal gate (`auth-polkit`, policy + `install-polkit.sh`); password prompt → stderr |
+| 2026-09-25 | Passphrase-file H1: v2 wrap (scrypt 2^17 + AAD), tty-only prompt, no cached passphrase, unlock backoff |
+| 2026-09-25 | H2: headless passphrase auth backend + headless-aware Linux auth selection (no password auto-select) |
 | 2026-09-25 | Linux abra-agent (unix socket, idle lock, vault.load/save); systemd --user unit |
 
 ---
@@ -340,18 +373,41 @@ Requires `pkcheck` (usually `/usr/bin/pkcheck` from the `polkit` package).
 
 | Condition | Auth backend |
 |-----------|--------------|
-| `ABRA_AUTH` set | that value (`polkit` / `password` / `none` / …) |
+| `ABRA_AUTH` set | that value (`polkit` / `passphrase` / `password` / `none` / …) |
 | `ABRA_SKIP_BIOMETRICS=1` | `none` |
-| Linux | `polkit` (reveals denied until `pkcheck` + policy are installed) |
+| macOS | `macos-touchid` |
+| Linux, headless + `ABRA_KEYSTORE=passphrase-file` | `passphrase` (tty vault-passphrase prompt) |
+| Linux, headless + other keystore | `polkit` (denies immediately — no dialog) |
+| Linux, graphical | `polkit` |
 | Windows / other | `password` |
 
-`ABRA_AUTH=password` on Linux is an **explicit, less-safe opt-in** (press-Enter confirm, no identity check); it is never selected automatically. `abra doctor` flags a missing policy as a failure. `ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
+`ABRA_AUTH=password` on Linux is an **explicit, less-safe opt-in** (press-Enter confirm, no identity check); it is **never** selected automatically. `abra doctor` flags a missing policy as a failure when auth is `polkit`. `ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
+
+### Headless Linux (SSH / no desktop)
+
+**Detection** (`detectHeadlessSession`, Linux only): headless when `SSH_CONNECTION` or `SSH_TTY` is non-empty, **or** when neither `WAYLAND_DISPLAY` nor `DISPLAY` is set and `XDG_SESSION_TYPE` is not `wayland`/`x11`. Non-Linux reports `headless: false` with a “not linux” reason.
+
+**Auth selection (auto, no `ABRA_AUTH`):**
+
+| Session | Keystore | Auth |
+|---------|----------|------|
+| Headless | `passphrase-file` | `passphrase` |
+| Headless | `keytar` (default) / other | `polkit` → **denied** (no dialog); set `ABRA_KEYSTORE=passphrase-file` (run: `abra keystore migrate --to passphrase-file`) |
+| Graphical | any | `polkit` |
+
+**Passphrase approval (`ABRA_AUTH=passphrase` or auto headless + passphrase-file):**
+
+- Requires a controlling terminal — use `ssh -t`. Without a TTY: denied with an `ssh -t` / `abra grant` hint.
+- **Every** reveal prompts for the vault passphrase (no grace window, no caching). Wrong guesses count toward unlock backoff (same counter as `abra unlock`).
+- On success, a locked passphrase-file session is unlocked (same effect as `abra unlock`) so the reveal can proceed; the next reveal still prompts.
+- MCP / HTTP API while headless cannot complete passphrase approval without a TTY — use a scoped API key (`abra grant` / `abra keys new`).
+- `ABRA_AUTH=password` is never auto-selected on Linux.
 
 ### MCP / headless
 
-MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless or plain SSH sessions without an agent are denied.
+MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless SSH without `passphrase-file` is denied by PolKit auth; with `passphrase-file`, approvals prompt on the terminal (`ssh -t`).
 
-The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit or a scoped API key for agents.
+The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit, passphrase-file + tty, or a scoped API key for agents.
 
 ### Omarchy / Quickshell
 
