@@ -3,84 +3,102 @@
 # Holds the unlocked vault master key in memory with idle lock so CLI commands
 # do not re-read a login-unlocked Secret Service / keyring on every call.
 #
+# Full guide: docs/LINUX-HEADLESS.md
+#
 # Install (user session):
 #   mkdir -p ~/.config/systemd/user
-#   cp packaging/linux/abra-agent.service ~/.config/systemd/user/
-#   # Edit ExecStart to absolute paths for node + dist/agent/server.js
+#   PKG="$(npm root -g)/@userdefault/abracadabra"
+#   cp "$PKG/packaging/linux/abra-agent.service" ~/.config/systemd/user/
+#   # Edit ExecStart (see below), then:
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now abra-agent
+#   # Linger so the user manager runs without a GUI login (SSH/headless):
+#   #   sudo loginctl enable-linger "$USER"
 #
-# ExecStart MUST use absolute paths. Do not rely on mise/nvm/fnm PATH in the
-# user manager environment. Examples:
-#   ExecStart=/usr/bin/node /usr/lib/abracadabra/dist/agent/server.js
-#   ExecStart=/usr/bin/node /home/YOU/.local/lib/node_modules/@userdefault/abracadabra/dist/agent/server.js
+# ── ExecStart (absolute paths required) ──────────────────────────────────────
+# Peer auth (src/agent/peer.ts) allows only the abra CLI that shares:
+#   1) the same node binary realpath as this unit's ExecStart node, and
+#   2) the same package install's dist/index.js as argv[1]
+#      (resolveAbraCliEntrypoint from dist/agent/server.js → ../index.js).
+# If ExecStart uses a different node (nvm vs /usr/bin/node) or a different
+# install than `command -v abra`, every sensitive op returns forbidden_peer.
+#
+# Find paths:
+#   NODE="$(readlink -f "$(command -v node)")"
+#   SERVER="$(npm root -g)/@userdefault/abracadabra/dist/agent/server.js"
+#   # user-prefix: ~/.npm-global or ~/.local — use that npm root -g / prefix
+#   # nvm/mise: resolve the same node that runs `abra` (readlink -f), not a
+#   # different toolchain in the user manager's PATH.
+#
+# Default below assumes a global npm install under /usr/lib/node_modules.
 # Or drop-in: systemctl --user edit abra-agent
 #
 # Socket: $XDG_RUNTIME_DIR/abra/agent.sock (mode 0600; dir 0700 via RuntimeDirectory).
 # Env: ABRA_AGENT_IDLE_SECONDS (default 900). ABRA_AGENT_MAX_AGE_SECONDS (default
 # 28800 = 8h, clamped). ABRA_AGENT=0 disables client use.
+# If you customize ABRA_DIR, set the same value here and in your shell so the
+# agent and CLI share the vault / master.key.enc.
 #
-# Passphrase-file keystore (headless / SSH): uncomment so the agent matches the
-# CLI. Unlock with `abra unlock` on a terminal — the CLI pushes the key via
-# unlock.key; the agent never prompts.
+# Passphrase-file keystore: optional when ~/.abracadabra/master.key.enc exists
+# (Linux auto-detect). Uncomment to force the backend explicitly:
 # Environment=ABRA_KEYSTORE=passphrase-file
 #
+# Dependent units that need the vault unlocked can wait, e.g.:
+#   ExecStartPre=/usr/bin/abra agent status --wait --timeout 600
+# or a oneshot that runs `abra unlock` on a TTY, then the wait.
+#
 # Sleep lock: agent spawns /usr/bin/gdbus (or /usr/bin/dbus-monitor) to watch
-# logind PrepareForSleep. RestrictAddressFamilies=AF_UNIX allows that (system
-# bus is AF_UNIX). No SystemCallFilter is set — do not add one that blocks
-# execve of /usr/bin/gdbus. Logind inhibitor is NOT taken (best-effort lock).
+# logind PrepareForSleep. RestrictAddressFamilies includes AF_UNIX for that
+# (system bus is AF_UNIX). No SystemCallFilter is set — do not add one that
+# blocks execve of /usr/bin/gdbus. Logind inhibitor is NOT taken (best-effort).
 #
 # Node has no process.setrlimit — LimitCORE=0 is the practical core-dump guard.
 # Do NOT set MemoryDenyWriteExecute=yes — V8 JIT needs writable+executable pages.
 #
-# NOTE (user units): ProtectSystem / ProtectHome / PrivateTmp rely on unprivileged
-# user namespaces (systemd implies PrivateUsers for the user manager). Verify live
-# on the target distro. Secret Service D-Bus must still work — the session bus
-# socket at %t/bus remains connectable even when that mount is read-only.
+# ── Hardening (user-unit safe) ───────────────────────────────────────────────
+# Do NOT set PrivateTmp, ProtectSystem, ProtectHome, PrivateUsers, or
+# ReadWritePaths / ReadOnlyPaths / InaccessiblePaths in a systemd --user unit.
+# Those options imply a user/mount namespace; inside it the peer-PID lookup
+# (socket inode + ss -xpn + /proc/<pid>/…) cannot see the caller's PID, so
+# every sensitive request fails closed with forbidden_peer
+# reason=peer_pid_unresolved. Use only the directives below.
 
 [Unit]
 Description=abracadabra vault agent (idle-locked master key)
-Documentation=https://github.com/userdefault13/abracadabra/blob/main/docs/CROSS-PLATFORM.md
+Documentation=https://github.com/userdefault13/abracadabra/blob/main/docs/LINUX-HEADLESS.md
 After=default.target
 
 [Service]
 Type=simple
-# EDIT ME — absolute node + absolute path to dist/agent/server.js
-ExecStart=/usr/bin/node /usr/lib/abracadabra/dist/agent/server.js
+# EDIT ME — absolute node + absolute path to THIS install's dist/agent/server.js
+# (same node realpath + same package as the `abra` CLI — see comments above)
+ExecStart=/usr/bin/node /usr/lib/node_modules/@userdefault/abracadabra/dist/agent/server.js
 Restart=on-failure
 RestartSec=2
 UMask=0077
 
 # Runtime dir for the agent socket ($XDG_RUNTIME_DIR/abra = %t/abra).
-# Prefer RuntimeDirectory over ReadWritePaths=%t/abra: with ProtectSystem=strict,
-# $XDG_RUNTIME_DIR is read-only and ReadWritePaths fails namespace setup if the
-# dir does not exist yet. RuntimeDirectory creates it at 0700 for us.
 RuntimeDirectory=abra
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=no
 
-# Hardening (valid for systemd --user)
+# Hardening that does NOT create a user/mount namespace in --user units:
 NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-# Vault lives under ~/.abracadabra — leading '-' means missing path is OK
-ReadWritePaths=-%h/.abracadabra
-# ProtectHome=read-only would block vault writes unless ReadWritePaths covers
-# %h/.abracadabra (included above). Keep read-only home with that exception:
-ProtectHome=read-only
-LimitCORE=0
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
-# keytar talks to Secret Service over D-Bus (AF_UNIX). Agent protocol is AF_UNIX.
-# AF_INET/AF_INET6 omitted — agent is local-only.
-RestrictAddressFamilies=AF_UNIX
+LimitCORE=0
+# AF_UNIX: agent socket + D-Bus (Secret Service / gdbus sleep watch).
+# AF_NETLINK: ss -xpn sock_diag used by the peer check (without it → ss_failed).
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 
-# Omitted (incompatible or not for --user without caveats):
+# Omitted on purpose:
 # - MemoryDenyWriteExecute — breaks Node/V8 JIT
+# - PrivateTmp / ProtectSystem / ProtectHome / PrivateUsers / ReadWritePaths —
+#   imply a user namespace in --user units → peer_pid_unresolved (fail closed)
 # - ProtectKernel* / PrivateDevices / RestrictNamespaces — often ineffective
-#   or rejected under the user manager; leave to system units if needed
+#   or rejected under the user manager
 
 [Install]
 WantedBy=default.target

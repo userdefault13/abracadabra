@@ -107,7 +107,8 @@ export function headlessPolkitHint(reasons: string[]): string {
   return (
     `Headless session (${reasons.join("; ")}): PolKit can't show an approval dialog. ` +
     `Headless use needs ABRA_KEYSTORE=passphrase-file (then approvals prompt for the vault passphrase on the terminal; use ssh -t). ` +
-    `Run: abra keystore migrate --to passphrase-file`
+    `Run: abra keystore migrate --to passphrase-file ` +
+    `(over SSH: ABRA_AUTH=password abra keystore migrate --to passphrase-file, one time)`
   );
 }
 

@@ -485,6 +485,30 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     expect(loaded.projects.fb.vars.K.value).toBe("direct-after-forbidden");
   });
 
+  it("forbidden_peer client message includes static hint; request still denied", async () => {
+    const hint =
+      "abra-agent is running inside a user namespace (likely systemd unit sandboxing: PrivateTmp/ProtectSystem/ProtectHome/PrivateUsers in a --user unit), so it cannot see the caller's PID. Use the shipped packaging/linux/abra-agent.service hardening (no namespace options) — see docs/LINUX-HEADLESS.md";
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => path.resolve(vaultPath),
+      authorizePeer: async () => ({
+        ok: false,
+        reason: "peer_pid_unresolved",
+        hint,
+      }),
+      sleepWatch: false,
+    });
+
+    await expect(agentUnlock({ socketPath })).rejects.toMatchObject({
+      code: "forbidden_peer",
+      message: expect.stringContaining("user namespace"),
+    });
+    await expect(agentUnlock({ socketPath })).rejects.toMatchObject({
+      message: expect.stringContaining("LINUX-HEADLESS.md"),
+    });
+  });
+
   it("allowed abra CLI peer → vault.load succeeds", async () => {
     await startAgent({
       socketPath,

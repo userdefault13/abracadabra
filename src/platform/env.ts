@@ -1,7 +1,28 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 export type HeadlessDetection = {
   headless: boolean;
   reasons: string[];
 };
+
+export type KeystoreResolveOpts = {
+  /** Injectable for hermetic tests (defaults to fs.existsSync). */
+  existsSync?: (path: string) => boolean;
+};
+
+/**
+ * Resolve vault directory from an env map (hermetic for tests).
+ * ABRA_DIR (trimmed) → else HOME/.abracadabra → else os.homedir()/.abracadabra.
+ */
+export function resolveAbraDirFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const fromEnv = env.ABRA_DIR?.trim();
+  if (fromEnv) return fromEnv;
+  const home = env.HOME?.trim();
+  if (home) return path.join(home, ".abracadabra");
+  return path.join(os.homedir(), ".abracadabra");
+}
 
 /**
  * Detect whether this Linux session can show a graphical approval dialog.
@@ -60,14 +81,43 @@ export function headlessPassphrase(env: NodeJS.ProcessEnv = process.env): string
   return p || undefined;
 }
 
+/**
+ * Keystore backend selection.
+ *
+ * Explicit ABRA_KEYSTORE always wins. On Linux only, when unset, auto-detect
+ * passphrase-file if `<ABRA_DIR>/master.key.enc` exists (headless SSH case).
+ * Darwin / win32 never auto-detect — Keychain / keytar users must not silently
+ * switch when a leftover master.key.enc is present.
+ */
 export function resolveKeystoreBackend(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_KEYSTORE) return env.ABRA_KEYSTORE;
+  if (platform === "linux") {
+    const exists = opts.existsSync ?? ((p: string) => fs.existsSync(p));
+    const enc = path.join(resolveAbraDirFromEnv(env), "master.key.enc");
+    if (exists(enc)) return "passphrase-file";
+  }
   if (platform === "darwin") return "macos-keychain";
   if (platform === "linux" || platform === "win32") return "keytar";
   return "passphrase-file";
+}
+
+/** Human-readable why resolveKeystoreBackend picked its value (for doctor). */
+export function keystoreSelectionReason(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  opts: KeystoreResolveOpts = {},
+): string {
+  if (env.ABRA_KEYSTORE) return "explicit ABRA_KEYSTORE";
+  if (platform === "linux") {
+    const exists = opts.existsSync ?? ((p: string) => fs.existsSync(p));
+    const enc = path.join(resolveAbraDirFromEnv(env), "master.key.enc");
+    if (exists(enc)) return "auto-detected master.key.enc (linux)";
+  }
+  return "platform default";
 }
 
 /**
@@ -80,13 +130,14 @@ export function resolveKeystoreBackend(
 export function resolveAuthBackend(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_AUTH) return env.ABRA_AUTH;
   if (biometricsSkipped(env)) return "none";
   if (platform === "darwin") return "macos-touchid";
   if (platform === "linux") {
     const { headless } = detectHeadlessSession(env, platform);
-    const keystore = resolveKeystoreBackend(env, platform);
+    const keystore = resolveKeystoreBackend(env, platform, opts);
     if (headless && keystore === "passphrase-file") return "passphrase";
     // Headless + keytar (or other): still "polkit" — PolkitAuth denies with a
     // headless hint (no dialog). Never auto-select "password" on Linux.
@@ -101,13 +152,14 @@ export function resolveAuthBackend(
 export function authSelectionReason(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_AUTH) return "explicit ABRA_AUTH";
   if (biometricsSkipped(env)) return "ABRA_SKIP_BIOMETRICS / ABRA_AUTH=none";
   if (platform === "darwin") return "darwin default (macos-touchid)";
   if (platform === "linux") {
     const { headless } = detectHeadlessSession(env, platform);
-    const keystore = resolveKeystoreBackend(env, platform);
+    const keystore = resolveKeystoreBackend(env, platform, opts);
     if (headless && keystore === "passphrase-file") return "headless + passphrase-file";
     if (headless) return "headless + keytar → polkit denies";
     return "graphical session";

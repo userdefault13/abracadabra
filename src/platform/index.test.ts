@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   createAuth,
   createKeystore,
@@ -75,12 +78,16 @@ describe("platform", () => {
 describe("linux auth selection", () => {
   const envBackup = { ...process.env };
   const realPlatform = process.platform;
+  let tmpDir = "";
 
   beforeEach(() => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     delete process.env.ABRA_AUTH;
     delete process.env.ABRA_SKIP_BIOMETRICS;
     delete process.env.ABRA_KEYSTORE;
+    // Hermetic: do not auto-detect a real ~/.abracadabra/master.key.enc on the host.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "abra-plat-"));
+    process.env.ABRA_DIR = tmpDir;
     resetPlatformForTests();
   });
 
@@ -89,6 +96,11 @@ describe("linux auth selection", () => {
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
     vi.restoreAllMocks();
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it("selects polkit when probe ok", () => {

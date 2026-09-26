@@ -11,6 +11,7 @@ import {
   authSelectionReason,
   biometricsSkipped,
   detectHeadlessSession,
+  keystoreSelectionReason,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
@@ -31,11 +32,12 @@ export {
   authSelectionReason,
   biometricsSkipped,
   detectHeadlessSession,
+  keystoreSelectionReason,
   resolveAuthBackend,
   resolveKeystoreBackend,
   VALID_AUTH_BACKENDS,
 } from "./env.js";
-export type { HeadlessDetection } from "./env.js";
+export type { HeadlessDetection, KeystoreResolveOpts } from "./env.js";
 export { lockSession, isSessionUnlocked } from "./session.js";
 export { VaultLockedError } from "./keystore-passphrase.js";
 export { probeKeytar } from "./keystore-keytar.js";
@@ -148,6 +150,7 @@ export function platformInfo(): {
   keystore: string;
   auth: string;
   authSelectionReason: string;
+  keystoreSelectionReason: string;
   biometricsSkipped: boolean;
   vaultLocked: boolean;
   headless: HeadlessDetection;
@@ -157,6 +160,7 @@ export function platformInfo(): {
     keystore: resolveKeystoreBackend(),
     auth: resolveAuthBackend(),
     authSelectionReason: authSelectionReason(),
+    keystoreSelectionReason: keystoreSelectionReason(),
     biometricsSkipped: biometricsSkipped(),
     vaultLocked: resolveKeystoreBackend() === "passphrase-file" && isPassphraseVaultLocked(),
     headless: detectHeadlessSession(),

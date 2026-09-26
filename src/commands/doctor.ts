@@ -12,7 +12,7 @@ export async function cmdDoctor(): Promise<void> {
   const info = platformInfo();
 
   ok(`platform ${info.platform}`);
-  ok(`keystore backend ${info.keystore}`);
+  ok(`keystore backend ${info.keystore} (${info.keystoreSelectionReason})`);
   ok(`auth backend ${info.auth} (${info.authSelectionReason})`);
 
   if (info.platform === "linux") {

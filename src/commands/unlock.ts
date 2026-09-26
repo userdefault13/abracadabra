@@ -14,7 +14,16 @@ import {
   AgentClientError,
   resolveAgentSocketPath,
 } from "../agent/index.js";
+import { abraDir } from "../core/paths.js";
 import fs from "node:fs";
+
+function nonPassphraseUnlockMessage(backend: string): string {
+  return (
+    `Keystore "${backend}" does not use abra unlock (OS credential store). ` +
+    `If you migrated to passphrase-file, master.key.enc was not found in ${abraDir()}; ` +
+    `set ABRA_DIR or ABRA_KEYSTORE=passphrase-file.`
+  );
+}
 
 /**
  * Unlock the passphrase-file vault for this process, and push the master key
@@ -31,7 +40,7 @@ import fs from "node:fs";
 export async function cmdUnlock(): Promise<void> {
   const backend = resolveKeystoreBackend();
   if (backend !== "passphrase-file") {
-    console.log(`Keystore "${backend}" does not use abra unlock (OS credential store).`);
+    console.log(nonPassphraseUnlockMessage(backend));
     if (isSessionUnlocked()) lockSession();
     return;
   }
@@ -107,7 +116,11 @@ export function cmdLock(): void {
 export async function cmdUnlockStatus(): Promise<void> {
   const info = platformInfo();
   if (info.keystore !== "passphrase-file") {
-    console.log(`unlock: not applicable (keystore=${info.keystore})`);
+    console.log(
+      `unlock: not applicable (keystore=${info.keystore}). ` +
+        `If you migrated to passphrase-file, master.key.enc was not found in ${abraDir()}; ` +
+        `set ABRA_DIR or ABRA_KEYSTORE=passphrase-file.`,
+    );
     return;
   }
   if (info.vaultLocked) {

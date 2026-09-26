@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   authSelectionReason,
   detectHeadlessSession,
+  keystoreSelectionReason,
   resolveAuthBackend,
   resolveKeystoreBackend,
   biometricsSkipped,
+  resolveAbraDirFromEnv,
 } from "./env.js";
 
 type SshKind = "none" | "SSH_CONNECTION" | "SSH_TTY";
@@ -155,6 +157,7 @@ describe("resolveAuthBackend linux selection matrix", () => {
   });
 
   it.each(cases)("$name → $expected", ({ env, expected }) => {
+    const noEnc = { existsSync: () => false };
     expect(detectHeadlessSession(env, "linux").headless).toBe(
       expectedHeadless(
         (env.SSH_CONNECTION ? "SSH_CONNECTION" : env.SSH_TTY ? "SSH_TTY" : "none") as SshKind,
@@ -162,13 +165,14 @@ describe("resolveAuthBackend linux selection matrix", () => {
         (env.XDG_SESSION_TYPE as SessionKind) || "unset",
       ),
     );
-    expect(resolveAuthBackend(env, "linux")).toBe(expected);
+    expect(resolveAuthBackend(env, "linux", noEnc)).toBe(expected);
   });
 
   it("never auto-resolves to password when ABRA_AUTH unset", () => {
+    const noEnc = { existsSync: () => false };
     for (const c of cases) {
       if (c.env.ABRA_AUTH) continue;
-      expect(resolveAuthBackend(c.env, "linux")).not.toBe("password");
+      expect(resolveAuthBackend(c.env, "linux", noEnc)).not.toBe("password");
     }
   });
 
@@ -188,19 +192,33 @@ describe("resolveAuthBackend linux selection matrix", () => {
   });
 
   it("headless + keytar selects polkit (denies at auth time)", () => {
-    expect(resolveAuthBackend({ SSH_TTY: "/dev/pts/0" }, "linux")).toBe("polkit");
-    expect(authSelectionReason({ SSH_TTY: "/dev/pts/0" }, "linux")).toBe(
+    const noEnc = { existsSync: () => false };
+    expect(resolveAuthBackend({ SSH_TTY: "/dev/pts/0" }, "linux", noEnc)).toBe("polkit");
+    expect(authSelectionReason({ SSH_TTY: "/dev/pts/0" }, "linux", noEnc)).toBe(
       "headless + keytar → polkit denies",
     );
   });
 
   it("graphical selects polkit", () => {
+    const noEnc = { existsSync: () => false };
     expect(
-      resolveAuthBackend({ DISPLAY: ":0", XDG_SESSION_TYPE: "x11" }, "linux"),
+      resolveAuthBackend({ DISPLAY: ":0", XDG_SESSION_TYPE: "x11" }, "linux", noEnc),
     ).toBe("polkit");
     expect(
-      authSelectionReason({ DISPLAY: ":0", XDG_SESSION_TYPE: "x11" }, "linux"),
+      authSelectionReason({ DISPLAY: ":0", XDG_SESSION_TYPE: "x11" }, "linux", noEnc),
     ).toBe("graphical session");
+  });
+
+  it("headless linux + master.key.enc auto-detect → passphrase auth", () => {
+    const withEnc = {
+      existsSync: (p: string) => p.endsWith("master.key.enc"),
+    };
+    expect(
+      resolveAuthBackend({ SSH_CONNECTION: "x", ABRA_DIR: "/tmp/abra-test" }, "linux", withEnc),
+    ).toBe("passphrase");
+    expect(
+      resolveKeystoreBackend({ ABRA_DIR: "/tmp/abra-test" }, "linux", withEnc),
+    ).toBe("passphrase-file");
   });
 });
 
@@ -231,11 +249,50 @@ describe("resolveAuthBackend other platforms", () => {
     );
   });
 
-  it("resolveKeystoreBackend DI", () => {
-    expect(resolveKeystoreBackend({}, "linux")).toBe("keytar");
+  it("resolveKeystoreBackend DI + linux auto-detect", () => {
+    const noEnc = { existsSync: () => false };
+    const withEnc = {
+      existsSync: (p: string) => p.endsWith("master.key.enc"),
+    };
+    expect(resolveKeystoreBackend({}, "linux", noEnc)).toBe("keytar");
     expect(resolveKeystoreBackend({ ABRA_KEYSTORE: "passphrase-file" }, "linux")).toBe(
       "passphrase-file",
     );
+    // Explicit wins even when master.key.enc is present.
+    expect(
+      resolveKeystoreBackend({ ABRA_KEYSTORE: "keytar", ABRA_DIR: "/x" }, "linux", withEnc),
+    ).toBe("keytar");
+    expect(resolveKeystoreBackend({ ABRA_DIR: "/x" }, "linux", withEnc)).toBe(
+      "passphrase-file",
+    );
+    expect(resolveKeystoreBackend({ ABRA_DIR: "/x" }, "linux", noEnc)).toBe("keytar");
+    // Darwin / win32 never auto-detect from master.key.enc.
+    expect(resolveKeystoreBackend({ ABRA_DIR: "/x" }, "darwin", withEnc)).toBe(
+      "macos-keychain",
+    );
+    expect(resolveKeystoreBackend({ ABRA_DIR: "/x" }, "win32", withEnc)).toBe("keytar");
     expect(resolveKeystoreBackend({}, "darwin")).toBe("macos-keychain");
+  });
+
+  it("resolveAbraDirFromEnv honors ABRA_DIR and HOME", () => {
+    expect(resolveAbraDirFromEnv({ ABRA_DIR: " /custom/abra " })).toBe("/custom/abra");
+    expect(resolveAbraDirFromEnv({ HOME: "/home/u" })).toBe("/home/u/.abracadabra");
+  });
+
+  it("keystoreSelectionReason", () => {
+    const withEnc = {
+      existsSync: (p: string) => p.endsWith("master.key.enc"),
+    };
+    const noEnc = { existsSync: () => false };
+    expect(keystoreSelectionReason({ ABRA_KEYSTORE: "keytar" }, "linux")).toBe(
+      "explicit ABRA_KEYSTORE",
+    );
+    expect(keystoreSelectionReason({ ABRA_DIR: "/x" }, "linux", withEnc)).toBe(
+      "auto-detected master.key.enc (linux)",
+    );
+    expect(keystoreSelectionReason({}, "linux", noEnc)).toBe("platform default");
+    expect(keystoreSelectionReason({ ABRA_DIR: "/x" }, "darwin", withEnc)).toBe(
+      "platform default",
+    );
   });
 });

@@ -65,5 +65,9 @@ export {
   parseSsUnixXpn,
   resolvePeerPidFromSs,
   isAllowedAbraCliPeer,
+  detectUserNamespace,
+  peerAuthFail,
+  USER_NAMESPACE_PEER_HINT,
+  SS_NETLINK_HINT,
   type PeerAuthResult,
 } from "./peer.js";

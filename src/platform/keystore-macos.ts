@@ -99,7 +99,7 @@ export class MacOSKeychainKeystore implements PlatformKeystore {
         throw new Error(
           `Keychain master key is not accessible: ${why}\n` +
             `If this is an ssh or headless session, run abra from a GUI login on this Mac ` +
-            `(or set ABRA_KEYSTORE=passphrase). Refusing to create a new master key over an existing vault.`,
+            `(or set ABRA_KEYSTORE=passphrase-file). Refusing to create a new master key over an existing vault.`,
         );
       }
       const key = crypto.randomBytes(32);

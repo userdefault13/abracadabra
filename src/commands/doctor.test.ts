@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { cmdDoctor } from "./doctor.js";
 import { resetPlatformForTests } from "../platform/index.js";
 
@@ -6,9 +9,12 @@ describe("cmdDoctor headless / passphrase", () => {
   const envBackup = { ...process.env };
   const realPlatform = process.platform;
   let lines: string[] = [];
+  let tmpDir = "";
 
   beforeEach(() => {
     lines = [];
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "abra-doctor-"));
+    process.env.ABRA_DIR = tmpDir;
     vi.spyOn(console, "log").mockImplementation((msg: string) => {
       lines.push(String(msg));
     });
@@ -30,6 +36,11 @@ describe("cmdDoctor headless / passphrase", () => {
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
     vi.restoreAllMocks();
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it("headless + keytar warns and counts as fail", async () => {
