@@ -311,3 +311,51 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 | 2026-09-01 | Initial draft (Tier 1–3, trait boundaries, task list) |
 | 2026-09-01 | A1–A5 landed: `src/platform/*`, vault + call sites wired |
 | 2026-09-01 | Tier 1 B–E (except README + CI): keytar, passphrase-file, password auth, unlock/lock, doctor |
+| 2026-09-25 | Linux PolKit per-reveal gate (`auth-polkit`, policy + `install-polkit.sh`); password prompt → stderr |
+
+---
+
+## Linux: PolKit approval gate
+
+On Linux, interactive secret reveals (CLI `get`, MCP `get_secrets`, Cloudflare mint, etc.) go through `authenticate()` → `PlatformAuth`. The default backend on Linux is **always `polkit`** (per-reveal system prompt, similar to 1Password on Linux / Touch ID on macOS). If `pkcheck` or the policy file is missing, every reveal is **denied** with an actionable error pointing at `sudo scripts/install-polkit.sh` — there is no automatic fallback to the password prompt.
+
+### Install the policy
+
+```bash
+sudo scripts/install-polkit.sh
+# installs packaging/linux/dev.abracadabra.policy →
+#   /usr/share/polkit-1/actions/dev.abracadabra.policy
+```
+
+Verify:
+
+```bash
+pkaction --action-id dev.abracadabra.reveal --verbose
+```
+
+Requires `pkcheck` (usually `/usr/bin/pkcheck` from the `polkit` package).
+
+### Selection and overrides
+
+| Condition | Auth backend |
+|-----------|--------------|
+| `ABRA_AUTH` set | that value (`polkit` / `password` / `none` / …) |
+| `ABRA_SKIP_BIOMETRICS=1` | `none` |
+| Linux | `polkit` (reveals denied until `pkcheck` + policy are installed) |
+| Windows / other | `password` |
+
+`ABRA_AUTH=password` on Linux is an **explicit, less-safe opt-in** (press-Enter confirm, no identity check); it is never selected automatically. `abra doctor` flags a missing policy as a failure. `ABRA_AUTH=polkit` on non-Linux is rejected. Policy defaults use **`auth_self`** (not `auth_self_keep`) — every reveal prompts; nothing is cached.
+
+### MCP / headless
+
+MCP tools already call `authenticate()`; no MCP-specific PolKit path. A **graphical polkit agent** must be running in the active session (GNOME, KDE, wlroots portals, etc.). Headless or plain SSH sessions without an agent are denied.
+
+The opt-in password prompt (`ABRA_AUTH=password`) writes only to **stderr** so it never corrupts MCP JSON-RPC on stdout — but without a TTY it still denies (same as before). Prefer PolKit or a scoped API key for agents.
+
+### Omarchy / Quickshell
+
+On Omarchy, the polkit agent runs inside the Quickshell shell. Machines without a fingerprint reader (e.g. 2020 iMac) show a **password** dialog from that agent — still one prompt per reveal.
+
+### Optional: FIDO2 / pam-u2f (Touch-ID-like tap)
+
+Optional. You can configure **pam-u2f** so the polkit-1 PAM stack accepts a security key tap. This changes PAM for `polkit-1`; keep a password fallback and test from a second session before relying on it. Not required for abracadabra.

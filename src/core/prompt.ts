@@ -14,22 +14,30 @@ export function prompt(question: string): Promise<string> {
   });
 }
 
-export async function promptHidden(question: string): Promise<string> {
+/**
+ * Hidden stdin prompt. Writes the question (and Enter/Ctrl-C newlines) to
+ * `output` — default stdout for CLI callers; PasswordPromptAuth passes stderr
+ * so MCP JSON-RPC on stdout is never corrupted.
+ */
+export async function promptHidden(
+  question: string,
+  output: NodeJS.WritableStream = process.stdout,
+): Promise<string> {
   const headless = headlessPassphrase();
   if (headless) return headless;
   const rl = readline.createInterface({ input: process.stdin, output: undefined });
-  process.stdout.write(question);
+  output.write(question);
   return new Promise((resolve) => {
     let value = "";
     const onKeypress = (ch: string, key: { name?: string; ctrl?: boolean; meta?: boolean }) => {
       if (key?.ctrl && key.name === "c") {
         cleanup();
-        process.stdout.write("\n");
+        output.write("\n");
         process.exit(130);
       }
       if (key?.name === "return" || key?.name === "enter") {
         cleanup();
-        process.stdout.write("\n");
+        output.write("\n");
         resolve(value);
         return;
       }

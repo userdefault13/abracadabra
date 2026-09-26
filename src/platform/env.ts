@@ -20,7 +20,10 @@ export function resolveAuthBackend(): string {
   if (process.env.ABRA_AUTH) return process.env.ABRA_AUTH;
   if (biometricsSkipped()) return "none";
   if (process.platform === "darwin") return "macos-touchid";
-  if (process.platform === "linux" || process.platform === "win32") return "password";
+  // Always PolKit on Linux: if pkcheck/policy is missing, PolkitAuth denies
+  // with an install hint. ABRA_AUTH=password is an explicit opt-in only.
+  if (process.platform === "linux") return "polkit";
+  if (process.platform === "win32") return "password";
   return "password";
 }
 
