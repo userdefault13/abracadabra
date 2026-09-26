@@ -7,6 +7,7 @@ import {
   TREASURY_PROJECT,
   type Vault,
 } from "../core/vault.js";
+import { runCastWithKeystore, type CastExecFn } from "../core/castWithKeystore.js";
 import { authenticate } from "../platform/index.js";
 import { isEthAddress, normalizeAddress } from "../license/config.js";
 
@@ -235,20 +236,120 @@ export async function getTreasuryStatus(): Promise<TreasuryStatus> {
   };
 }
 
+export type TreasuryAsset = "usdc" | "eth";
+
+/** Source wallet must hold at least this much ETH to pay for one USDC transfer on Base. */
+export const MIN_SOURCE_GAS_WEI = 5_000_000_000_000n; // 0.000005 ETH
+/** ETH left in the treasury after a native pay so the send itself can pay gas. */
+export const ETH_PAY_GAS_RESERVE_WEI = MIN_SOURCE_GAS_WEI;
+/** Default gas top-up sent from the treasury when the source wallet is under MIN_SOURCE_GAS_WEI. */
+export const DEFAULT_GAS_TOPUP_ETH = "0.00002";
+
 export function paymentAuthReason(args: {
   to: string;
-  amountUsdc: string;
+  amount: string;
   reason: string;
+  asset?: TreasuryAsset;
 }): string {
-  return `abracadabra treasury: pay ${args.amountUsdc} USDC to ${args.to} — ${args.reason}`;
+  const label = (args.asset ?? "usdc") === "eth" ? "ETH" : "USDC";
+  return `abracadabra treasury: pay ${args.amount} ${label} to ${args.to} — ${args.reason}`;
+}
+
+export interface PlanTreasuryPaymentInput {
+  asset?: TreasuryAsset;
+  to: string;
+  amount: string;
+  reason: string;
+  treasuryAddress: string;
+  ethBalanceWei: bigint;
+  usdcBalanceUnits?: bigint;
+}
+
+export interface TreasuryPaymentPlan {
+  asset: TreasuryAsset;
+  to: string;
+  amount: string;
+  amountUnits: bigint;
+  reason: string;
+  reserveWei: bigint;
+  /** Estimated ETH remaining after the transfer (send amount only; reserve stays for gas). */
+  ethBalanceAfterWei: bigint | null;
+  usdcBalanceAfterUnits: bigint | null;
+  authReason: string;
+}
+
+/** Pure planning/validation for `abra treasury pay` (no I/O, no keys). */
+export function planTreasuryPayment(input: PlanTreasuryPaymentInput): TreasuryPaymentPlan {
+  const assetRaw = (input.asset ?? "usdc").toString().trim().toLowerCase();
+  if (assetRaw !== "usdc" && assetRaw !== "eth") {
+    throw new Error(`Unsupported asset "${input.asset}". Use --asset usdc|eth`);
+  }
+  const asset = assetRaw as TreasuryAsset;
+  const reason = input.reason.trim();
+  if (!reason) throw new Error("--reason is required");
+  const amount = input.amount.trim();
+  if (!amount) throw new Error("--amount is required");
+  if (!isEthAddress(input.to.trim())) {
+    throw new Error(`Invalid destination address: ${input.to}`);
+  }
+  const to = normalizeAddress(input.to);
+  const treasury = normalizeAddress(input.treasuryAddress);
+  if (to === treasury) {
+    throw new Error("Cannot pay the treasury's own address");
+  }
+
+  if (asset === "eth") {
+    const amountUnits = parseEthAmount(amount);
+    const reserveWei = ETH_PAY_GAS_RESERVE_WEI;
+    const needed = amountUnits + reserveWei;
+    if (needed > input.ethBalanceWei) {
+      throw new Error(
+        `Treasury holds ${formatEthWei(input.ethBalanceWei)} ETH, need ${formatEthWei(needed)} (${formatEthWei(amountUnits)} + ${formatEthWei(reserveWei)} gas reserve)`,
+      );
+    }
+    return {
+      asset,
+      to,
+      amount,
+      amountUnits,
+      reason,
+      reserveWei,
+      ethBalanceAfterWei: input.ethBalanceWei - amountUnits,
+      usdcBalanceAfterUnits: null,
+      authReason: paymentAuthReason({ to, amount, reason, asset }),
+    };
+  }
+
+  const amountUnits = parseUsdcAmount(amount);
+  if (input.usdcBalanceUnits !== undefined && amountUnits > input.usdcBalanceUnits) {
+    throw new Error(
+      `Treasury holds ${formatUsdcUnits(input.usdcBalanceUnits)} USDC, cannot pay ${formatUsdcUnits(amountUnits)}`,
+    );
+  }
+  return {
+    asset: "usdc",
+    to,
+    amount,
+    amountUnits,
+    reason,
+    reserveWei: 0n,
+    ethBalanceAfterWei: null,
+    usdcBalanceAfterUnits:
+      input.usdcBalanceUnits !== undefined ? input.usdcBalanceUnits - amountUnits : null,
+    authReason: paymentAuthReason({ to, amount, reason, asset: "usdc" }),
+  };
 }
 
 /**
- * Run `cast send <args…> --private-key <key> --rpc-url <rpc> --json` and return the tx hash.
- * The key is passed as a process argument only; it is never logged or echoed.
+ * Run `cast send <args…>` via a throwaway keystore (key never on argv).
+ * Returns the transaction hash. Never logs the private key.
  * If `args` already include `--rpc-url`, that wins; else uses live env / Base mainnet.
  */
-export async function castSend(args: string[], privateKey: string): Promise<string> {
+export async function castSend(
+  args: string[],
+  privateKey: string,
+  opts: { exec?: CastExecFn } = {},
+): Promise<string> {
   const hasRpc = args.includes("--rpc-url");
   const rpc =
     process.env.ABRA_TREASURY_RPC?.trim() ||
@@ -257,24 +358,14 @@ export async function castSend(args: string[], privateKey: string): Promise<stri
   const rpcArgs = hasRpc ? [] : ["--rpc-url", rpc];
   let stdout: string;
   try {
-    const result = await execFileAsync(
-      "cast",
-      ["send", ...args, "--private-key", privateKey, ...rpcArgs, "--json"],
-      { maxBuffer: 2 * 1024 * 1024 },
+    const result = await runCastWithKeystore(
+      ["send", ...args, ...rpcArgs, "--json"],
+      privateKey,
+      { exec: opts.exec },
     );
     stdout = result.stdout;
   } catch (err) {
-    if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
-      throw new Error(
-        "foundry's `cast` not found on PATH. Install: curl -L https://foundry.paradigm.xyz | sh && foundryup",
-      );
-    }
-    const stderr =
-      err && typeof err === "object" && "stderr" in err
-        ? String((err as { stderr: unknown }).stderr)
-        : "";
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(stderr.trim() || msg);
+    throw err instanceof Error ? err : new Error(String(err));
   }
 
   let txHash = "";
@@ -308,42 +399,144 @@ export interface TreasuryPaymentResult {
   txHash: string;
   from: string;
   to: string;
+  /** Present for USDC pays (MCP + CLI). */
   amountUsdc: string;
+  asset: TreasuryAsset;
+  amountEth?: string;
+  ethAfter?: string;
+}
+
+export interface TreasuryPaymentDryRun {
+  dryRun: true;
+  treasuryAddress: string;
+  eth: string;
+  ethWei: string;
+  usdc: string;
+  usdcRaw: string;
+  plan: {
+    asset: TreasuryAsset;
+    amount: string;
+    amountUnits: string;
+    to: string;
+    reason: string;
+    reserveWei: string;
+    reserveEth: string;
+    ethBalanceAfter: string | null;
+    usdcBalanceAfter: string | null;
+    authReason: string;
+  };
 }
 
 /**
- * Biometric-gated Base USDC transfer from the abra treasury.
- * Never returns or logs the private key.
+ * Biometric-gated Base USDC or native ETH transfer from the abra treasury.
+ * MCP callers keep `{ to, amountUsdc, reason }` (USDC). Never returns or logs the private key.
  */
 export async function payFromTreasury(args: {
   to: string;
-  amountUsdc: string;
+  amountUsdc?: string;
+  amount?: string;
+  asset?: TreasuryAsset;
   reason: string;
-}): Promise<TreasuryPaymentResult> {
-  const to = normalizeAddress(args.to);
-  const amountUsdc = args.amountUsdc.trim();
-  const reason = args.reason.trim();
-  if (!reason) throw new Error("--reason is required");
-  const units = parseUsdcAmount(amountUsdc);
+  dryRun: true;
+}): Promise<TreasuryPaymentDryRun>;
+export async function payFromTreasury(args: {
+  to: string;
+  amountUsdc?: string;
+  amount?: string;
+  asset?: TreasuryAsset;
+  reason: string;
+  dryRun?: false;
+}): Promise<TreasuryPaymentResult>;
+export async function payFromTreasury(args: {
+  to: string;
+  /** USDC amount — required for the default/MCP USDC path. */
+  amountUsdc?: string;
+  /** Amount for the selected asset; preferred when `asset` is set. */
+  amount?: string;
+  asset?: TreasuryAsset;
+  reason: string;
+  dryRun?: boolean;
+}): Promise<TreasuryPaymentResult | TreasuryPaymentDryRun> {
+  const asset = (args.asset ?? "usdc") as TreasuryAsset;
+  const amount =
+    asset === "eth"
+      ? (args.amount ?? args.amountUsdc)?.trim()
+      : (args.amountUsdc ?? args.amount)?.trim();
+  if (!amount) throw new Error("--amount is required");
 
-  await authenticate(paymentAuthReason({ to, amountUsdc, reason }));
-
+  // Public address + balances before Touch ID; private key only after authenticate.
   const vault = await loadVault();
-  const from = readTreasuryAddress(vault);
-  const privateKey = readTreasuryPrivateKey(vault);
+  const treasuryAddress = readTreasuryAddress(vault);
+  const ethBalanceWei = await castBalanceWei(treasuryAddress);
+  const usdcBalanceUnits =
+    asset === "usdc" || args.dryRun ? await castUsdcBalance(treasuryAddress) : undefined;
 
-  const txHash = await castSend(
-    [BASE_USDC, "transfer(address,uint256)", to, units.toString()],
-    privateKey,
-  );
+  const plan = planTreasuryPayment({
+    asset,
+    to: args.to,
+    amount,
+    reason: args.reason,
+    treasuryAddress,
+    ethBalanceWei,
+    usdcBalanceUnits,
+  });
 
-  return { approved: true, txHash, from, to, amountUsdc };
+  if (args.dryRun) {
+    const usdcRaw = usdcBalanceUnits ?? 0n;
+    return {
+      dryRun: true,
+      treasuryAddress,
+      eth: formatEthWei(ethBalanceWei),
+      ethWei: ethBalanceWei.toString(),
+      usdc: formatUsdcUnits(usdcRaw),
+      usdcRaw: usdcRaw.toString(),
+      plan: {
+        asset: plan.asset,
+        amount: plan.amount,
+        amountUnits: plan.amountUnits.toString(),
+        to: plan.to,
+        reason: plan.reason,
+        reserveWei: plan.reserveWei.toString(),
+        reserveEth: formatEthWei(plan.reserveWei),
+        ethBalanceAfter:
+          plan.ethBalanceAfterWei !== null ? formatEthWei(plan.ethBalanceAfterWei) : null,
+        usdcBalanceAfter:
+          plan.usdcBalanceAfterUnits !== null
+            ? formatUsdcUnits(plan.usdcBalanceAfterUnits)
+            : null,
+        authReason: plan.authReason,
+      },
+    };
+  }
+
+  await authenticate(plan.authReason);
+
+  const fresh = await loadVault();
+  const from = readTreasuryAddress(fresh);
+  const privateKey = readTreasuryPrivateKey(fresh);
+
+  const txHash =
+    plan.asset === "eth"
+      ? await castSend([plan.to, "--value", plan.amountUnits.toString()], privateKey)
+      : await castSend(
+          [BASE_USDC, "transfer(address,uint256)", plan.to, plan.amountUnits.toString()],
+          privateKey,
+        );
+
+  const ethAfter =
+    plan.asset === "eth" ? formatEthWei(await castBalanceWei(from)) : undefined;
+
+  return {
+    approved: true,
+    txHash,
+    from,
+    to: plan.to,
+    amountUsdc: plan.asset === "usdc" ? plan.amount : "",
+    asset: plan.asset,
+    amountEth: plan.asset === "eth" ? plan.amount : undefined,
+    ethAfter,
+  };
 }
-
-/** Source wallet must hold at least this much ETH to pay for one USDC transfer on Base. */
-export const MIN_SOURCE_GAS_WEI = 5_000_000_000_000n; // 0.000005 ETH
-/** Default gas top-up sent from the treasury when the source wallet is under MIN_SOURCE_GAS_WEI. */
-export const DEFAULT_GAS_TOPUP_ETH = "0.00002";
 
 export interface RefillPlanInput {
   sourceUsdc: bigint;
@@ -414,7 +607,7 @@ export function refillAuthReason(args: {
 /**
  * Sweep Base USDC from a project wallet (EVM_ADDRESS / EVM_PRIVATE_KEY, optional suffix)
  * into the abra treasury. One Touch ID prompt covers the optional gas top-up and the transfer.
- * Private keys are handed to `cast` as process arguments only and are never logged.
+ * Private keys reach `cast` via a throwaway keystore env (never on argv) and are never logged.
  */
 export async function refillTreasury(args: {
   project: string;
@@ -626,28 +819,84 @@ export function registerTreasuryCommands(program: Command): void {
 
   treasury
     .command("pay")
-    .description("Send Base USDC from treasury (Touch ID: amount + destination + reason)")
+    .description(
+      "Send Base USDC or native ETH from treasury (Touch ID: asset + amount + destination + reason)",
+    )
     .requiredOption("--to <address>", "destination 0x address")
-    .requiredOption("--amount <usdc>", "USDC amount, e.g. 0.008")
+    .requiredOption("--amount <qty>", "amount, e.g. 0.008 USDC or 0.0006 ETH")
     .requiredOption("--reason <text>", "human-readable reason shown in Touch ID prompt")
-    .action(async (opts: { to: string; amount: string; reason: string }) => {
-      try {
-        if (!isEthAddress(opts.to.trim())) {
-          fail(`Invalid destination address: ${opts.to}`);
+    .option("--asset <usdc|eth>", "payment asset (default: usdc)", "usdc")
+    .option("--dry-run", "show balances and plan; no Touch ID, no transactions")
+    .option("--json", "machine-readable output")
+    .action(
+      async (opts: {
+        to: string;
+        amount: string;
+        reason: string;
+        asset?: string;
+        dryRun?: boolean;
+        json?: boolean;
+      }) => {
+        try {
+          const assetRaw = (opts.asset ?? "usdc").trim().toLowerCase();
+          if (assetRaw !== "usdc" && assetRaw !== "eth") {
+            fail(`Unsupported asset "${opts.asset}". Use --asset usdc|eth`);
+          }
+          const asset = assetRaw as TreasuryAsset;
+          const payArgs = {
+            to: opts.to,
+            amount: opts.amount,
+            amountUsdc: asset === "usdc" ? opts.amount : undefined,
+            asset,
+            reason: opts.reason,
+          };
+          if (opts.dryRun) {
+            const result = await payFromTreasury({ ...payArgs, dryRun: true });
+            if (opts.json) {
+              console.log(JSON.stringify(result, null, 2));
+              return;
+            }
+            console.log(dim(`treasury ${result.treasuryAddress}`));
+            console.log(dim(`         ${result.usdc} USDC · ${result.eth} ETH`));
+            console.log(
+              bold(
+                `dry run: would pay ${result.plan.amount} ${result.plan.asset.toUpperCase()} to ${result.plan.to}`,
+              ),
+            );
+            console.log(dim(`  reason  ${result.plan.reason}`));
+            if (result.plan.asset === "eth") {
+              console.log(
+                dim(
+                  `  reserve ${result.plan.reserveEth} ETH · after ≈ ${result.plan.ethBalanceAfter} ETH`,
+                ),
+              );
+            } else if (result.plan.usdcBalanceAfter !== null) {
+              console.log(dim(`  after ≈ ${result.plan.usdcBalanceAfter} USDC`));
+            }
+            console.log(dim("re-run without --dry-run to execute (Touch ID)"));
+            return;
+          }
+          const result = await payFromTreasury(payArgs);
+          if (opts.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return;
+          }
+          const paid =
+            result.asset === "eth"
+              ? `${result.amountEth} ETH`
+              : `${result.amountUsdc} USDC`;
+          console.log(green(`✓ paid ${paid}`));
+          console.log(dim(`  from ${result.from}`));
+          console.log(dim(`  to   ${result.to}`));
+          console.log(`  tx   ${bold(result.txHash)}`);
+          if (result.ethAfter !== undefined) {
+            console.log(dim(`  treasury ETH now ${result.ethAfter}`));
+          }
+        } catch (err) {
+          fail(err);
         }
-        const result = await payFromTreasury({
-          to: opts.to,
-          amountUsdc: opts.amount,
-          reason: opts.reason,
-        });
-        console.log(green(`✓ paid ${result.amountUsdc} USDC`));
-        console.log(dim(`  from ${result.from}`));
-        console.log(dim(`  to   ${result.to}`));
-        console.log(`  tx   ${bold(result.txHash)}`);
-      } catch (err) {
-        fail(err);
-      }
-    });
+      },
+    );
 
   const refillDesc =
     "Sweep Base USDC from a project wallet into the treasury (Touch ID; auto gas top-up)";

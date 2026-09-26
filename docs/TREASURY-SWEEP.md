@@ -2,7 +2,8 @@
 
 **Chain:** Base mainnet (8453) · **Token:** USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (6 decimals)
 
-`abra treasury pay` only sends *out of* the treasury. When a project wallet created with
+`abra treasury pay` sends USDC or native ETH *out of* the treasury (`--asset usdc|eth`,
+default USDC). When a project wallet created with
 `abra keygen foundry <project>` has accumulated USDC (x402 refunds, leftover top-ups, revenue)
 and the treasury is running low, move it back.
 
@@ -19,14 +20,14 @@ abra refill <project> --json             # machine-readable result (tx hashes, b
 `abra refill` is an alias of `abra treasury refill`. It performs steps 0–3 below: reads both
 balances, sends a `--gas-topup` ETH sliver from the treasury (default 0.00002) if the source
 holds under 0.000005 ETH, transfers the USDC signed by the source key, then re-reads the
-treasury balance. `--no-gas-topup` makes it fail instead of topping up. Keys are passed to
-`cast` as process arguments only and never printed.
+treasury balance. `--no-gas-topup` makes it fail instead of topping up. Keys reach `cast`
+via a throwaway keystore in the environment (never on argv) and are never printed.
 
 ## The long way: manual `cast`
 
 Use this when `abra` is not installed on the machine that has the keys, or to see exactly
 what `refill` does. Two `cast` transactions signed by keys that never leave the vault except
-as a process argument.
+via a throwaway keystore env (not argv).
 
 ## Wallets involved
 

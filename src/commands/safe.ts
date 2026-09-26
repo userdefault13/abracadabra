@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import { loadVault, saveVault, TREASURY_PROJECT, type Vault } from "../core/vault.js";
+import { runCastWithKeystore, type CastExecFn } from "../core/castWithKeystore.js";
 import { authenticate } from "../platform/index.js";
 import { isEthAddress } from "../license/config.js";
 import {
@@ -222,9 +223,21 @@ async function codeSize(addr: string): Promise<number> {
   return Math.max(0, (code.length - 2) / 2);
 }
 
-/** Sign a 32-byte hash directly (EIP-712 safeTxHash) → 65-byte sig with v ∈ {27,28}. Never logged. */
-async function signHash(hash: string, privateKey: string): Promise<string> {
-  const sig = await cast(["wallet", "sign", "--no-hash", hash, "--private-key", privateKey]);
+/**
+ * Sign a 32-byte hash directly (EIP-712 safeTxHash) → 65-byte sig with v ∈ {27,28}.
+ * Uses a throwaway keystore so the key never appears on argv. Never logged.
+ */
+export async function signHash(
+  hash: string,
+  privateKey: string,
+  opts: { exec?: CastExecFn } = {},
+): Promise<string> {
+  const { stdout } = await runCastWithKeystore(
+    ["wallet", "sign", "--no-hash", hash],
+    privateKey,
+    { exec: opts.exec },
+  );
+  const sig = stdout.trim();
   if (!/^0x[0-9a-fA-F]{130}$/.test(sig)) throw new Error("unexpected signature output from cast");
   return sig.toLowerCase();
 }

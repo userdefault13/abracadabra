@@ -6,8 +6,8 @@ Local secrets vault for agents (`abra serve` on `127.0.0.1:7331`). Applies only 
 the user names abracadabra/abra, the abra MCP is registered, or `ABRA_KEY` is already
 set — not for generic env var or credential questions. Fetch env vars, API tokens,
 and wallet keys **by name**, within the scope the human granted via an issued key or
-Touch ID — never paste secrets in chat. Optional Base USDC treasury spends via
-Touch ID (`request_treasury_payment` / `abra treasury pay`).
+Touch ID — never paste secrets in chat. Optional Base USDC/ETH treasury spends via
+Touch ID (`request_treasury_payment` / `abra treasury pay` — Base USDC or native ETH).
 
 
 ## Stack

@@ -44,6 +44,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@noble/hashes": "^2.4.0",
     "@simplewebauthn/server": "^13.3.2",
     "bonjour-service": "^1.4.4",
     "commander": "^12.1.0",

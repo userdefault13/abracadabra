@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { prompt, promptHidden } from "../core/prompt.js";
 import { readActivation } from "../license/store.js";
@@ -18,6 +17,7 @@ import {
 } from "../cartridge/client.js";
 import { openBundle } from "../core/backup.js";
 import { decryptEnvelope, writeEncryptedFile } from "../core/vault.js";
+import { runCastWithKeystore } from "../core/castWithKeystore.js";
 import { restoreMasterKey, authenticate } from "../platform/index.js";
 import { syncStateFile } from "../core/paths.js";
 
@@ -50,9 +50,8 @@ async function signCheckpointMessage(wallet: string, message: string, signatureA
   const pk = process.env.ABRA_CHECKPOINT_PRIVATE_KEY?.trim();
   if (pk) {
     try {
-      return execFileSync("cast", ["wallet", "sign", message, "--private-key", pk], {
-        encoding: "utf8",
-      }).trim();
+      const { stdout } = await runCastWithKeystore(["wallet", "sign", message], pk);
+      return stdout.trim();
     } catch {
       fail("cast wallet sign failed with ABRA_CHECKPOINT_PRIVATE_KEY");
     }

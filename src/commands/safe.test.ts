@@ -11,6 +11,7 @@ import {
   safeAppUrl,
   safePayAuthReason,
   serviceTxToSafeTx,
+  signHash,
   ZERO_ADDRESS,
 } from "./safe.js";
 import { BASE_USDC } from "./treasury.js";
@@ -106,5 +107,36 @@ describe("prompts and links", () => {
     expect(r).toContain("pay 1.5 USDC to");
     expect(r).toContain("sign 1 of 2");
     expect(safePayAuthReason({ safe: A, to: B, amountUsdc: "1.5", reason: "invoice", mode: "execute", threshold: 1 })).not.toContain("sign 1 of");
+  });
+});
+
+describe("signHash keystore env (mocked exec)", () => {
+  const throwawayKey = "0x" + "ab".repeat(32);
+  const hash = "0x" + "11".repeat(32);
+  const fakeSig = "0x" + "cd".repeat(65);
+
+  it("argv is wallet sign --no-hash <hash> with no key; sets ETH_KEYSTORE/ETH_PASSWORD", async () => {
+    let captured: { args: readonly string[]; env: NodeJS.ProcessEnv } | null = null;
+    const sig = await signHash(hash, throwawayKey, {
+      exec: async (_cmd, args, options) => {
+        captured = { args, env: options.env };
+        return { stdout: fakeSig + "\n", stderr: "" };
+      },
+    });
+    expect(sig).toBe(fakeSig.toLowerCase());
+    expect(captured).not.toBeNull();
+    expect([...captured!.args]).toEqual(["wallet", "sign", "--no-hash", hash]);
+    expect(captured!.args).not.toContain("--private-key");
+    expect(captured!.args.join(" ")).not.toContain(throwawayKey);
+    expect(captured!.env.ETH_KEYSTORE).toBeTruthy();
+    expect(captured!.env.ETH_PASSWORD).toBeTruthy();
+  });
+
+  it("rejects unexpected signature format", async () => {
+    await expect(
+      signHash(hash, throwawayKey, {
+        exec: async () => ({ stdout: "0xdead", stderr: "" }),
+      }),
+    ).rejects.toThrow(/unexpected signature/);
   });
 });

@@ -6,7 +6,7 @@ description: >-
   ABRA_KEY is already set for this project. Covers discovering key names, reading
   secrets the human has scoped to this agent (issued abra key or Touch ID grant),
   key issue/scope/revoke, health checks, keygen/connectors, USB/LAN sync, cartridge
-  checkpoints, treasury USDC payments and Gnosis Safe multisig spends (Touch ID). Do not
+  checkpoints, treasury USDC/ETH payments and Gnosis Safe multisig spends (Touch ID). Do not
   use for generic env var,
   API token, wallet, or SSH key questions, or for other vaults or .env files. Never
   print secret values in chat.
@@ -250,7 +250,7 @@ Register once (`.mcp.json` / Claude Desktop):
 | `generate_cloudflare_token` | Scoped CF token → vault |
 | `generate_ssh_key` | ed25519 → vault |
 | `treasury_status` | Treasury address + Base USDC/ETH (no key) |
-| `request_treasury_payment` | Touch ID → pay Base USDC from treasury |
+| `request_treasury_payment` | Touch ID → pay Base USDC from treasury (CLI also supports `--asset eth`) |
 | `safe_status` | Linked Safe owners/threshold/nonce/balances/queue (no key) |
 | `safe_pending` | Unexecuted Safe proposals + confirmation counts |
 | `request_safe_payment` | Touch ID → pay Base USDC from the Safe (executes or proposes) |
@@ -348,7 +348,7 @@ For a server `.env`: `abra push ssh <project> user@host -e /path/.env KEY[:REMOT
 — values travel on stdin, an optional vault-held SSH key is used via a 0600 temp file and removed, `--run` executes a
 follow-up (e.g. `docker compose up -d --build`). Same rules: `--dry-run` is safe for agents, the real push needs the human.
 
-## 5b. Abra treasury (user-funded USDC)
+## 5b. Abra treasury (user-funded USDC / ETH)
 
 Reserved project `__abra_treasury__` — **not** the founder wallet. Human funds it;
 agents request spends. Every pay pops Touch ID with amount + destination + reason.
@@ -358,6 +358,9 @@ Never print `TREASURY_PRIVATE_KEY`.
 abra treasury init
 abra treasury status          # tell human the address to fund (Base USDC + tiny ETH)
 # do NOT pay from an empty treasury
+abra treasury pay --to 0x… --amount 0.008 --reason "…"           # USDC (default)
+abra treasury pay --asset eth --to 0x… --amount 0.0006 --reason "…"
+abra treasury pay --asset eth --to 0x… --amount 0.0006 --reason "…" --dry-run
 abra refill <project> --dry-run   # treasury low? see what a project wallet (EVM_ADDRESS) can give back
 abra refill <project>             # one Touch ID: auto gas top-up + USDC sweep into the treasury
 ```
