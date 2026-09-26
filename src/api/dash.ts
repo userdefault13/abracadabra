@@ -301,9 +301,9 @@ export async function usbSync(body: UsbSyncBody, res: ServerResponse): Promise<v
   }
 }
 
-/** POST /api/usb/host/start {port?, ttl?} */
+/** POST /api/usb/host/start {port?, ttl?, projects?} */
 export async function usbLanHostStart(
-  body: { port?: number; ttl?: number },
+  body: { port?: number; ttl?: number; projects?: string[] },
   res: ServerResponse,
 ): Promise<void> {
   const { startLanHost } = await import("../commands/usb.js");
@@ -311,6 +311,7 @@ export async function usbLanHostStart(
     const handle = await startLanHost({
       port: typeof body.port === "number" ? body.port : undefined,
       ttlMs: typeof body.ttl === "number" ? body.ttl * 1000 : undefined,
+      projects: Array.isArray(body.projects) ? body.projects : undefined,
     });
     send(res, 200, {
       ok: true,
@@ -320,6 +321,7 @@ export async function usbLanHostStart(
       fingerprint: handle.fingerprint,
       hostname: handle.hostname,
       expiresAt: handle.expiresAt,
+      scope: handle.scope,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -361,7 +363,14 @@ export async function usbLanSync(body: UsbLanSyncBody, res: ServerResponse): Pro
   const host = body.host?.trim();
   const pin = body.pin?.trim();
   if (!host || !pin || !/^\d{6}$/.test(pin)) {
-    send(res, 400, { error: "expected {host, pin (6 digits), apply?, force?, fingerprint?}" });
+    send(res, 400, { error: "expected {host, pin (6 digits), fingerprint, apply?, force?}" });
+    return;
+  }
+  if (!body.fingerprint?.trim()) {
+    send(res, 400, {
+      error:
+        "LAN sync requires the host's TLS fingerprint — pass --fingerprint <fp> exactly as printed by `abra usb host`",
+    });
     return;
   }
   const { previewLanSync, applyLanSync } = await import("../commands/usb.js");

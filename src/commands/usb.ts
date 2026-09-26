@@ -11,8 +11,13 @@ import {
 import type { Vault, VarEntry } from "../core/vault.js";
 import { getMasterKey, restoreMasterKey, authenticate } from "../platform/index.js";
 import { prompt, promptHidden } from "../core/prompt.js";
-import { sealBundle, openBundle, readBundleFile } from "../core/backup.js";
-import type { BackupBundle, BundlePayload } from "../core/backup.js";
+import {
+  sealBundle,
+  sealScopedBundle,
+  openAnyBundle,
+  readBundleFile,
+} from "../core/backup.js";
+import type { BackupBundle, ScopedBundlePayload } from "../core/backup.js";
 import { syncStateFile } from "../core/paths.js";
 import {
   threeWayMerge,
@@ -21,6 +26,13 @@ import {
   type Resolutions,
   type Conflict,
 } from "../core/sync.js";
+import {
+  assertScopeNamesAllowed,
+  validateScope,
+  extractScopedProjects,
+  mergeScopedProjects,
+  formatScopedReport,
+} from "../core/sync-scope.js";
 import { mountedVolumes, resolveVolumePath, volumesRootLabel } from "../core/volumes.js";
 import {
   startLanHost,
@@ -33,6 +45,8 @@ import {
   browseLanPeers,
   previewLanSync,
   applyLanSync,
+  scopedLanSync,
+  fetchLanInfo,
   LanConflictError,
   parseHostPort,
 } from "../usb/lan-client.js";
@@ -49,6 +63,12 @@ function fail(err: unknown): never {
 }
 
 const BUNDLE_DIR = "abracadabra";
+const SCOPED_BUNDLE_MSG =
+  "scoped bundle — merge it with `abra usb sync -f <file>`";
+
+function collectProject(value: string, previous: string[]): string[] {
+  return previous.concat([value]);
+}
 
 function bundleDirFor(volOrDir: string): string {
   return volOrDir.endsWith(BUNDLE_DIR) ? volOrDir : path.join(volOrDir, BUNDLE_DIR);
@@ -134,6 +154,21 @@ function writeBundleToDir(
   return file;
 }
 
+function writeScopedBundleToDir(
+  dir: string,
+  projects: Record<string, import("../core/vault.js").Project>,
+  scope: string[],
+  passphrase: string,
+): string {
+  const bundle = sealScopedBundle(projects, scope, passphrase);
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const file = path.join(dir, `scoped-${stamp}.abrabak`);
+  fs.writeFileSync(file, JSON.stringify(bundle, null, 2), { mode: 0o600 });
+  // Do NOT update latest.json — full sync/restore must never auto-pick a scoped bundle.
+  return file;
+}
+
 async function collectResolutions(conflicts: Conflict[], mode?: "theirs" | "ours"): Promise<Resolutions> {
   const resolutions: Resolutions = new Map();
   for (const c of conflicts) {
@@ -166,15 +201,20 @@ async function collectResolutions(conflicts: Conflict[], mode?: "theirs" | "ours
 
 let activePassphrase: string | null = null;
 
-async function openWithPrompts(bundle: BackupBundle): Promise<BundlePayload> {
+async function openAnyWithPrompts(
+  bundle: BackupBundle,
+): Promise<
+  | { kind: "full"; payload: import("../core/backup.js").BundlePayload }
+  | { kind: "scoped"; payload: ScopedBundlePayload }
+> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     const pass = await promptHidden(
       `Backup passphrase (hidden)${attempt > 1 ? `, attempt ${attempt}/3` : ""}: `,
     );
     try {
-      const payload = openBundle(bundle, pass);
+      const opened = openAnyBundle(bundle, pass);
       activePassphrase = pass;
-      return payload;
+      return opened;
     } catch {
       if (attempt === 3) fail("Wrong passphrase (3 attempts)");
       console.error(red("✗ Wrong passphrase"));
@@ -288,9 +328,16 @@ async function prepareSync(
 
   let remoteVault: Vault;
   try {
-    const payload = openBundle(readBundleFile(latestFile), passphrase);
-    remoteVault = decryptEnvelope(payload.vaultEnc, Buffer.from(payload.masterKey, "base64"));
-  } catch {
+    const opened = openAnyBundle(readBundleFile(latestFile), passphrase);
+    if (opened.kind === "scoped") {
+      throw new Error(SCOPED_BUNDLE_MSG);
+    }
+    remoteVault = decryptEnvelope(
+      opened.payload.vaultEnc,
+      Buffer.from(opened.payload.masterKey, "base64"),
+    );
+  } catch (err) {
+    if (err instanceof Error && err.message === SCOPED_BUNDLE_MSG) throw err;
     throw new UsbWrongPassphraseError("Wrong passphrase for the backup bundle");
   }
 
@@ -350,6 +397,83 @@ export async function applySync(
   return { changed: true, file: path.basename(file), report: p.report };
 }
 
+/** Merge a scoped file bundle into the local vault (no sync-state, no rewrite of the file). */
+async function applyScopedFileMerge(
+  payload: ScopedBundlePayload,
+  opts: { projects?: string[]; theirs?: boolean; dryRun?: boolean },
+): Promise<{ changed: boolean; report: string[] }> {
+  let incoming = payload.projects;
+  let scope = payload.scope;
+  if (opts.projects && opts.projects.length > 0) {
+    const want = assertScopeNamesAllowed(opts.projects);
+    const scopeSet = new Set(payload.scope);
+    const outside = want.filter((n) => !scopeSet.has(n));
+    if (outside.length > 0) {
+      throw new Error(`requested project(s) outside bundle scope: ${outside.join(", ")}`);
+    }
+    scope = want;
+    incoming = Object.fromEntries(
+      want.map((n) => {
+        const p = payload.projects[n];
+        if (!p) throw new Error(`project "${n}" missing from scoped bundle`);
+        return [n, p];
+      }),
+    );
+  }
+  assertScopeNamesAllowed(scope);
+  assertScopeNamesAllowed(Object.keys(incoming));
+
+  const local = await loadVault();
+  const { merged, report, changed } = mergeScopedProjects(local, incoming, {
+    theirs: opts.theirs === true,
+  });
+  const lines = formatScopedReport(report);
+
+  if (opts.dryRun) return { changed, report: lines };
+  if (!changed) return { changed: false, report: lines };
+
+  await authenticate(
+    `abracadabra: merge scoped project(s) ${scope.join(", ")} into this vault`,
+  );
+  await saveVault(merged);
+  return { changed: true, report: lines };
+}
+
+/**
+ * Write a scoped project backup under `<dir>/abracadabra/scoped-*.abrabak`.
+ * Does not touch `latest.json`. Passphrase must be ≥ 8 characters.
+ */
+export async function createScopedBackup(
+  dir: string,
+  projects: string[],
+  passphrase: string,
+): Promise<string> {
+  if (passphrase.length < 8) {
+    throw new Error("Passphrase must be at least 8 characters");
+  }
+  const scope = assertScopeNamesAllowed(projects);
+  await authenticate(
+    `abracadabra: export scoped backup of project(s) ${scope.join(", ")}`,
+  );
+  const vault = await loadVault();
+  const validated = validateScope(vault, scope);
+  const extracted = extractScopedProjects(vault, validated);
+  return writeScopedBundleToDir(bundleDirFor(dir), extracted, validated, passphrase);
+}
+
+/** Open a scoped `.abrabak` and merge it into the local vault (no sync-state). */
+export async function mergeScopedBundleFile(
+  file: string,
+  passphrase: string,
+  opts: { projects?: string[]; theirs?: boolean; dryRun?: boolean } = {},
+): Promise<{ changed: boolean; report: string[] }> {
+  const opened = openAnyBundle(readBundleFile(file), passphrase);
+  if (opened.kind !== "scoped") {
+    throw new Error("not a scoped bundle");
+  }
+  return applyScopedFileMerge(opened.payload, opts);
+}
+
 // Re-export LAN helpers for dash
 export {
   startLanHost,
@@ -358,6 +482,8 @@ export {
   browseLanPeers,
   previewLanSync,
   applyLanSync,
+  scopedLanSync,
+  fetchLanInfo,
   LanConflictError,
 };
 
@@ -382,6 +508,17 @@ export function registerUsbCommands(program: Command): void {
           if (f) {
             const mtime = fs.statSync(path.join(dir, f)).mtime;
             note = green(` (backup ${new Date(mtime).toLocaleString()})`);
+          }
+          // Label any scoped-*.abrabak files present
+          try {
+            const scoped = fs
+              .readdirSync(dir)
+              .filter((n) => n.startsWith("scoped-") && n.endsWith(".abrabak"));
+            if (scoped.length > 0) {
+              note += dim(` (${scoped.length} scoped bundle(s))`);
+            }
+          } catch {
+            /* ignore */
           }
           console.log(`${bold(path.basename(v))}${note}`);
         }
@@ -424,50 +561,107 @@ export function registerUsbCommands(program: Command): void {
     .option("--port <number>", "listen port", String(LAN_DEFAULT_PORT))
     .option("--ttl <seconds>", "session lifetime", String(LAN_DEFAULT_TTL_MS / 1000))
     .option("--no-advertise", "skip mDNS advertisement")
-    .action(async (opts: { port: string; ttl: string; advertise: boolean }) => {
-      try {
-        const handle = await startLanHost({
-          port: Number(opts.port),
-          ttlMs: Number(opts.ttl) * 1000,
-          advertise: opts.advertise,
-        });
-        console.log(green("✦ LAN sync host running"));
-        console.log(`  PIN:          ${bold(handle.pin)}`);
-        console.log(`  fingerprint:  ${handle.fingerprint}`);
-        console.log(`  expires:      ${new Date(handle.expiresAt).toLocaleString()}`);
-        for (const addr of handle.addresses) {
-          console.log(`  connect:      abra usb sync --lan ${addr}:${handle.port}`);
-        }
-        if (handle.addresses.length === 0) {
-          console.log(`  connect:      abra usb sync --lan <ip>:${handle.port}`);
-        }
-        console.log(dim("\nWaiting for a peer… Ctrl+C to stop"));
-        const onSig = () => {
-          void stopLanHost().then(() => process.exit(0));
-        };
-        process.on("SIGINT", onSig);
-        process.on("SIGTERM", onSig);
-        // stay alive until host stops
-        const tick = setInterval(() => {
-          if (!getLanHostStatus()) {
-            clearInterval(tick);
-            console.log(dim("\nHost session ended"));
-            process.exit(0);
+    .option(
+      "-p, --project <name>",
+      "share only this project (repeatable; scoped, read-only)",
+      collectProject,
+      [] as string[],
+    )
+    .action(
+      async (opts: {
+        port: string;
+        ttl: string;
+        advertise: boolean;
+        project: string[];
+      }) => {
+        try {
+          const projects = opts.project?.length ? opts.project : undefined;
+          const handle = await startLanHost({
+            port: Number(opts.port),
+            ttlMs: Number(opts.ttl) * 1000,
+            advertise: opts.advertise,
+            projects,
+          });
+          console.log(green("✦ LAN sync host running"));
+          console.log(`  PIN:          ${bold(handle.pin)}`);
+          console.log(`  fingerprint:  ${handle.fingerprint}`);
+          if (handle.scope?.length) {
+            console.log(
+              `  scope:        ${handle.scope.join(", ")} (read-only — no push-back, host vault untouched)`,
+            );
           }
-        }, 500);
-      } catch (err) {
-        fail(err);
-      }
-    });
+          console.log(`  expires:      ${new Date(handle.expiresAt).toLocaleString()}`);
+          for (const addr of handle.addresses) {
+            const fpFlag = ` --fingerprint ${handle.fingerprint}`;
+            const projFlag = handle.scope?.length
+              ? handle.scope.map((p) => ` --project ${p}`).join("")
+              : "";
+            console.log(
+              `  connect:      abra usb sync --lan ${addr}:${handle.port}${fpFlag}${projFlag}`,
+            );
+          }
+          if (handle.addresses.length === 0) {
+            console.log(
+              `  connect:      abra usb sync --lan <ip>:${handle.port} --fingerprint ${handle.fingerprint}`,
+            );
+          }
+          console.log(dim("\nWaiting for a peer… Ctrl+C to stop"));
+          const onSig = () => {
+            void stopLanHost().then(() => process.exit(0));
+          };
+          process.on("SIGINT", onSig);
+          process.on("SIGTERM", onSig);
+          // stay alive until host stops (scoped hosts do not stop after pull)
+          const tick = setInterval(() => {
+            if (!getLanHostStatus()) {
+              clearInterval(tick);
+              console.log(dim("\nHost session ended"));
+              process.exit(0);
+            }
+          }, 500);
+        } catch (err) {
+          fail(err);
+        }
+      },
+    );
 
   usb
     .command("backup")
     .description("Write an encrypted backup bundle (vault + master key) to a USB drive")
     .option("-v, --volume <dir>", "target volume mount point")
     .option("-f, --file <dir>", "target directory (overrides --volume)")
-    .action(async (opts: { volume?: string; file?: string }) => {
+    .option(
+      "-p, --project <name>",
+      "backup only this project (repeatable; scoped, merge-only)",
+      collectProject,
+      [] as string[],
+    )
+    .action(async (opts: { volume?: string; file?: string; project: string[] }) => {
       try {
-        const dir = bundleDirFor(opts.file ?? opts.volume ?? (await pickVolume("Where should the backup go?")));
+        const target =
+          opts.file ?? opts.volume ?? (await pickVolume("Where should the backup go?"));
+        const dir = bundleDirFor(target);
+
+        if (opts.project?.length) {
+          assertScopeNamesAllowed(opts.project); // refuse reserved names before prompting
+          const pass1 = await promptHidden(
+            "Passphrase for the backup bundle (min 8 chars, hidden): ",
+          );
+          if (pass1.length < 8) fail("Passphrase must be at least 8 characters");
+          if (pass1.length < 12) {
+            console.log(
+              yellow("⚠ passphrase is under 12 characters — 12+ recommended for scoped bundles"),
+            );
+          }
+          if ((await promptHidden("Repeat passphrase: ")) !== pass1) fail("Passphrases do not match");
+
+          const file = await createScopedBackup(target, opts.project, pass1);
+          console.log(green(`✓ Scoped backup written: ${file}`));
+          console.log(
+            dim(`  merge with: abra usb sync -f ${file} [--project …] [--dry-run]`),
+          );
+          return;
+        }
 
         await authenticate("abracadabra: export encrypted backup to USB");
         const vault = await loadVault();
@@ -494,8 +688,28 @@ export function registerUsbCommands(program: Command): void {
       try {
         const latest = resolveLatest(target);
         if (!latest) fail("No abra backup found on any mounted volume");
-        const payload = await openWithPrompts(readBundleFile(latest));
+        const opened = await openAnyWithPrompts(readBundleFile(latest));
 
+        if (opened.kind === "scoped") {
+          console.log(
+            yellow(
+              "This is a scoped bundle — merging into the local vault (conflicts keep this machine's values).",
+            ),
+          );
+          console.log(
+            `\nScoped backup from ${bold(opened.payload.meta.hostname)} — ${new Date(opened.payload.meta.createdAt).toLocaleString()}`,
+          );
+          console.log(`  scope: ${opened.payload.scope.join(", ")}`);
+          const result = await mergeScopedBundleFile(latest, await cachedPassphrase(), {
+            theirs: false,
+          });
+          for (const line of result.report) console.log(`  ${line}`);
+          if (!result.changed) console.log(green("✓ already in sync (scoped)"));
+          else console.log(green("✓ Scoped merge complete"));
+          return;
+        }
+
+        const payload = opened.payload;
         const vault: Vault = decryptEnvelope(
           payload.vaultEnc,
           Buffer.from(payload.masterKey, "base64"),
@@ -529,15 +743,21 @@ export function registerUsbCommands(program: Command): void {
 
   usb
     .command("sync")
-    .description("Two-way sync via USB backup or LAN peer (3-way merge)")
+    .description("Two-way sync via USB backup or LAN peer (3-way merge); or one-way scoped merge with --project")
     .option("-v, --volume <dir>", "volume mount point holding abracadabra/")
     .option("-f, --file <file>", "explicit .abrabak file to sync against")
     .option("--lan [host]", "sync over LAN (host:port or mDNS name; omit to pick from peers)")
     .option("--pin <pin>", "LAN session PIN")
-    .option("--fingerprint <fp>", "expected TLS fingerprint (optional pin)")
+    .option("--fingerprint <fp>", "expected TLS fingerprint (required for LAN)")
+    .option(
+      "-p, --project <name>",
+      "sync only this project (repeatable; scoped, one-way)",
+      collectProject,
+      [] as string[],
+    )
     .option("--dry-run", "show what would change without writing anything", false)
     .option("--theirs", "auto-resolve all conflicts with the remote version", false)
-    .option("--ours", "auto-resolve all conflicts with this machine's version", false)
+    .option("--ours", "auto-resolve all conflicts with this machine's version (default for scoped)", false)
     .action(
       async (opts: {
         volume?: string;
@@ -545,12 +765,14 @@ export function registerUsbCommands(program: Command): void {
         lan?: string | boolean;
         pin?: string;
         fingerprint?: string;
+        project: string[];
         dryRun: boolean;
         theirs: boolean;
         ours: boolean;
       }) => {
         try {
           const forceMode = opts.theirs ? ("theirs" as const) : opts.ours ? ("ours" as const) : undefined;
+          const projects = opts.project?.length ? opts.project : undefined;
 
           if (opts.lan !== undefined && opts.lan !== false) {
             let target =
@@ -588,10 +810,49 @@ export function registerUsbCommands(program: Command): void {
               parseHostPort(target); // validate
             }
 
+            if (!opts.fingerprint) {
+              fail(
+                "LAN sync requires the host's TLS fingerprint — pass --fingerprint <fp> exactly as printed by `abra usb host`",
+              );
+            }
+
             const pin =
               opts.pin?.trim() ||
               (await promptHidden("LAN PIN (hidden): ")).trim();
             if (!/^\d{6}$/.test(pin)) fail("PIN must be 6 digits");
+
+            // Decide scoped vs unscoped
+            let useScoped = Boolean(projects);
+            if (!useScoped) {
+              try {
+                const info = await fetchLanInfo(target, opts.fingerprint);
+                useScoped = Boolean(info.scoped);
+              } catch {
+                // If info fails, fall through to unscoped path (pull will surface errors).
+              }
+            }
+
+            if (useScoped) {
+              const result = await scopedLanSync(target, pin, {
+                projects,
+                theirs: opts.theirs === true,
+                dryRun: opts.dryRun,
+                expectedFingerprint: opts.fingerprint,
+              });
+              console.log(`\nScoped sync against LAN ${dim(target)}`);
+              if (result.report.length === 0 && !result.changed) {
+                console.log(green("✓ already in sync (scoped)"));
+              } else {
+                for (const line of result.report) console.log(`  ${line}`);
+                if (!result.changed && !result.dryRun) {
+                  console.log(green("✓ already in sync (scoped)"));
+                } else if (!result.dryRun && result.changed) {
+                  console.log(green("✓ Scoped LAN merge complete"));
+                }
+              }
+              if (result.dryRun) console.log(dim("\n(dry run — nothing written)"));
+              return;
+            }
 
             if (opts.dryRun) {
               const preview = await previewLanSync(target, pin, opts.fingerprint);
@@ -614,73 +875,103 @@ export function registerUsbCommands(program: Command): void {
             return;
           }
 
-          const localVault = await loadVault();
-          const state = await loadSyncState();
-          const base = state?.base ?? null;
-          if (!base) {
-            console.log(
-              yellow("⚠ no previous sync snapshot — first sync can only pull/push whole projects"),
-            );
-          }
-
+          // ── File / volume sync ──────────────────────────────────────────
           const latest = resolveLatest(opts.file ?? opts.volume);
-          if (!latest) {
-            console.log(yellow("No backup on USB yet."));
-            if (opts.dryRun) {
-              console.log(dim("(dry run — nothing written)"));
+
+          if (latest) {
+            const opened = await openAnyWithPrompts(readBundleFile(latest));
+            if (opened.kind === "scoped") {
+              console.log(`\nScoped sync against ${dim(path.basename(latest))}`);
+              const result = await mergeScopedBundleFile(latest, await cachedPassphrase(), {
+                projects,
+                theirs: opts.theirs === true,
+                dryRun: opts.dryRun,
+              });
+              if (result.report.length === 0 && !result.changed) {
+                console.log(green("✓ already in sync (scoped)"));
+              } else {
+                for (const line of result.report) console.log(`  ${line}`);
+                if (!result.changed) console.log(green("✓ already in sync (scoped)"));
+                else if (!opts.dryRun) console.log(green("✓ Scoped merge complete"));
+              }
+              if (opts.dryRun) console.log(dim("\n(dry run — nothing written)"));
               return;
             }
-            await authenticate("abracadabra: export encrypted backup to USB");
-            const dir = bundleDirFor(opts.volume ?? (await pickVolume()));
-            const pass = await promptHidden("Choose a passphrase for the backup bundle (hidden): ");
-            if (pass.length < 8) fail("Passphrase must be at least 8 characters");
+
+            // Full bundle path (existing behavior)
+            if (projects) {
+              fail("full vault bundles do not support --project; use a scoped bundle or LAN scoped host");
+            }
+            const payload = opened.payload;
+            const localVault = await loadVault();
+            const state = await loadSyncState();
+            const base = state?.base ?? null;
+            if (!base) {
+              console.log(
+                yellow("⚠ no previous sync snapshot — first sync can only pull/push whole projects"),
+              );
+            }
+
+            const remoteVault = decryptEnvelope(
+              payload.vaultEnc,
+              Buffer.from(payload.masterKey, "base64"),
+            );
+
+            const first = threeWayMerge(localVault, remoteVault, base, new Map(), "USB");
+            const resolutions = await collectResolutions(first.conflicts, forceMode);
+            const { merged, report } = threeWayMerge(
+              localVault,
+              remoteVault,
+              base,
+              resolutions,
+              "USB",
+            );
+
+            console.log(`\nSyncing against ${dim(path.basename(latest))}`);
+            if (report.length === 0) {
+              console.log(green("✓ Already in sync"));
+              if (!opts.dryRun) await saveSyncState(localVault);
+              return;
+            }
+            for (const line of report) console.log(`  ${line}`);
+
+            if (opts.dryRun) {
+              console.log(dim("\n(dry run — nothing written)"));
+              return;
+            }
+
+            await saveVault(merged);
+            await authenticate("abracadabra: update USB backup");
             const masterKey = await getMasterKey();
-            const file = writeBundleToDir(dir, encryptVault(localVault, masterKey), masterKey, pass);
-            await saveSyncState(localVault);
-            console.log(green(`✓ Initial backup written: ${file}`));
+            const file = writeBundleToDir(
+              path.dirname(latest),
+              encryptVault(merged, masterKey),
+              masterKey,
+              await cachedPassphrase(),
+            );
+            await saveSyncState(merged);
+            console.log(green(`✓ Sync complete — USB refreshed (${path.basename(file)})`));
             return;
           }
 
-          const payload = await openWithPrompts(readBundleFile(latest));
-          const remoteVault = decryptEnvelope(
-            payload.vaultEnc,
-            Buffer.from(payload.masterKey, "base64"),
-          );
-
-          const first = threeWayMerge(localVault, remoteVault, base, new Map(), "USB");
-          const resolutions = await collectResolutions(first.conflicts, forceMode);
-          const { merged, report } = threeWayMerge(
-            localVault,
-            remoteVault,
-            base,
-            resolutions,
-            "USB",
-          );
-
-          console.log(`\nSyncing against ${dim(path.basename(latest))}`);
-          if (report.length === 0) {
-            console.log(green("✓ Already in sync"));
-            if (!opts.dryRun) await saveSyncState(localVault);
-            return;
+          // No backup yet — initial full backup (existing behavior)
+          if (projects) {
+            fail("no backup found — create a scoped backup with: abra usb backup -f <dir> --project …");
           }
-          for (const line of report) console.log(`  ${line}`);
-
+          const localVault = await loadVault();
+          console.log(yellow("No backup on USB yet."));
           if (opts.dryRun) {
-            console.log(dim("\n(dry run — nothing written)"));
+            console.log(dim("(dry run — nothing written)"));
             return;
           }
-
-          await saveVault(merged);
-          await authenticate("abracadabra: update USB backup");
+          await authenticate("abracadabra: export encrypted backup to USB");
+          const dir = bundleDirFor(opts.volume ?? (await pickVolume()));
+          const pass = await promptHidden("Choose a passphrase for the backup bundle (hidden): ");
+          if (pass.length < 8) fail("Passphrase must be at least 8 characters");
           const masterKey = await getMasterKey();
-          const file = writeBundleToDir(
-            path.dirname(latest),
-            encryptVault(merged, masterKey),
-            masterKey,
-            await cachedPassphrase(),
-          );
-          await saveSyncState(merged);
-          console.log(green(`✓ Sync complete — USB refreshed (${path.basename(file)})`));
+          const file = writeBundleToDir(dir, encryptVault(localVault, masterKey), masterKey, pass);
+          await saveSyncState(localVault);
+          console.log(green(`✓ Initial backup written: ${file}`));
         } catch (err) {
           if (err instanceof LanConflictError) {
             console.error(red(`✗ ${err.message}`));
