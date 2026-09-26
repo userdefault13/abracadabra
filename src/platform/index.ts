@@ -16,8 +16,10 @@ import { isPassphraseVaultLocked } from "./keystore-passphrase.js";
 import { writeMasterKeyFile } from "./master-key-file.js";
 import { unlockSession } from "./session.js";
 import { probeKeytar } from "./keystore-keytar.js";
+import { resolveMasterKey } from "../core/masterKey.js";
 
 export type { AuthRequest, PlatformAuth, PlatformKeystore } from "./types.js";
+export { KeystoreError } from "./types.js";
 export { biometricsSkipped, resolveAuthBackend, resolveKeystoreBackend } from "./env.js";
 export { lockSession, isSessionUnlocked } from "./session.js";
 export { VaultLockedError } from "./keystore-passphrase.js";
@@ -78,7 +80,7 @@ export function getAuth(): PlatformAuth {
 }
 
 export async function getMasterKey(): Promise<Buffer> {
-  return getKeystore().getOrCreateMasterKey();
+  return resolveMasterKey(getKeystore());
 }
 
 export async function storeMasterKey(key: Buffer): Promise<void> {
