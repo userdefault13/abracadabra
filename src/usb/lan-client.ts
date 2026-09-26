@@ -1,8 +1,8 @@
 import https from "node:https";
-import { createHash } from "node:crypto";
-import type { TLSSocket } from "node:tls";
+import tls from "node:tls";
+import net from "node:net";
 import type { BackupBundle } from "../core/backup.js";
-import { openBundle, sealBundle } from "../core/backup.js";
+import { openBundle, openAnyBundle, sealBundle, ScopedBundleError } from "../core/backup.js";
 import {
   loadVault,
   saveVault,
@@ -10,14 +10,30 @@ import {
   decryptEnvelope,
 } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
-import { getMasterKey, authenticate } from "../platform/index.js";
+import {
+  getMasterKey,
+  authenticate,
+  resolveKeystoreBackend,
+  VaultLockedError,
+} from "../platform/index.js";
 import {
   threeWayMerge,
   loadSyncState,
   saveSyncState,
+  lanPeerId,
+  formatProjectDeletionLines,
   type Resolutions,
+  type ProjectDeletion,
 } from "../core/sync.js";
-import { fingerprintsMatch } from "../core/tls-ephemeral.js";
+import {
+  fingerprintFromDer,
+  fingerprintsMatch,
+} from "../core/tls-ephemeral.js";
+import {
+  assertScopeNamesAllowed,
+  mergeScopedProjects,
+  formatScopedReport,
+} from "../core/sync-scope.js";
 import { LAN_MDNS_TYPE, LAN_DEFAULT_PORT } from "./lan-host.js";
 
 export interface LanPeer {
@@ -40,6 +56,20 @@ export interface LanSyncPreview {
   report: string[];
   conflicts: ConflictInfo[];
   needsResolution: boolean;
+  projectDeletions: ProjectDeletion[];
+}
+
+const FP_REQUIRED =
+  "LAN sync requires the host's TLS fingerprint — pass --fingerprint <fp> exactly as printed by `abra usb host`";
+
+const VAULT_LOCKED_MSG =
+  "vault is locked — start/unlock the agent first: abra unlock (use ssh -t) and retry";
+
+function requireFingerprint(expectedFingerprint?: string): string {
+  if (!expectedFingerprint || !expectedFingerprint.trim()) {
+    throw new Error(FP_REQUIRED);
+  }
+  return expectedFingerprint.trim();
 }
 
 function maskValue(v: string): string {
@@ -80,20 +110,59 @@ export function parseHostPort(target: string): { host: string; port: number } {
   return { host, port };
 }
 
-function peerFingerprintFromSocket(socket: TLSSocket): string {
-  try {
-    const cert = socket.getPeerCertificate(true);
-    if (cert?.raw) {
-      const hex = createHash("sha256").update(cert.raw as Buffer).digest("hex");
-      return (hex.match(/.{2}/g) ?? []).slice(0, 8).join(":").toUpperCase();
-    }
-    if (typeof cert?.fingerprint256 === "string") {
-      return cert.fingerprint256.split(":").slice(0, 8).join(":").toUpperCase();
-    }
-  } catch {
-    /* ignore */
-  }
-  return "";
+/**
+ * Open a TLS socket, verify the peer cert fingerprint BEFORE any HTTP bytes
+ * (and thus the PIN) are sent. Node skips checkServerIdentity when
+ * rejectUnauthorized is false, so we verify on secureConnect ourselves.
+ */
+function connectVerifiedTls(
+  host: string,
+  port: number,
+  expectedFingerprint: string,
+): Promise<{ socket: tls.TLSSocket; peerFingerprint: string }> {
+  return new Promise((resolve, reject) => {
+    const isIp = net.isIP(host) !== 0;
+    const socket = tls.connect({
+      host,
+      port,
+      servername: isIp ? undefined : host,
+      rejectUnauthorized: false,
+    });
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        /* ignore */
+      }
+      reject(err);
+    };
+    socket.once("error", (err) => fail(err instanceof Error ? err : new Error(String(err))));
+    socket.once("secureConnect", () => {
+      try {
+        const cert = socket.getPeerCertificate(true);
+        if (!cert?.raw) {
+          fail(new Error("TLS fingerprint unavailable — refusing unauthenticated peer"));
+          return;
+        }
+        const peerFp = fingerprintFromDer(cert.raw as Buffer);
+        if (!fingerprintsMatch(expectedFingerprint, peerFp)) {
+          fail(
+            new Error(
+              `TLS fingerprint mismatch (expected ${expectedFingerprint}, got ${peerFp}) — PIN not sent`,
+            ),
+          );
+          return;
+        }
+        settled = true;
+        resolve({ socket, peerFingerprint: peerFp });
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  });
 }
 
 function httpsRequest(opts: {
@@ -103,66 +172,79 @@ function httpsRequest(opts: {
   method: string;
   headers?: Record<string, string>;
   body?: string;
-  expectedFingerprint?: string;
+  expectedFingerprint: string;
 }): Promise<{ status: number; json: unknown; peerFingerprint: string }> {
   return new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        host: opts.host,
-        port: opts.port,
-        path: opts.path,
-        method: opts.method,
-        headers: opts.headers,
-        rejectUnauthorized: false,
-        timeout: 30_000,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (c: Buffer) => chunks.push(c));
-        res.on("end", () => {
-          const peerFp = peerFingerprintFromSocket(res.socket as TLSSocket);
-          if (opts.expectedFingerprint) {
-            if (!peerFp) {
-              reject(new Error("TLS fingerprint unavailable — refusing unauthenticated peer"));
-              return;
+    void (async () => {
+      let verified: { socket: tls.TLSSocket; peerFingerprint: string };
+      try {
+        // Pin the cert on the raw TLS socket first; only then hand it to https.
+        verified = await connectVerifiedTls(opts.host, opts.port, opts.expectedFingerprint);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const { socket, peerFingerprint } = verified;
+      const req = https.request(
+        {
+          host: opts.host,
+          port: opts.port,
+          path: opts.path,
+          method: opts.method,
+          headers: { Connection: "close", ...(opts.headers ?? {}) },
+          // Reuse the already-verified socket: no second handshake, no unpinned bytes.
+          createConnection: () => socket,
+          timeout: 30_000,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            let json: unknown = {};
+            try {
+              json = text ? JSON.parse(text) : {};
+            } catch {
+              json = { error: text };
             }
-            if (!fingerprintsMatch(opts.expectedFingerprint, peerFp)) {
-              reject(new Error(`TLS fingerprint mismatch (got ${peerFp})`));
-              return;
-            }
-          }
-          const text = Buffer.concat(chunks).toString("utf8");
-          let json: unknown = {};
-          try {
-            json = text ? JSON.parse(text) : {};
-          } catch {
-            json = { error: text };
-          }
-          resolve({ status: res.statusCode ?? 0, json, peerFingerprint: peerFp });
-        });
-      },
-    );
-    req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("connection timed out"));
-    });
-    if (opts.body) req.write(opts.body);
-    req.end();
+            socket.destroy();
+            resolve({ status: res.statusCode ?? 0, json, peerFingerprint });
+          });
+          res.on("error", reject);
+        },
+      );
+      req.on("error", (err) => {
+        socket.destroy();
+        reject(err);
+      });
+      req.on("timeout", () => {
+        req.destroy(new Error("connection timed out"));
+      });
+      if (opts.body) req.write(opts.body);
+      req.end();
+    })();
   });
 }
 
 export async function fetchLanInfo(
   target: string,
   expectedFingerprint?: string,
-): Promise<{ hostname: string; port: number; expiresAt: number; fingerprint: string }> {
+): Promise<{
+  hostname: string;
+  port: number;
+  expiresAt: number;
+  fingerprint: string;
+  scoped?: boolean;
+  proto?: number;
+}> {
+  const fp = requireFingerprint(expectedFingerprint);
   const { host, port } = parseHostPort(target);
   const res = await httpsRequest({
     host,
     port,
     path: "/lan/info",
     method: "GET",
-    expectedFingerprint,
+    expectedFingerprint: fp,
   });
   if (res.status !== 200) {
     throw new Error(`LAN info failed (${res.status}): ${JSON.stringify(res.json)}`);
@@ -172,15 +254,21 @@ export async function fetchLanInfo(
     port: number;
     expiresAt: number;
     fingerprint: string;
+    scoped?: boolean;
+    proto?: number;
   };
 }
 
 async function pullBundle(
   target: string,
   pin: string,
-  expectedFingerprint?: string,
+  expectedFingerprint: string,
+  projects?: string[],
 ): Promise<{ bundle: BackupBundle; peerFingerprint: string }> {
   const { host, port } = parseHostPort(target);
+  const bodyObj =
+    projects && projects.length > 0 ? { projects } : {};
+  const body = JSON.stringify(bodyObj);
   const res = await httpsRequest({
     host,
     port,
@@ -189,9 +277,9 @@ async function pullBundle(
     headers: {
       Authorization: `Bearer ${pin}`,
       "Content-Type": "application/json",
-      "Content-Length": "2",
+      "Content-Length": String(Buffer.byteLength(body)),
     },
-    body: "{}",
+    body,
     expectedFingerprint,
   });
   if (res.status === 401) throw new Error("invalid PIN");
@@ -207,7 +295,7 @@ async function pushBundle(
   target: string,
   pin: string,
   bundle: BackupBundle,
-  expectedFingerprint?: string,
+  expectedFingerprint: string,
 ): Promise<void> {
   const { host, port } = parseHostPort(target);
   const body = JSON.stringify({ bundle });
@@ -230,9 +318,53 @@ async function pushBundle(
   }
 }
 
-function openRemoteVault(bundle: BackupBundle, pin: string): Vault {
-  const payload = openBundle(bundle, pin);
-  return decryptEnvelope(payload.vaultEnc, Buffer.from(payload.masterKey, "base64"));
+const SCOPED_HOST_MSG =
+  "host is sharing a scoped (read-only) session — rerun with --project <name>";
+
+function openRemotePayload(
+  bundle: BackupBundle,
+  pin: string,
+): { vault: Vault; deviceId?: string } {
+  let payload;
+  try {
+    payload = openBundle(bundle, pin);
+  } catch (err) {
+    if (err instanceof ScopedBundleError) throw new Error(SCOPED_HOST_MSG);
+    throw new Error("Wrong PIN for sealed bundle");
+  }
+  return {
+    vault: decryptEnvelope(payload.vaultEnc, Buffer.from(payload.masterKey, "base64")),
+    deviceId: payload.meta.deviceId,
+  };
+}
+
+function isVaultLocked(err: unknown): boolean {
+  if (err instanceof VaultLockedError) return true;
+  if (err instanceof Error && /locked/i.test(err.message)) return true;
+  return false;
+}
+
+async function loadVaultForScoped(
+  dryRun: boolean,
+  approved: { value: boolean },
+): Promise<Vault> {
+  try {
+    return await loadVault();
+  } catch (err) {
+    if (!isVaultLocked(err)) throw err;
+    if (dryRun) throw new Error(VAULT_LOCKED_MSG);
+    if (resolveKeystoreBackend() === "passphrase-file") {
+      await authenticate("abracadabra: unlock vault for scoped LAN merge");
+      approved.value = true;
+      try {
+        return await loadVault();
+      } catch (err2) {
+        if (isVaultLocked(err2)) throw new Error(VAULT_LOCKED_MSG);
+        throw err2;
+      }
+    }
+    throw new Error(VAULT_LOCKED_MSG);
+  }
 }
 
 export class LanConflictError extends Error {
@@ -241,25 +373,36 @@ export class LanConflictError extends Error {
   }
 }
 
+export class LanProjectDeleteError extends Error {
+  constructor(public projects: string[]) {
+    super(`project deletion(s) require --allow-deletes: ${projects.join(", ")}`);
+  }
+}
+
 export async function previewLanSync(
   target: string,
   pin: string,
   expectedFingerprint?: string,
 ): Promise<LanSyncPreview> {
-  const { bundle } = await pullBundle(target, pin, expectedFingerprint);
-  let remote: Vault;
-  try {
-    remote = openRemoteVault(bundle, pin);
-  } catch {
-    throw new Error("Wrong PIN for sealed bundle");
-  }
+  const fp = requireFingerprint(expectedFingerprint);
+  const { bundle } = await pullBundle(target, pin, fp);
+  const { vault: remote, deviceId } = openRemotePayload(bundle, pin);
   const local = await loadVault();
-  const base = (await loadSyncState())?.base ?? null;
-  const { conflicts, report } = threeWayMerge(local, remote, base, new Map(), "LAN peer");
+  const peerId = lanPeerId(deviceId);
+  const base = (await loadSyncState(peerId))?.base ?? null;
+  const { conflicts, report, projectDeletions } = threeWayMerge(
+    local,
+    remote,
+    base,
+    new Map(),
+    "LAN peer",
+  );
+  const deleteLines = formatProjectDeletionLines(projectDeletions, "LAN peer");
   return {
-    report,
+    report: [...deleteLines, ...report.filter((l) => !/was deleted on/.test(l))],
     conflicts: conflicts.map(toConflictInfo),
     needsResolution: conflicts.length > 0,
+    projectDeletions,
   };
 }
 
@@ -268,16 +411,14 @@ export async function applyLanSync(
   pin: string,
   force?: "ours" | "theirs",
   expectedFingerprint?: string,
+  opts?: { allowDeletes?: boolean },
 ): Promise<{ changed: boolean; report: string[] }> {
-  const { bundle } = await pullBundle(target, pin, expectedFingerprint);
-  let remote: Vault;
-  try {
-    remote = openRemoteVault(bundle, pin);
-  } catch {
-    throw new Error("Wrong PIN for sealed bundle");
-  }
+  const fp = requireFingerprint(expectedFingerprint);
+  const { bundle } = await pullBundle(target, pin, fp);
+  const { vault: remote, deviceId } = openRemotePayload(bundle, pin);
   const local = await loadVault();
-  const base = (await loadSyncState())?.base ?? null;
+  const peerId = lanPeerId(deviceId);
+  const base = (await loadSyncState(peerId))?.base ?? null;
   const resolutions: Resolutions = new Map();
   if (force) {
     const probe = threeWayMerge(local, remote, base, new Map(), "LAN peer");
@@ -285,7 +426,7 @@ export async function applyLanSync(
       resolutions.set(`${c.scope}/${c.key}`, force === "theirs" ? c.theirs : c.ours);
     }
   }
-  const { merged, conflicts, report } = threeWayMerge(
+  const { merged, conflicts, report, projectDeletions } = threeWayMerge(
     local,
     remote,
     base,
@@ -293,22 +434,126 @@ export async function applyLanSync(
     "LAN peer",
   );
   if (conflicts.length > 0 && !force) throw new LanConflictError(conflicts.map(toConflictInfo));
+  if (projectDeletions.length > 0 && !opts?.allowDeletes) {
+    throw new LanProjectDeleteError(projectDeletions.map((d) => d.project));
+  }
 
-  if (report.length === 0) {
-    await saveSyncState(local);
+  // One approval covers sync-state write, vault write, and push.
+  await authenticate("abracadabra: sync vault over LAN");
+
+  if (report.length === 0 && projectDeletions.length === 0) {
+    await saveSyncState(peerId, local);
     const masterKey = await getMasterKey();
     const out = sealBundle(encryptVault(local, masterKey), masterKey, pin);
-    await pushBundle(target, pin, out, expectedFingerprint);
+    await pushBundle(target, pin, out, fp);
     return { changed: false, report: [] };
   }
 
-  await authenticate("abracadabra: sync vault over LAN");
   await saveVault(merged);
   const masterKey = await getMasterKey();
   const out = sealBundle(encryptVault(merged, masterKey), masterKey, pin);
-  await pushBundle(target, pin, out, expectedFingerprint);
-  await saveSyncState(merged);
+  await pushBundle(target, pin, out, fp);
+  await saveSyncState(peerId, merged);
   return { changed: true, report };
+}
+
+/**
+ * One-way scoped LAN sync: pull named projects, merge locally, never push.
+ * Does not read/write sync-state.json or call getMasterKey.
+ */
+export async function scopedLanSync(
+  target: string,
+  pin: string,
+  opts: {
+    projects?: string[];
+    theirs?: boolean;
+    dryRun?: boolean;
+    expectedFingerprint: string;
+  },
+): Promise<{ changed: boolean; report: string[]; dryRun: boolean }> {
+  const fp = requireFingerprint(opts.expectedFingerprint);
+  const requested =
+    opts.projects && opts.projects.length > 0
+      ? assertScopeNamesAllowed(opts.projects)
+      : undefined;
+
+  const { bundle } = await pullBundle(target, pin, fp, requested);
+
+  let opened;
+  try {
+    opened = openAnyBundle(bundle, pin);
+  } catch {
+    throw new Error("Wrong PIN for sealed bundle");
+  }
+
+  if (opened.kind === "full") {
+    if (requested) {
+      throw new Error(
+        "host does not support scoped sync (upgrade the host); refusing to receive the whole vault",
+      );
+    }
+    // No --project and host returned full — caller should use unscoped path.
+    // Still refuse here to keep this function scoped-only.
+    throw new Error(
+      "host returned a full vault bundle; use unscoped LAN sync (omit --project) or upgrade the host for scoped sync",
+    );
+  }
+
+  const { payload } = opened;
+
+  // Refuse any reserved names in the payload.
+  try {
+    assertScopeNamesAllowed(payload.scope);
+    assertScopeNamesAllowed(Object.keys(payload.projects));
+  } catch (err) {
+    throw new Error(
+      err instanceof Error
+        ? `refusing scoped payload: ${err.message}`
+        : "refusing scoped payload with reserved project names",
+    );
+  }
+
+  // If client requested a subset, payload must not contain unrequested names.
+  if (requested) {
+    const reqSet = new Set(requested);
+    const extras = [
+      ...payload.scope.filter((n) => !reqSet.has(n)),
+      ...Object.keys(payload.projects).filter((n) => !reqSet.has(n)),
+    ];
+    const uniqueExtras = [...new Set(extras)];
+    if (uniqueExtras.length > 0) {
+      throw new Error(
+        `refusing scoped payload: unrequested project(s): ${uniqueExtras.join(", ")}`,
+      );
+    }
+  }
+
+  const approved = { value: false };
+  const local = await loadVaultForScoped(opts.dryRun === true, approved);
+
+  const { merged, report, changed } = mergeScopedProjects(local, payload.projects, {
+    theirs: opts.theirs === true,
+  });
+  const lines = formatScopedReport(report);
+
+  if (opts.dryRun) {
+    return { changed, report: lines, dryRun: true };
+  }
+
+  if (!changed) {
+    return { changed: false, report: lines, dryRun: false };
+  }
+
+  if (!approved.value) {
+    const names =
+      requested?.join(", ") ??
+      payload.scope.join(", ") ??
+      Object.keys(payload.projects).join(", ");
+    await authenticate(`abracadabra: merge LAN project(s) ${names} into this vault`);
+  }
+  await saveVault(merged);
+  // NEVER push, NEVER sync-state, NEVER getMasterKey.
+  return { changed: true, report: lines, dryRun: false };
 }
 
 /** Browse mDNS for LAN sync hosts (waits briefly for announcements). */

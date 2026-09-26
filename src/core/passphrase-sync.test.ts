@@ -7,11 +7,12 @@ import { assertCloudPassphrase, assertUsbPassphrase, CLOUD_PASSPHRASE_MIN } from
 import { saveSyncState, loadSyncState } from "./sync.js";
 import type { Vault } from "./vault.js";
 import { resetPlatformForTests, restoreMasterKey, getMasterKey } from "../platform/index.js";
+import { setDefaultKdfForTests } from "../platform/master-key-file.js";
 
 describe("passphrase policy", () => {
-  it("accepts USB min length 8", () => {
-    expect(() => assertUsbPassphrase("12345678")).not.toThrow();
-    expect(() => assertUsbPassphrase("short")).toThrow(/8/);
+  it("accepts USB min length 12", () => {
+    expect(() => assertUsbPassphrase("123456789012")).not.toThrow();
+    expect(() => assertUsbPassphrase("12345678901")).toThrow(/12/);
   });
 
   it("rejects weak cloud passphrases", () => {
@@ -40,6 +41,7 @@ describe("encrypted sync-state", () => {
     process.env.ABRA_SKIP_BIOMETRICS = "1";
     process.env.ABRA_AUTH = "none";
     process.env.ABRA_HEADLESS_PASSPHRASE = "sync-state-test-passphrase";
+    setDefaultKdfForTests({ N: 16384 });
     resetPlatformForTests();
     await restoreMasterKey(master, "sync-state-test-passphrase");
     await getMasterKey();
@@ -47,6 +49,7 @@ describe("encrypted sync-state", () => {
 
   afterEach(() => {
     process.env = { ...envBackup };
+    setDefaultKdfForTests(null);
     resetPlatformForTests();
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
@@ -58,15 +61,16 @@ describe("encrypted sync-state", () => {
         p: { createdAt: 1, vars: { SECRET: { value: "s3cret", secret: true, updatedAt: 1 } } },
       },
     };
-    await saveSyncState(vault);
+    await saveSyncState("usb:test-lineage", vault);
     const raw = fs.readFileSync(path.join(tmpHome, ".abracadabra", "sync-state.json"), "utf8");
     expect(raw).not.toContain("s3cret");
     expect(JSON.parse(raw).format).toBe("abracadabra-sync-state");
-    const loaded = await loadSyncState();
+    expect(JSON.parse(raw).version).toBe(2);
+    const loaded = await loadSyncState("usb:test-lineage");
     expect(loaded?.base.projects.p.vars.SECRET.value).toBe("s3cret");
   });
 
-  it("migrates legacy plaintext sync-state", async () => {
+  it("legacy plaintext sync-state is never used as a base", async () => {
     const vault: Vault = {
       version: 1,
       projects: { a: { createdAt: 1, vars: { K: { value: "v", secret: true, updatedAt: 1 } } } },
@@ -77,10 +81,13 @@ describe("encrypted sync-state", () => {
       JSON.stringify({ lastSyncAt: 1, base: vault }),
       { mode: 0o600 },
     );
-    const loaded = await loadSyncState();
-    expect(loaded?.base.projects.a.vars.K.value).toBe("v");
+    expect(await loadSyncState("usb:any")).toBeNull();
+    // Next save replaces with v2
+    await saveSyncState("usb:new", vault);
     const raw = fs.readFileSync(path.join(tmpHome, ".abracadabra", "sync-state.json"), "utf8");
     expect(raw).not.toContain('"value":"v"');
     expect(JSON.parse(raw).format).toBe("abracadabra-sync-state");
+    expect(JSON.parse(raw).version).toBe(2);
+    expect((await loadSyncState("usb:new"))?.base.projects.a.vars.K.value).toBe("v");
   });
 });

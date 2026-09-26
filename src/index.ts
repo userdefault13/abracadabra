@@ -8,7 +8,9 @@ import { registerPushCommands } from "./commands/push.js";
 import { registerUsbCommands } from "./commands/usb.js";
 import { registerKeyCommands } from "./commands/keys.js";
 import { registerTreasuryCommands } from "./commands/treasury.js";
+import { registerSafeCommands } from "./commands/safe.js";
 import { keygen } from "./commands/keygen.js";
+import { registerRotateWalletCommands } from "./commands/rotate-wallet.js";
 import { updateCommand } from "./commands/update.js";
 import { cmdDoctor } from "./commands/doctor.js";
 import { cmdActivate, cmdLicenseStatus, cmdLicenseClear } from "./commands/activate.js";
@@ -20,6 +22,9 @@ import {
   cmdCartridgeRestore,
 } from "./commands/cartridge.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
+import { cmdKeystoreMigrate } from "./commands/keystore-migrate.js";
+import { registerGrantCommand } from "./commands/grant.js";
+import { startAgent, lockAgent, installSignalHandlers } from "./agent/index.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
@@ -41,6 +46,9 @@ registerPushCommands(program);
 registerUsbCommands(program);
 registerKeyCommands(program);
 registerTreasuryCommands(program);
+registerSafeCommands(program);
+registerRotateWalletCommands(program);
+registerGrantCommand(program);
 
 program
   .command("ls [project]")
@@ -212,6 +220,25 @@ program
   .description("Environment checklist (platform, keystore, vault)")
   .action(cmdDoctor);
 
+{
+  const keystore = program
+    .command("keystore")
+    .description("Manage the vault master-key keystore backend");
+  keystore
+    .command("migrate")
+    .description("Migrate the vault master key to another keystore backend")
+    .requiredOption("--to <backend>", "target backend (passphrase-file)")
+    .option("--remove-old", "remove the keytar copy after verified migration")
+    .action(async (opts: { to: string; removeOld?: boolean }) => {
+      try {
+        await cmdKeystoreMigrate(opts);
+      } catch (err) {
+        console.error(`\x1b[31m✗ ${err instanceof Error ? err.message : String(err)}\x1b[0m`);
+        process.exit(1);
+      }
+    });
+}
+
 program
   .command("unlock")
   .description("Unlock passphrase-file keystore (ABRA_KEYSTORE=passphrase-file)")
@@ -219,8 +246,26 @@ program
 
 program
   .command("lock")
-  .description("Clear in-memory unlock session (passphrase-file keystore)")
-  .action(cmdLock);
+  .description("Clear passphrase unlock session and lock the abra agent (if running)")
+  .action(async () => {
+    cmdLock();
+    try {
+      await lockAgent();
+      console.log("✓ abra-agent locked");
+    } catch {
+      console.log("(no abra-agent running)");
+    }
+  });
+
+program
+  .command("agent")
+  .description("Run the per-user vault agent (holds unlocked key in memory; idle + max-age + sleep lock)")
+  .action(async () => {
+    installSignalHandlers();
+    const { socketPath } = await startAgent();
+    console.error(`abra-agent listening on ${socketPath}`);
+    await new Promise(() => {});
+  });
 
 program
   .command("unlock-status")

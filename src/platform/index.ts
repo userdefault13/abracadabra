@@ -4,24 +4,42 @@ import { KeytarKeystore } from "./keystore-keytar.js";
 import { PassphraseFileKeystore } from "./keystore-passphrase.js";
 import { MacOSTouchIdAuth } from "./auth-macos.js";
 import { PasswordPromptAuth } from "./auth-password.js";
+import { PolkitAuth, probePolkit, setProbePolkitForTests } from "./auth-polkit.js";
+import { PassphraseAuth } from "./auth-passphrase.js";
 import { NoAuth } from "./auth-none.js";
 import {
+  authSelectionReason,
   biometricsSkipped,
+  detectHeadlessSession,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
+  VALID_AUTH_BACKENDS,
+  type HeadlessDetection,
 } from "./env.js";
 import { resetSessionForTests, isSessionUnlocked, lockSession } from "./session.js";
 import { isPassphraseVaultLocked } from "./keystore-passphrase.js";
 import { writeMasterKeyFile } from "./master-key-file.js";
 import { unlockSession } from "./session.js";
+import { VAULT_PASSPHRASE_MIN } from "./master-key-file.js";
 import { probeKeytar } from "./keystore-keytar.js";
+import { resolveMasterKey } from "../core/masterKey.js";
 
 export type { AuthRequest, PlatformAuth, PlatformKeystore } from "./types.js";
-export { biometricsSkipped, resolveAuthBackend, resolveKeystoreBackend } from "./env.js";
+export { KeystoreError } from "./types.js";
+export {
+  authSelectionReason,
+  biometricsSkipped,
+  detectHeadlessSession,
+  resolveAuthBackend,
+  resolveKeystoreBackend,
+  VALID_AUTH_BACKENDS,
+} from "./env.js";
+export type { HeadlessDetection } from "./env.js";
 export { lockSession, isSessionUnlocked } from "./session.js";
 export { VaultLockedError } from "./keystore-passphrase.js";
 export { probeKeytar } from "./keystore-keytar.js";
+export { probePolkit, setProbePolkitForTests } from "./auth-polkit.js";
 
 let keystoreSingleton: PlatformKeystore | null = null;
 let authSingleton: PlatformAuth | null = null;
@@ -31,6 +49,7 @@ export function resetPlatformForTests(): void {
   keystoreSingleton = null;
   authSingleton = null;
   resetSessionForTests();
+  setProbePolkitForTests(null);
 }
 
 export function createKeystore(): PlatformKeystore {
@@ -58,12 +77,21 @@ export function createAuth(): PlatformAuth {
         throw new Error(`ABRA_AUTH=macos-touchid requires macOS. ${UNSUPPORTED_PLATFORM_HINT}`);
       }
       return new MacOSTouchIdAuth();
+    case "polkit":
+      if (process.platform !== "linux") {
+        throw new Error(`ABRA_AUTH=polkit requires Linux. ${UNSUPPORTED_PLATFORM_HINT}`);
+      }
+      return new PolkitAuth();
+    case "passphrase":
+      return new PassphraseAuth();
     case "password":
       return new PasswordPromptAuth();
     case "none":
       return new NoAuth();
     default:
-      throw new Error(`Unknown ABRA_AUTH="${backend}". ${UNSUPPORTED_PLATFORM_HINT}`);
+      throw new Error(
+        `Unknown ABRA_AUTH="${backend}". Valid values: ${VALID_AUTH_BACKENDS.join(", ")}. ${UNSUPPORTED_PLATFORM_HINT}`,
+      );
   }
 }
 
@@ -78,7 +106,7 @@ export function getAuth(): PlatformAuth {
 }
 
 export async function getMasterKey(): Promise<Buffer> {
-  return getKeystore().getOrCreateMasterKey();
+  return resolveMasterKey(getKeystore());
 }
 
 export async function storeMasterKey(key: Buffer): Promise<void> {
@@ -96,8 +124,15 @@ export async function restoreMasterKey(key: Buffer, bundlePassphrase?: string): 
     if (!bundlePassphrase) {
       throw new Error("USB restore on passphrase-file keystore requires the bundle passphrase");
     }
+    // Bundle passphrase is an existing secret — allow < 12 chars but warn.
+    // Enforcing the new minimum would brick restores of older USB/cloud bundles.
+    if ([...bundlePassphrase.normalize("NFKC")].length < VAULT_PASSPHRASE_MIN) {
+      process.stderr.write(
+        `abracadabra: bundle passphrase is shorter than ${VAULT_PASSPHRASE_MIN} characters — vault wrap will use it anyway; consider changing the vault passphrase after restore\n`,
+      );
+    }
     writeMasterKeyFile(key, bundlePassphrase);
-    unlockSession(key, bundlePassphrase);
+    unlockSession(key);
     keystoreSingleton = createKeystore();
     return;
   }
@@ -112,24 +147,37 @@ export function platformInfo(): {
   platform: NodeJS.Platform;
   keystore: string;
   auth: string;
+  authSelectionReason: string;
   biometricsSkipped: boolean;
   vaultLocked: boolean;
+  headless: HeadlessDetection;
 } {
   return {
     platform: process.platform,
     keystore: resolveKeystoreBackend(),
     auth: resolveAuthBackend(),
+    authSelectionReason: authSelectionReason(),
     biometricsSkipped: biometricsSkipped(),
     vaultLocked: resolveKeystoreBackend() === "passphrase-file" && isPassphraseVaultLocked(),
+    headless: detectHeadlessSession(),
   };
 }
 
 export async function platformHealth(): Promise<{
   keytar?: { ok: boolean; detail?: string };
+  polkit?: { ok: boolean; pkcheck?: string; policy?: string; detail?: string };
 }> {
-  const out: { keytar?: { ok: boolean; detail?: string } } = {};
+  const out: {
+    keytar?: { ok: boolean; detail?: string };
+    polkit?: { ok: boolean; pkcheck?: string; policy?: string; detail?: string };
+  } = {};
   if (resolveKeystoreBackend() === "keytar") {
     out.keytar = await probeKeytar();
+  }
+  const auth = resolveAuthBackend();
+  // PolKit not needed when passphrase auth is selected.
+  if (auth !== "passphrase" && (process.platform === "linux" || auth === "polkit")) {
+    out.polkit = probePolkit();
   }
   return out;
 }

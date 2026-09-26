@@ -333,4 +333,54 @@ describe("castSend keystore env (mocked exec)", () => {
       return true;
     });
   });
+
+  it("honours --rpc-url already in args (does not append another)", async () => {
+    let captured: readonly string[] = [];
+    await castSend(
+      ["0x2222222222222222222222222222222222222222", "--value", "1", "--rpc-url", "https://custom.rpc"],
+      throwawayKey,
+      {
+        exec: async (_cmd, args) => {
+          captured = args;
+          return {
+            stdout: JSON.stringify({ transactionHash: "0x" + "22".repeat(32), status: 1 }),
+            stderr: "",
+          };
+        },
+      },
+    );
+    expect(captured.filter((a) => a === "--rpc-url")).toHaveLength(1);
+    expect(captured).toContain("https://custom.rpc");
+    expect(captured).not.toContain("--private-key");
+  });
+
+  it("uses ABRA_TREASURY_RPC when args omit --rpc-url", async () => {
+    const prev = process.env.ABRA_TREASURY_RPC;
+    process.env.ABRA_TREASURY_RPC = "https://treasury-test.rpc";
+    try {
+      let captured: readonly string[] = [];
+      await castSend(["0x2222222222222222222222222222222222222222", "--value", "1"], throwawayKey, {
+        exec: async (_cmd, args) => {
+          captured = args;
+          return {
+            stdout: JSON.stringify({ transactionHash: "0x" + "33".repeat(32), status: 1 }),
+            stderr: "",
+          };
+        },
+      });
+      expect(captured).toEqual([
+        "send",
+        "0x2222222222222222222222222222222222222222",
+        "--value",
+        "1",
+        "--rpc-url",
+        "https://treasury-test.rpc",
+        "--json",
+      ]);
+      expect(captured).not.toContain("--private-key");
+    } finally {
+      if (prev === undefined) delete process.env.ABRA_TREASURY_RPC;
+      else process.env.ABRA_TREASURY_RPC = prev;
+    }
+  });
 });

@@ -13,6 +13,7 @@ and block you every time a tool needs `OPENAI_API_KEY`.
 | Touch ID / password prompt on every tool call | Scoped **API key** (`ABRA_KEY`) — zero prompts after issuance |
 | Secrets scattered across `.env`, 1Password screenshots, Slack | One vault (`~/.abracadabra/`); agents + humans share the same source of truth |
 | Human retypes a key the agent just generated | `abra set … --stdin` or MCP `generate_*` → fetch later by name |
+| “Where do I put a key that isn’t for one app?” | No global store — `abra project new general` then `abra set general KEY` |
 | New machine / teammate Mac | USB or LAN sync / cartridge `--full` — still sealed, still no chat paste |
 
 Humans do **one** high-trust action: issue a scoped bearer key (or tap Touch ID

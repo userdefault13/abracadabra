@@ -337,7 +337,7 @@
     <input type="password" placeholder="6-digit PIN" maxlength="6" bind:value={joinPin} />
   </label>
   <label>
-    fingerprint (optional)
+    fingerprint (required — as printed by the host)
     <input type="text" placeholder="AA:BB:…" bind:value={joinFingerprint} />
   </label>
 </div>

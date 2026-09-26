@@ -7,10 +7,12 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ABBR = join(ROOT, "dist", "index.js");
+// ESM import() needs file:// URLs — raw absolute paths break on Windows (C:\…).
+const distUrl = (...parts) => pathToFileURL(join(ROOT, "dist", ...parts)).href;
 const PROJECT = "smoke-headless";
 const VAR = "SMOKE_HELLO";
 const VALUE = "abra-smoke-ok";
@@ -130,9 +132,9 @@ async function main() {
     process.env.ABRA_AUTH = "none";
     process.env.ABRA_HEADLESS_PASSPHRASE = VAULT_PASS;
 
-    const { loadVault, encryptVault } = await import(join(ROOT, "dist/core/vault.js"));
-    const { getMasterKey, resetPlatformForTests } = await import(join(ROOT, "dist/platform/index.js"));
-    const { sealBundle } = await import(join(ROOT, "dist/core/backup.js"));
+    const { loadVault, encryptVault } = await import(distUrl("core", "vault.js"));
+    const { getMasterKey, resetPlatformForTests } = await import(distUrl("platform", "index.js"));
+    const { sealBundle } = await import(distUrl("core", "backup.js"));
     resetPlatformForTests();
 
     const vault = await loadVault();

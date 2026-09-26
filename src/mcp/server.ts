@@ -3,7 +3,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { loadVault, saveVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
-import { authenticate } from "../platform/index.js";
+import { authenticate, resolveAuthBackend } from "../platform/index.js";
+import { authorizeReveal } from "../platform/reveal-gate.js";
+import { identifyMcpCaller } from "../core/caller-identity.js";
 import {
   generateWalletsIntoProject,
   mintCloudflareTokenIntoProject,
@@ -13,6 +15,11 @@ import {
   getTreasuryStatus,
   payFromTreasury,
 } from "../commands/treasury.js";
+import {
+  getSafeStatus,
+  payFromSafe,
+  listPendingSafeTxs,
+} from "../commands/safe.js";
 import { isEthAddress } from "../license/config.js";
 import { providers } from "../connectors/providers.js";
 import {
@@ -62,10 +69,13 @@ async function listProjects() {
 }
 
 /**
- * Request secret values. Pops a Touch ID dialog on the user's machine;
- * returns values ONLY after biometric approval.
+ * Request secret values. Pops a Touch ID / passphrase dialog on the user's
+ * machine (or uses an agent-held `abra grant` under the passphrase backend
+ * when headless). Returns values ONLY after approval.
+ *
+ * Exported for tests.
  */
-async function getSecrets(args: {
+export async function getSecrets(args: {
   project: string;
   keys: string[];
   ttl?: number;
@@ -90,8 +100,14 @@ async function getSecrets(args: {
   const agentId = args.requestedBy?.trim() || "MCP agent";
   const who = args.requestedBy ? `${args.requestedBy} (MCP agent)` : "MCP agent";
 
+  // Under passphrase backend, TTL session grants (keyed by self-reported
+  // requestedBy) are disabled — that would be a grace window.
+  const passphraseBackend = resolveAuthBackend() === "passphrase";
+
   const ttl =
-    typeof args.ttl === "number" && args.ttl > 0
+    !passphraseBackend &&
+    typeof args.ttl === "number" &&
+    args.ttl > 0
       ? Math.min(Math.floor(args.ttl), MAX_TTL_SECONDS)
       : 0;
 
@@ -113,13 +129,23 @@ async function getSecrets(args: {
     }
   }
 
+  let via: "auth" | "grant" = "auth";
   try {
-    await authenticate(
-      `abracadabra: ${who} requests ${args.keys.join(", ")} from "${args.project}"`,
-    );
-  } catch {
+    const result = await authorizeReveal({
+      reason: `abracadabra: ${who} requests ${args.keys.join(", ")} from "${args.project}"`,
+      project: args.project,
+      caller: () => identifyMcpCaller(),
+    });
+    via = result.via;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return textResult(
-      { error: "user denied or timed out biometric approval", approved: false },
+      {
+        error: msg.includes("abra grant") || msg.includes("approval denied")
+          ? msg
+          : "user denied or timed out biometric approval",
+        approved: false,
+      },
       true,
     );
   }
@@ -138,7 +164,7 @@ async function getSecrets(args: {
       'parse with JSON.parse(result.content[0].text) → { vars: { "<KEY>": "<value>" }, approved: true }',
     project: args.project,
     approved: true,
-    grantedVia: "touch-id",
+    grantedVia: via === "grant" ? "abra-grant" : "touch-id",
     vars,
     note: "treat these values as secrets; do not log or echo them",
   });
@@ -385,6 +411,57 @@ async function requestTreasuryPayment(args: {
   }
 }
 
+function isAuthDenied(msg: string): boolean {
+  return /denied|cancel|timed out|timeout|biometric|User cancelled|Authentication failed/i.test(msg);
+}
+
+async function safeStatusTool() {
+  try {
+    const s = await getSafeStatus({ pending: true });
+    return textResult({
+      tool: "safe_status",
+      format:
+        "{ address, version, threshold, owners[{address, abra}], signer, signerIsOwner, nonce, usdc, eth, pending[], appUrl } — public data only; never includes keys",
+      ...s,
+    });
+  } catch (err) {
+    return textResult({ error: err instanceof Error ? err.message : String(err) }, true);
+  }
+}
+
+async function safePendingTool() {
+  try {
+    return textResult({ tool: "safe_pending", ...(await listPendingSafeTxs()) });
+  } catch (err) {
+    return textResult({ error: err instanceof Error ? err.message : String(err) }, true);
+  }
+}
+
+async function requestSafePayment(args: { to: string; amountUsdc: string; reason: string }) {
+  try {
+    if (!isEthAddress(args.to.trim())) {
+      return textResult({ error: `invalid destination address: ${args.to}`, approved: false }, true);
+    }
+    if (!args.reason?.trim()) {
+      return textResult({ error: "reason is required", approved: false }, true);
+    }
+    const result = await payFromSafe({ to: args.to, amountUsdc: args.amountUsdc, reason: args.reason });
+    return textResult({
+      tool: "request_safe_payment",
+      format:
+        'mode "execute": { approved: true, txHash } (done). mode "propose": { approved: true, safeTxHash, confirmations, threshold, appUrl } — NOT yet sent; other Safe owners must confirm, then call safe_pending / abra safe exec. Private key never returned.',
+      ...result,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isAuthDenied(msg)) return textResult({ approved: false }, true);
+    return textResult({ error: msg, approved: false }, true);
+  }
+}
+
+/** @internal Exported for payment-vs-grant tests. */
+export { requestSafePayment };
+
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({
     name: "abracadabra",
@@ -499,6 +576,38 @@ Returns { approved: true, txHash, from, to, amountUsdc } or { approved: false }.
       reason: z.string().describe("human-readable reason shown in the Touch ID prompt"),
     },
     async (args) => requestTreasuryPayment(args),
+  );
+
+  server.tool(
+    "safe_status",
+    `Read-only status of the Gnosis Safe linked to abra (Base mainnet): address, version, owners
+(abra treasury marked), threshold, nonce, USDC + ETH balances, pending proposals. No Touch ID, no keys.`,
+    {},
+    async () => safeStatusTool(),
+  );
+
+  server.tool(
+    "safe_pending",
+    `List unexecuted Safe proposals from the Safe Transaction Service with confirmation counts,
+whether abra has signed, and whether each is ready to execute. Read-only.`,
+    {},
+    async () => safePendingTool(),
+  );
+
+  server.tool(
+    "request_safe_payment",
+    `Request a Base USDC payment from the Gnosis Safe linked to abra, signed by the treasury key.
+Pops Touch ID with amount + destination + reason.
+Threshold 1: executes on-chain → { approved: true, mode: "execute", txHash }.
+Threshold >1: proposes to the Safe Transaction Service → { approved: true, mode: "propose", safeTxHash, appUrl } —
+funds are NOT moved until the other owners confirm; tell the user to approve in the Safe app, then poll safe_pending.
+Returns { approved: false } on denial. Never returns the private key.`,
+    {
+      to: z.string().describe("destination 0x address on Base"),
+      amountUsdc: z.string().describe('USDC amount as decimal string, e.g. "0.008"'),
+      reason: z.string().describe("human-readable reason shown in the Touch ID prompt"),
+    },
+    async (args) => requestSafePayment(args),
   );
 
   await server.connect(new StdioServerTransport());

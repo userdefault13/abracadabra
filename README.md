@@ -103,6 +103,14 @@ abra get myproj MY_API_KEY     # reveal value → approve Touch ID
 abra run myproj -- ./deploy.sh # inject all vars into any command
 ```
 
+Every secret lives in a **project** — there is no global keystore. For keys shared across apps (e.g. a personal Grok/OpenAI key), use a catch-all project:
+
+```sh
+abra project new general
+abra set general GROK_BOT_API_KEY
+# fetch later with project "general"; scope API keys with -p general
+```
+
 **Interactive TUI:**
 
 ```sh
@@ -146,25 +154,26 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | Command | Purpose |
 |---|---|
 | `abra` | Launch the interactive TUI |
-| `abra project new <name>` | Create a project |
+| `abra project new <name>` | Create a project (use `general` for cross-app / shared secrets) |
 | `abra project rm <name>` / `project ls` | Delete / list projects |
 | `abra ls [project]` | List projects, or vars in a project (secrets masked) |
 | `abra set <proj> <KEY>` | Add/update a var — hidden input by default; `--visible`, `--no-secret`, `--stdin` flags available |
 | `abra get <proj> <KEY>` | Print value to stdout (**Touch ID required**) |
 | `abra rm <proj> <KEY>` | Delete a var |
 | `abra keygen foundry <proj>` | Generate EVM wallet(s) via Foundry (`--pay-to`, `-n`) |
+| `abra rotate-wallet <proj>` | Rotate deployer key → `*_LEGACY` archive + new key (Touch ID; optional ETH sweep) |
 | `abra run [-p proj] [-k K1,K2] -- <cmd…>` | Run command with vars injected into env |
 | `abra env <proj> [-k K1,K2]` | Print `export` lines for `eval $(…)` — Touch ID gated |
 | `abra serve [--port 7331] [--open] [--lan]` | Start the local biometric-gated API + web dash (`--lan` = TLS on all interfaces) |
 | `abra keys new <name> [-p projs] [--expires-in d]` | Issue an API key for `POST /secret` (printed once) |
 | `abra keys ls` / `keys rm <id>` | List (masked) / revoke API keys |
 | `abra usb list [--lan]` | List mounted volumes (and optional LAN peers) |
-| `abra usb backup [-v vol] [-f dir]` | Write a passphrase-encrypted bundle (vault + master key) to USB |
-| `abra usb restore [target]` | Restore vault + master key from a bundle |
-| `abra usb sync [-v vol] [--dry-run] [--theirs/--ours]` | Two-way 3-way-merge sync with the USB copy |
-| `abra usb host [--port] [--ttl]` | Start a short-lived TLS LAN sync host (PIN + mDNS) |
+| `abra usb backup [-v vol] [-f dir] [--project …]` | Write a passphrase-encrypted bundle to USB (full vault, or scoped project(s) with `--project`) |
+| `abra usb restore [target]` | Restore vault + master key from a full bundle; scoped bundles are merged instead |
+| `abra usb sync [-v vol] [-f file] [--project …] [--dry-run] [--theirs/--ours]` | Two-way 3-way-merge sync with a full USB copy, or one-way scoped merge with `--project` / scoped files |
+| `abra usb host [--port] [--ttl] [--project …]` | Start a short-lived TLS LAN sync host (PIN + mDNS); `--project` = scoped read-only share |
 | `abra usb peers` | Browse LAN for sync hosts |
-| `abra usb sync --lan [host] [--pin] [--fingerprint]` | Sync with a LAN host |
+| `abra usb sync --lan [host] --fingerprint <fp> [--project …] [--pin]` | Sync with a LAN host (fingerprint required; scoped with `--project`) |
 | `abra cartridge checkpoint [--full]` | Cloud checkpoint (metadata, or sealed full vault with `--full`) |
 | `abra cartridge restore` | Restore from latest full cartridge checkpoint |
 | `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
@@ -172,6 +181,11 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra treasury address` / `status` | Public address / Base USDC + ETH balances |
 | `abra treasury pay --to 0x… --amount 0.008 --reason "…"` `[--asset usdc\|eth]` `[--dry-run]` `[--json]` | Touch ID gated Base USDC or native ETH spend |
 | `abra refill <project> [--dry-run]` | Sweep a project wallet's Base USDC back into the treasury (alias of `treasury refill`) |
+| `abra safe create [--owner 0x…] [--threshold N]` | Deploy a Safe v1.4.1 on Base with the treasury as an owner (Touch ID) |
+| `abra safe link <address>` / `unlink` / `address` | Link an existing Safe (verified on-chain) / forget it / print it |
+| `abra safe status [--json]` | Owners, threshold, nonce, Base USDC + ETH, pending proposals |
+| `abra safe pay --to 0x… --amount 0.008 --reason "…"` | Touch ID gated USDC spend from the Safe (1-of-N executes, else proposes) |
+| `abra safe pending` / `confirm <safeTxHash> [--exec]` / `exec <safeTxHash>` | Multisig queue: list / co-sign / execute (Touch ID) |
 
 ### Injecting secrets into a deploy
 
@@ -285,22 +299,9 @@ abra connect openrouter          # OPENROUTER_API_KEY (+ optional BASE_URL)
 abra connect vercel              # VERCEL_TOKEN (+ optional ORG_ID / PROJECT_ID)
 abra connections                 # list connected accounts
 abra issue cloudflare myproj     # Touch ID gate → provider vars into project
+abra push vercel myproj KEY_ONE  # Touch ID gate → project vars into Vercel env
 abra disconnect cloudflare
 ```
-
-> **Nemotron note:** the key works with any OpenAI-compatible client pointed at
-> `https://integrate.api.nvidia.com/v1` — e.g. `OPENAI_BASE_URL=$NVIDIA_BASE_URL`
-> with `NVIDIA_API_KEY` as the bearer. Self-hosting NIM? Set a custom base URL
-> when connecting and it gets issued alongside the key.
-
-> **CDP note:** Coinbase Developer Portal API keys are created in the Portal UI
-> — there is no public endpoint/OAuth flow to mint them programmatically (the
-> CDP API v2 spec has no key-management endpoints). abracadabra therefore
-> stores your admin key once and provisions it per-project; when Coinbase
-> ships a create-key API, `issue` becomes an API call without CLI changes.
-abra push vercel myproj KEY_ONE  # Touch ID gate → project vars into Vercel env
-
-Then run your app with everything injected:
 
 ### Pushing vars to Vercel
 
@@ -325,6 +326,19 @@ abra push ssh myproj root@1.2.3.4 -e /opt/app/.env API_KEY DB_URL          # ups
 abra push ssh myproj root@1.2.3.4 -e /opt/app/.env EVM_PRIVATE_KEY:ATTESTOR_KEY \
   --identity-project ops --run 'cd /opt/app && docker compose up -d --build'   # rename, ssh key from the vault, then rebuild
 ```
+
+> **Nemotron note:** the key works with any OpenAI-compatible client pointed at
+> `https://integrate.api.nvidia.com/v1` — e.g. `OPENAI_BASE_URL=$NVIDIA_BASE_URL`
+> with `NVIDIA_API_KEY` as the bearer. Self-hosting NIM? Set a custom base URL
+> when connecting and it gets issued alongside the key.
+
+> **CDP note:** Coinbase Developer Portal API keys are created in the Portal UI
+> — there is no public endpoint/OAuth flow to mint them programmatically (the
+> CDP API v2 spec has no key-management endpoints). abracadabra therefore
+> stores your admin key once and provisions it per-project; when Coinbase
+> ships a create-key API, `issue` becomes an API call without CLI changes.
+
+Then run your app with everything injected:
 
 ```sh
 cd ~/Dev/ai-cron-site
@@ -361,6 +375,9 @@ a project — private keys encrypted, never printed:
 abra keygen foundry myproj               # EVM_ADDRESS + EVM_PRIVATE_KEY
 abra keygen foundry myproj --pay-to      # also sets PAY_TO_ADDRESS (x402)
 abra keygen foundry myproj -n 5          # multiple wallets (_1 … _n suffixes)
+abra rotate-wallet myproj --dry-run      # preview pair + balance
+abra rotate-wallet myproj                # Touch ID → archive old as *_LEGACY, mint new
+abra rotate-wallet myproj --purge-legacy # after on-chain ownership transfer
 abra keygen cloudflare myproj            # mint a FRESH Cloudflare token → CLOUDFLARE_API_TOKEN
 abra keygen cloudflare myproj --expires-in 30 --perms "Workers Scripts Edit,KV Storage Edit"
 abra keygen ssh myproj                   # ed25519 keypair → SSH_PRIVATE_KEY (secret) + SSH_PUBLIC_KEY
@@ -403,6 +420,53 @@ The source wallet usually holds no ETH (x402 payments are relayed), so `refill` 
 Via MCP: `treasury_status` (read-only) and `request_treasury_payment`
 `{ to, amountUsdc, reason }` — approve with your fingerprint; private key never leaves the vault / is never returned to the agent.
 
+## Gnosis Safe (multisig treasury)
+
+For anything bigger than pocket money, keep the funds in a [Safe](https://safe.global) and
+make the abra treasury wallet **one of its owners**. The private key still never leaves the
+vault; every signature still pops Touch ID. Other owners (a hardware wallet, a co-founder)
+approve in the Safe app, so a single compromised machine cannot drain the Safe.
+
+```sh
+abra treasury init                                   # the signer (needs a little Base ETH for gas)
+abra safe create --owner 0xLEDGER… --threshold 2     # deploy a 2-of-2 Safe v1.4.1 (Touch ID)
+#   …or link one you already have (treasury must be an owner to sign):
+abra safe link 0xSAFE…
+abra safe status                                     # owners, threshold, nonce, USDC/ETH, queue
+```
+
+Fund the Safe with USDC on Base. Spending:
+
+```sh
+abra safe pay --to 0x… --amount 25 --reason "invoice #42" --dry-run   # plan + safeTxHash, no Touch ID
+abra safe pay --to 0x… --amount 25 --reason "invoice #42"
+```
+
+- **threshold 1** → abra signs and calls `execTransaction` right away (treasury pays gas). Returns the tx hash.
+- **threshold > 1** → abra signs and *proposes* the transaction to the
+  [Safe Transaction Service](https://docs.safe.global/core-api/transaction-service-overview);
+  nothing moves yet. Co-signers confirm in the Safe app, then:
+
+```sh
+abra safe pending                        # queue with confirmation counts; "ready" once threshold is met
+abra safe confirm <safeTxHash> [--exec]  # co-sign a proposal made by someone else (Touch ID)
+abra safe exec <safeTxHash>              # broadcast a fully-confirmed proposal (Touch ID; treasury pays gas)
+```
+
+`confirm` and `exec` never trust the service blindly: the transaction fields are re-hashed on
+the Safe contract itself (`getTransactionHash`) and must match the requested `safeTxHash`,
+confirmations from non-owners are dropped, and the nonce must be the Safe's next one.
+The Touch ID prompt shows a decoded summary (`send 25.0 USDC to 0x…`).
+
+The Safe address lives in `__abra_treasury__` as `SAFE_ADDRESS`. Optional: store a
+[Safe API key](https://developer.safe.global/) as `SAFE_API_KEY` (secret) in the same project
+(or export `ABRA_SAFE_API_KEY`) to lift the unauthenticated rate limit (2 req/s, 5k/month).
+`ABRA_SAFE_TX_SERVICE` overrides the service URL.
+
+Via MCP: `safe_status`, `safe_pending` (read-only) and `request_safe_payment`
+`{ to, amountUsdc, reason }` — same Touch ID gate; a proposal comes back as
+`{ mode: "propose", safeTxHash, appUrl }` so the agent knows to wait for co-signers.
+
 ## MCP server (for AI agents)
 
 Agents working on a project can request env vars through the
@@ -433,6 +497,9 @@ Register it with your agent client:
 | `generate_ssh_key` | `{ project, count?, comment? }` | Local ed25519 keypair → `{ keys: [{ varSuffix, publicKey, comment }] }`; private key stored encrypted as `SSH_PRIVATE_KEY<varSuffix>` |
 | `treasury_status` | — | Read-only treasury address + Base USDC + ETH (no private key) |
 | `request_treasury_payment` | `{ to, amountUsdc, reason }` | Touch ID gate → Base USDC transfer `{ approved: true, txHash, from, to, amountUsdc }` |
+| `safe_status` | — | Read-only linked Safe: owners, threshold, nonce, USDC + ETH, pending queue |
+| `safe_pending` | — | Unexecuted Safe proposals with confirmation counts / readiness |
+| `request_safe_payment` | `{ to, amountUsdc, reason }` | Touch ID gate → `{ mode: "execute", txHash }` (1-of-N) or `{ mode: "propose", safeTxHash, appUrl }` (awaits co-signers) |
 
 ### How an agent requests a var
 
@@ -498,37 +565,70 @@ abra usb sync -v /Volumes/STICK        # pulls A's projects
 
 # back on A, after editing on both sides
 abra usb sync                          # 3-way merge against last-synced snapshot
-abra usb sync --dry-run                # preview only
+abra usb sync --dry-run                # preview only (lists conflicts + DELETE project …)
 abra usb sync --theirs                 # force-resolve conflicts with the USB copy
+abra usb sync --allow-deletes          # required to apply whole-project deletions
 ```
 
-Merge rules: additions/deletions propagate both ways; edits to the same var
-resolve by newest `updatedAt`. True conflicts (same key edited on both sides,
-or edited-vs-deleted) prompt per-key showing both values with timestamps.
-`~/.abracadabra/sync-state.json` stores an **AES-256-GCM encrypted** snapshot of the
-last synced vault (sealed with the same master key as `vault.enc`, mode `0600`)
-so merges work offline without leaving plaintext secrets on disk.
+Merge rules: additions propagate both ways. When **both** sides changed the same
+key relative to the per-peer base (including no base), it is always a conflict
+(interactive prompt, or `--ours` / `--theirs`) — never silent newer-wins.
+Only-one-side-changed keeps auto-merging. Whole-project deletions against the
+sync base require `--allow-deletes` (or typing `delete` on a TTY); otherwise
+nothing is written. Approvals (Touch ID) happen **before** any local write
+(vault, bundle, `latest.json`, sync-state). New backup passphrases must be
+**≥ 12 characters** (opening older shorter bundles still works, with a warning).
+
+`~/.abracadabra/sync-state.json` stores an **AES-256-GCM encrypted** per-peer
+base (format v2: `peers[usb:<lineageId>|lan:<deviceId>]`). A stale/mismatched
+base (or legacy v1) is ignored → additive merge only (nothing deleted). Each
+device has a non-secret `~/.abracadabra/device-id`; USB bundles carry a
+`lineageId` preserved across refreshes. Over LAN the host also refuses a push that would remove
+whole projects from it unless it was started with `abra usb host --allow-deletes`.
 
 ### LAN sync (same merge, no stick)
 
 One Mac hosts a short-lived TLS listener; the other joins with a PIN. mDNS
-advertises the host as `_abracadabra-sync._tcp`.
+advertises the host as `_abracadabra-sync._tcp`. The host prints a **full**
+SHA-256 TLS fingerprint — pass it with `--fingerprint` (required; auto-filled
+when you pick a peer via mDNS).
 
 ```sh
 # computer A
-abra usb host                  # Touch ID → prints PIN, fingerprint, ip:port
+abra usb host                  # Touch ID → prints PIN, full fingerprint, ip:port
 
 # computer B
 abra usb peers                 # optional: discover hosts
-abra usb sync --lan            # pick a peer, enter PIN
-abra usb sync --lan 192.168.1.20:7332 --pin 482910 --dry-run
-abra usb sync --lan 192.168.1.20:7332 --pin 482910 --theirs
+abra usb sync --lan            # pick a peer (fingerprint taken from its mDNS record), enter PIN
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --pin 482910 --dry-run
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --pin 482910 --theirs
 ```
 
 The transfer uses the same `BackupBundle` format sealed with the **PIN** (not
 your USB passphrase). Confirm the TLS fingerprint when joining an untrusted
 network. The host stops after a successful push or when `--ttl` expires
 (default 10 minutes). The web dash USB panel can start/stop a host and join peers.
+
+### Sync one project (scoped, one-way)
+
+Share only named projects over LAN or a file bundle — never the master key,
+other projects, or system data.
+
+```sh
+# host (e.g. MacBook): share only gotchibot, read-only
+abra usb host --project gotchibot --no-advertise   # approve → prints PIN, full fingerprint, ip:port
+# receiver (e.g. Linux box, also fine over ssh -t with the agent unlocked)
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --project gotchibot --dry-run
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --project gotchibot
+```
+
+- **In a scoped bundle:** only the named projects' vars.
+- **Never included:** master key, other projects, `__abra_treasury__` / `__abra_*`, connections, passkeys, apiKeys.
+- **One-way:** host vault is untouched; `/lan/push` is refused (403). Host stays up until TTL/Ctrl-C so you can `--dry-run` then sync for real.
+- **Merge rules:** per key; never deletes local projects/keys; conflicts keep the receiver unless `--theirs`; report prints **names only**.
+- **No `sync-state.json`:** scoped flows neither read nor write it.
+- **`--fingerprint` required** (full SHA-256). Legacy 16-hex short fingerprints still match with a warning.
+- **File bundles:** `abra usb backup -f <dir> --project …` writes `scoped-<stamp>.abrabak` (does not update `latest.json`); merge with `abra usb sync -f <file>` (or `abra usb restore`, which merges scoped bundles instead of overwriting).
 
 ### `abra serve --lan`
 

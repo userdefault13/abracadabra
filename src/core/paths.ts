@@ -26,6 +26,11 @@ export function syncStateFile(): string {
   return path.join(resolveAbraDir(), "sync-state.json");
 }
 
+/** Non-secret UUID identifying this machine for per-peer sync bases. */
+export function deviceIdFile(): string {
+  return path.join(resolveAbraDir(), "device-id");
+}
+
 /** PEM CA/cert written by `abra serve --lan` for clients to pin with curl --cacert. */
 export function lanServeCertFile(): string {
   return path.join(resolveAbraDir(), "lan-serve.pem");

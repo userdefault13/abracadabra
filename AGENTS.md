@@ -199,6 +199,14 @@ abra keygen foundry myproj
 abra keygen ssh myproj
 ```
 
+Every var belongs to a **project** — abracadabra has no global store. For secrets that are not tied to one app (shared API keys, personal tokens), use a catch-all project such as `general`:
+
+```sh
+abra project new general          # once
+abra set general GROK_BOT_API_KEY # human types once, or --stdin
+# fetch: project "general"; API keys: abra keys new … -p general
+```
+
 Ask the human to approve Touch ID / run `abra connect` only when a **provider login** is required — not to retype secrets the vault already holds.
 
 ---

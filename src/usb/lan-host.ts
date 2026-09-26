@@ -3,16 +3,22 @@ import http from "node:http";
 import crypto from "node:crypto";
 import os from "node:os";
 import type { Server as HttpsServer } from "node:https";
-import { sealBundle, openBundle } from "../core/backup.js";
+import { sealBundle, sealScopedBundle, openBundle } from "../core/backup.js";
 import type { BackupBundle } from "../core/backup.js";
 import { loadVault, saveVault, encryptVault, decryptEnvelope } from "../core/vault.js";
 import { getMasterKey, authenticate } from "../platform/index.js";
-import { saveSyncState } from "../core/sync.js";
+import { saveSyncState, lanPeerId } from "../core/sync.js";
 import { createEphemeralTls } from "../core/tls-ephemeral.js";
+import {
+  assertScopeNamesAllowed,
+  validateScope,
+  extractScopedProjects,
+} from "../core/sync-scope.js";
 
 export const LAN_MDNS_TYPE = "abracadabra-sync";
 export const LAN_DEFAULT_PORT = 7332;
 export const LAN_DEFAULT_TTL_MS = 10 * 60 * 1000;
+export const LAN_PROTO = 2;
 
 export interface LanHostInfo {
   pin: string;
@@ -21,6 +27,8 @@ export interface LanHostInfo {
   fingerprint: string;
   hostname: string;
   expiresAt: number;
+  /** Present when host was started with --project (scoped, read-only). */
+  scope?: string[];
 }
 
 export interface LanHostHandle extends LanHostInfo {
@@ -37,6 +45,11 @@ interface ActiveHost {
   failCount: number;
   locked: boolean;
   pulled: boolean;
+  /** Accept pushes that remove whole projects from this host (--allow-deletes). */
+  allowDeletes: boolean;
+  /** When set, host is scoped (read-only; no push-back). */
+  scope?: string[];
+  onEvent?: (msg: string) => void;
   stopTimer?: ReturnType<typeof setTimeout>;
   bonjour?: { unpublishAll: (cb?: () => void) => void; destroy: () => void };
   stopPromise?: Promise<void>;
@@ -109,10 +122,20 @@ function extractPin(req: http.IncomingMessage): string {
   return "";
 }
 
-async function buildSealedBundle(pin: string): Promise<BackupBundle> {
+async function buildFullSealedBundle(pin: string): Promise<BackupBundle> {
   const vault = await loadVault();
   const masterKey = await getMasterKey();
   return sealBundle(encryptVault(vault, masterKey), masterKey, pin);
+}
+
+async function buildScopedSealedBundle(
+  pin: string,
+  scope: string[],
+): Promise<BackupBundle> {
+  const vault = await loadVault();
+  const validated = validateScope(vault, scope);
+  const projects = extractScopedProjects(vault, validated);
+  return sealScopedBundle(projects, validated, pin);
 }
 
 export function getLanHostStatus(): LanHostInfo | null {
@@ -125,6 +148,7 @@ export function getLanHostStatus(): LanHostInfo | null {
     fingerprint: active.fingerprint,
     hostname: os.hostname(),
     expiresAt: active.expiresAt,
+    scope: active.scope ? [...active.scope] : undefined,
   };
 }
 
@@ -145,7 +169,14 @@ export async function stopLanHost(): Promise<void> {
     if (!cur.bonjour) resolve();
   });
   await new Promise<void>((resolve) => {
+    try {
+      (cur.server as https.Server & { closeAllConnections?: () => void }).closeAllConnections?.();
+    } catch {
+      /* ignore */
+    }
     cur.server.close(() => resolve());
+    // Fallback if close never fires (lingering sockets)
+    setTimeout(() => resolve(), 2000).unref();
   });
 }
 
@@ -153,10 +184,24 @@ export async function startLanHost(opts: {
   port?: number;
   ttlMs?: number;
   advertise?: boolean;
+  projects?: string[];
+  onEvent?: (msg: string) => void;
+  allowDeletes?: boolean;
 }): Promise<LanHostHandle> {
   if (active) await stopLanHost();
 
-  await authenticate("abracadabra: start LAN vault sync host");
+  let scope: string[] | undefined;
+  if (opts.projects && opts.projects.length > 0) {
+    // Refuse reserved names before Touch ID / listening.
+    scope = assertScopeNamesAllowed(opts.projects);
+    await authenticate(
+      `abracadabra: share project(s) ${scope.join(", ")} over LAN (scoped, read-only)`,
+    );
+    const vault = await loadVault();
+    scope = validateScope(vault, scope); // unknown names throw before listen
+  } else {
+    await authenticate("abracadabra: start LAN vault sync host");
+  }
 
   const port = opts.port ?? LAN_DEFAULT_PORT;
   const ttlMs = opts.ttlMs ?? LAN_DEFAULT_TTL_MS;
@@ -174,6 +219,9 @@ export async function startLanHost(opts: {
     failCount: 0,
     locked: false,
     pulled: false,
+    allowDeletes: opts.allowDeletes === true,
+    scope,
+    onEvent: opts.onEvent,
   };
 
   const server = https.createServer({ key: tls.key, cert: tls.cert }, (req, res) => {
@@ -199,9 +247,11 @@ export async function startLanHost(opts: {
         if (method === "GET" && url.pathname === "/lan/info") {
           sendJson(res, 200, {
             hostname: os.hostname(),
-            port,
+            port: state.port,
             expiresAt: state.expiresAt,
             fingerprint: state.fingerprint,
+            scoped: Boolean(state.scope),
+            proto: LAN_PROTO,
           });
           return;
         }
@@ -214,13 +264,97 @@ export async function startLanHost(opts: {
             sendJson(res, 401, { error: "invalid PIN" });
             return;
           }
-          const bundle = await buildSealedBundle(pin);
+
+          const body = (await readJson(req)) as { projects?: string[] };
+          const requested =
+            Array.isArray(body.projects) && body.projects.length > 0
+              ? body.projects
+              : undefined;
+
+          if (state.scope) {
+            // Scoped host: client may only request a subset (or omit = full host scope).
+            let effectiveScope = state.scope;
+            if (requested) {
+              let cleaned: string[];
+              try {
+                cleaned = assertScopeNamesAllowed(requested);
+              } catch (err) {
+                sendJson(res, 403, {
+                  error: err instanceof Error ? err.message : String(err),
+                });
+                return;
+              }
+              const outside = cleaned.filter((n) => !state.scope!.includes(n));
+              if (outside.length > 0) {
+                sendJson(res, 403, {
+                  error: `requested project(s) outside host scope: ${outside.join(", ")}`,
+                });
+                return;
+              }
+              effectiveScope = cleaned;
+            }
+            const bundle = await buildScopedSealedBundle(pin, effectiveScope);
+            state.pulled = true;
+            const remote =
+              req.socket.remoteAddress?.replace(/^::ffff:/, "") ?? "unknown";
+            const msg = `served scoped pull (${effectiveScope.join(", ")}) to ${remote}`;
+            if (state.onEvent) state.onEvent(msg);
+            else console.error(msg);
+            sendJson(res, 200, { bundle });
+            return;
+          }
+
+          // Unscoped host
+          if (requested) {
+            // Client narrowing: serve a scoped bundle of the requested projects.
+            let cleaned: string[];
+            try {
+              cleaned = assertScopeNamesAllowed(requested);
+            } catch (err) {
+              sendJson(res, 403, {
+                error: err instanceof Error ? err.message : String(err),
+              });
+              return;
+            }
+            try {
+              const vault = await loadVault();
+              cleaned = validateScope(vault, cleaned);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              if (/unknown project/i.test(msg)) {
+                sendJson(res, 404, { error: msg });
+                return;
+              }
+              sendJson(res, 400, { error: msg });
+              return;
+            }
+            const bundle = await buildScopedSealedBundle(pin, cleaned);
+            state.pulled = true;
+            const remote =
+              req.socket.remoteAddress?.replace(/^::ffff:/, "") ?? "unknown";
+            const msg = `served client-narrowed scoped pull (${cleaned.join(", ")}) to ${remote}`;
+            if (state.onEvent) state.onEvent(msg);
+            else console.error(msg);
+            sendJson(res, 200, { bundle });
+            return;
+          }
+
+          // Exact today's behavior: full vault bundle.
+          const bundle = await buildFullSealedBundle(pin);
           state.pulled = true;
           sendJson(res, 200, { bundle });
           return;
         }
 
         if (method === "POST" && url.pathname === "/lan/push") {
+          // Scoped host: refuse push-back before reading body / authenticate / vault I/O.
+          if (state.scope) {
+            sendJson(res, 403, {
+              error: "scoped session is read-only; push-back refused",
+            });
+            return;
+          }
+
           const pinIn = extractPin(req);
           if (!timingSafePin(state.pinBuf, pinIn)) {
             state.failCount += 1;
@@ -240,12 +374,25 @@ export async function startLanHost(opts: {
             sendJson(res, 400, { error: "invalid or unreadable bundle" });
             return;
           }
-          await authenticate("abracadabra: apply LAN sync from peer");
           const peerMaster = Buffer.from(payload.masterKey, "base64");
           const vault = decryptEnvelope(payload.vaultEnc, peerMaster);
+          // Host-side delete gate: the push REPLACES this vault, so any project present
+          // here but missing from the pushed vault is a whole-project deletion.
+          if (!state.allowDeletes) {
+            const current = await loadVault();
+            const removed = Object.keys(current.projects).filter((n) => !vault.projects[n]);
+            if (removed.length > 0) {
+              sendJson(res, 409, {
+                error: `push would delete project(s) on this host: ${removed.join(", ")} — restart the host with --allow-deletes to accept`,
+                projectDeletions: removed,
+              });
+              return;
+            }
+          }
+          await authenticate("abracadabra: apply LAN sync from peer");
           // Re-encrypt under this machine's master key (same as USB sync apply).
           await saveVault(vault);
-          await saveSyncState(vault);
+          await saveSyncState(lanPeerId(payload.meta.deviceId), vault);
           sendJson(res, 200, { ok: true });
           void stopLanHost();
           return;
@@ -264,6 +411,10 @@ export async function startLanHost(opts: {
     server.listen(port, "0.0.0.0", () => resolve());
     server.on("error", reject);
   });
+  const addr = server.address();
+  if (addr && typeof addr === "object") {
+    state.port = addr.port;
+  }
   state.server = server;
   active = state;
 
@@ -278,7 +429,7 @@ export async function startLanHost(opts: {
       bonjour.publish({
         name: `abra-${os.hostname()}`,
         type: LAN_MDNS_TYPE,
-        port,
+        port: state.port,
         txt: {
           fingerprint: tls.fingerprint,
           hostname: os.hostname(),
@@ -292,11 +443,12 @@ export async function startLanHost(opts: {
 
   const info: LanHostInfo = {
     pin,
-    port,
+    port: state.port,
     addresses: privateAddresses(),
     fingerprint: tls.fingerprint,
     hostname: os.hostname(),
     expiresAt,
+    scope: scope ? [...scope] : undefined,
   };
 
   return {

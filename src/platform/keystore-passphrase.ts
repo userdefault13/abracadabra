@@ -2,20 +2,28 @@ import crypto from "node:crypto";
 import type { PlatformKeystore } from "./types.js";
 import { promptHidden } from "../core/prompt.js";
 import {
+  assertVaultPassphraseMin,
   masterKeyFileExists,
+  openMasterKeyFile,
+  loadMasterKeyFileRaw,
   readMasterKeyFile,
   writeMasterKeyFile,
+  WrongPassphraseError,
+  VAULT_PASSPHRASE_MIN,
 } from "./master-key-file.js";
 import { headlessPassphrase } from "./env.js";
+import { getSessionMasterKey, unlockSession } from "./session.js";
 import {
-  getSessionMasterKey,
-  getSessionPassphrase,
-  unlockSession,
-} from "./session.js";
+  assertUnlockAllowed,
+  recordUnlockFailure,
+  resetUnlockAttempts,
+} from "./unlock-attempts.js";
 
 export class VaultLockedError extends Error {
-  constructor() {
-    super("Vault locked — run: abra unlock");
+  constructor(
+    message = "Vault locked — run: abra unlock (with abra-agent running it stays unlocked between commands)",
+  ) {
+    super(message);
     this.name = "VaultLockedError";
   }
 }
@@ -36,23 +44,50 @@ export class PassphraseFileKeystore implements PlatformKeystore {
     return this.initializeNewMasterKey();
   }
 
+  /**
+   * Re-wrap the master key. Prompts on the tty (passphrase is never cached).
+   * If a file already exists, verifies the passphrase opens it before rewriting.
+   */
   async storeMasterKey(key: Buffer): Promise<void> {
     if (key.length !== 32) throw new Error("Master key must be 32 bytes");
-    const passphrase = getSessionPassphrase();
-    if (!passphrase) {
-      throw new Error("Vault locked — run: abra unlock before restoring a master key");
+
+    if (masterKeyFileExists()) {
+      const passphrase = await promptHidden("Vault passphrase: ");
+      if (!passphrase) throw new Error("Empty passphrase");
+      // Verify before overwrite (wrong passphrase → WrongPassphraseError).
+      try {
+        openMasterKeyFile(loadMasterKeyFileRaw(), passphrase);
+      } catch (err) {
+        if (err instanceof WrongPassphraseError) throw err;
+        throw err;
+      }
+      // Existing secrets may be < 12 chars — allow re-wrap with warning.
+      if ([...passphrase.normalize("NFKC")].length < VAULT_PASSPHRASE_MIN) {
+        process.stderr.write(
+          `abracadabra: vault passphrase is shorter than ${VAULT_PASSPHRASE_MIN} characters — consider changing it\n`,
+        );
+      }
+      writeMasterKeyFile(key, passphrase);
+      unlockSession(key);
+      return;
     }
-    writeMasterKeyFile(key, passphrase);
-    unlockSession(key, passphrase);
+
+    const p1 = await promptHidden("Set vault passphrase (new): ");
+    const p2 = await promptHidden("Confirm passphrase: ");
+    if (!p1 || p1 !== p2) throw new Error("Passphrases do not match");
+    assertVaultPassphraseMin(p1);
+    writeMasterKeyFile(key, p1);
+    unlockSession(key);
   }
 
   async initializeNewMasterKey(): Promise<Buffer> {
     const p1 = await promptHidden("Set vault passphrase (new): ");
     const p2 = await promptHidden("Confirm passphrase: ");
     if (!p1 || p1 !== p2) throw new Error("Passphrases do not match");
+    assertVaultPassphraseMin(p1);
     const key = crypto.randomBytes(32);
     writeMasterKeyFile(key, p1);
-    unlockSession(key, p1);
+    unlockSession(key);
     return key;
   }
 
@@ -60,10 +95,32 @@ export class PassphraseFileKeystore implements PlatformKeystore {
     if (!masterKeyFileExists()) {
       throw new Error("No master key file — run any vault command to initialize, or restore from USB");
     }
-    const key = readMasterKeyFile(passphrase);
-    unlockSession(key, passphrase);
+    const key = verifyVaultPassphrase(passphrase);
+    unlockSession(key);
     return key;
   }
+}
+
+/**
+ * Assert backoff, decrypt master.key.enc, record/reset unlock attempts.
+ * Shared by `abra unlock` and PassphraseAuth so there is one verification path.
+ * Caller owns the returned Buffer (unlock or zero-fill).
+ */
+export function verifyVaultPassphrase(passphrase: string): Buffer {
+  assertUnlockAllowed();
+  let key: Buffer;
+  try {
+    key = readMasterKeyFile(passphrase);
+  } catch (err) {
+    if (err instanceof WrongPassphraseError) {
+      recordUnlockFailure();
+      throw err;
+    }
+    // I/O / format errors — do not increment the counter.
+    throw err;
+  }
+  resetUnlockAttempts();
+  return key;
 }
 
 export function isPassphraseVaultLocked(): boolean {

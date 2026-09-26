@@ -3,7 +3,9 @@ import https from "node:https";
 import fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadVault, assertProject } from "../core/vault.js";
-import { authenticate } from "../platform/index.js";
+import { resolveAuthBackend } from "../platform/index.js";
+import { authorizeReveal } from "../platform/reveal-gate.js";
+import { identityForPid } from "../core/caller-identity.js";
 import { identifyPeer } from "./identify.js";
 import { findGrant, issueGrant, listGrants, revokeAll } from "./grants.js";
 import { send } from "./http-utils.js";
@@ -303,8 +305,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           const clientPort = req.socket.remotePort ?? 0;
           const requester = await identifyPeer(clientPort);
 
+          // Under passphrase backend, TTL session grants (keyed by appId) are
+          // disabled — that would be a grace window.
+          const passphraseBackend = resolveAuthBackend() === "passphrase";
+
           const ttl =
-            typeof body.ttl === "number" && body.ttl > 0
+            !passphraseBackend &&
+            typeof body.ttl === "number" &&
+            body.ttl > 0
               ? Math.min(Math.floor(body.ttl), MAX_TTL_SECONDS)
               : 0;
 
@@ -323,12 +331,23 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
           try {
             await enqueueAuth(() =>
-              authenticate(
-                `abracadabra: ${requester.display} requests ${keys.join(", ")} from "${project}"`,
-              ),
+              authorizeReveal({
+                reason: `abracadabra: ${requester.display} requests ${keys.join(", ")} from "${project}"`,
+                project,
+                caller: async () => {
+                  if (requester.pid == null) return null;
+                  return identityForPid(requester.pid);
+                },
+              }),
             );
-          } catch {
-            send(res, 403, { error: "biometric authentication denied" });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            send(res, 403, {
+              error:
+                msg.includes("abra grant") || msg.includes("approval denied")
+                  ? msg
+                  : "biometric authentication denied",
+            });
             return;
           }
 
