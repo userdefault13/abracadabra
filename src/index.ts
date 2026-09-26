@@ -22,6 +22,7 @@ import {
   cmdCartridgeRestore,
 } from "./commands/cartridge.js";
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
+import { cmdAgentStatus } from "./commands/agent-status.js";
 import { cmdKeystoreMigrate } from "./commands/keystore-migrate.js";
 import { registerGrantCommand } from "./commands/grant.js";
 import { startAgent, lockAgent, installSignalHandlers } from "./agent/index.js";
@@ -241,7 +242,9 @@ program
 
 program
   .command("unlock")
-  .description("Unlock passphrase-file keystore (ABRA_KEYSTORE=passphrase-file)")
+  .description(
+    "Unlock passphrase-file keystore (auto-detected on Linux when master.key.enc exists)",
+  )
   .action(cmdUnlock);
 
 program
@@ -257,7 +260,7 @@ program
     }
   });
 
-program
+const agentCmd = program
   .command("agent")
   .description("Run the per-user vault agent (holds unlocked key in memory; idle + max-age + sleep lock)")
   .action(async () => {
@@ -267,6 +270,26 @@ program
     await new Promise(() => {});
   });
 
+agentCmd
+  .command("status")
+  .description("Show whether abra-agent is unlocked, locked, or not running")
+  .option("--json", "JSON output (non-secret fields only)")
+  .option("--wait", "poll until unlocked (for ExecStartPre / dependent units)")
+  .option(
+    "--timeout <seconds>",
+    "with --wait: give up after N seconds (default 300; 0 = forever)",
+    "300",
+  )
+  .action(
+    async (opts: { json?: boolean; wait?: boolean; timeout?: string }) => {
+      const timeout = opts.timeout !== undefined ? Number(opts.timeout) : 300;
+      await cmdAgentStatus({
+        json: opts.json,
+        wait: opts.wait,
+        timeout: Number.isFinite(timeout) ? timeout : 300,
+      });
+    },
+  );
 program
   .command("unlock-status")
   .description("Exit 0 if passphrase vault session is active")

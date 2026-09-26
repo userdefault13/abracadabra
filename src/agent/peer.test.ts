@@ -10,6 +10,9 @@ import {
   isAllowedAbraCliPeer,
   nodeOptionsAreDangerous,
   authorizePeer,
+  detectUserNamespace,
+  USER_NAMESPACE_PEER_HINT,
+  SS_NETLINK_HINT,
   type PeerCheckDeps,
 } from "./peer.js";
 
@@ -303,8 +306,50 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
       runSs: async () => {
         throw new Error("ss_not_found");
       },
+      readFileSync: (p) => {
+        if (p === "/proc/self/uid_map") return Buffer.from("0 0 4294967295\n");
+        throw new Error(p);
+      },
     });
-    expect(r).toEqual({ ok: false, reason: "ss_failed" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("ss_failed");
+      expect(r.hint).toContain("AF_NETLINK");
+      expect(r.hint).toBe(SS_NETLINK_HINT);
+    }
+  });
+
+  it("peer_pid_unresolved in user namespace includes userns hint", async () => {
+    const r = await authorizePeer(fakeSocket(), {
+      platform: "linux",
+      getSocketFd: () => 20,
+      readlinkSync: () => "socket:[40321]",
+      runSs: async () => SS_FIXTURE.replace(/40321/g, "99999"), // no matching inode
+      readFileSync: (p) => {
+        if (p === "/proc/self/uid_map") return Buffer.from("0 1000 1\n");
+        throw new Error(p);
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("peer_pid_unresolved");
+      expect(r.hint).toBe(USER_NAMESPACE_PEER_HINT);
+      expect(r.hint).toMatch(/user namespace/);
+    }
+  });
+
+  it("peer_pid_unresolved in initial namespace has no userns hint", async () => {
+    const r = await authorizePeer(fakeSocket(), {
+      platform: "linux",
+      getSocketFd: () => 20,
+      readlinkSync: () => "socket:[40321]",
+      runSs: async () => SS_FIXTURE.replace(/40321/g, "99999"),
+      readFileSync: (p) => {
+        if (p === "/proc/self/uid_map") return Buffer.from("0 0 4294967295\n");
+        throw new Error(p);
+      },
+    });
+    expect(r).toEqual({ ok: false, reason: "peer_pid_unresolved" });
   });
 
   it("rejects exe mismatch via injected proc", async () => {
@@ -398,5 +443,28 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
     });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.pid).toBe(2222);
+  });
+});
+
+describe("detectUserNamespace", () => {
+  it("initial uid_map → false", () => {
+    expect(
+      detectUserNamespace(() => "0 0 4294967295\n"),
+    ).toBe(false);
+    expect(
+      detectUserNamespace(() => "  0   0   4294967295  "),
+    ).toBe(false);
+  });
+
+  it("non-initial uid_map → true", () => {
+    expect(detectUserNamespace(() => "0 1000 1\n")).toBe(true);
+  });
+
+  it("unreadable → false", () => {
+    expect(
+      detectUserNamespace(() => {
+        throw new Error("ENOENT");
+      }),
+    ).toBe(false);
   });
 });

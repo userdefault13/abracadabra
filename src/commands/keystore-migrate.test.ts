@@ -422,4 +422,40 @@ describe("cmdKeystoreMigrate", () => {
       ),
     ).rejects.toThrow(/no master key in keytar/);
   });
+
+  it("polkit denial on linux appends ABRA_AUTH=password SSH hint", async () => {
+    const source = makeSource(crypto.randomBytes(32));
+    await expect(
+      cmdKeystoreMigrate(
+        { to: "passphrase-file" },
+        {
+          platform: "linux",
+          sourceKeystore: source,
+          resolveAuthBackend: () => "polkit",
+          authenticate: async () => {
+            throw new Error("polkit: Authentication failure");
+          },
+          ...capture(),
+        },
+      ),
+    ).rejects.toThrow(/ABRA_AUTH=password abra keystore migrate/);
+  });
+
+  it("non-polkit auth errors are unchanged", async () => {
+    const source = makeSource(crypto.randomBytes(32));
+    await expect(
+      cmdKeystoreMigrate(
+        { to: "passphrase-file" },
+        {
+          platform: "linux",
+          sourceKeystore: source,
+          resolveAuthBackend: () => "passphrase",
+          authenticate: async () => {
+            throw new Error("wrong passphrase");
+          },
+          ...capture(),
+        },
+      ),
+    ).rejects.toThrow(/^wrong passphrase$/);
+  });
 });

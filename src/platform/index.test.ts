@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   createAuth,
   createKeystore,
@@ -7,6 +10,7 @@ import {
   biometricsSkipped,
   setProbePolkitForTests,
   resolveAuthBackend,
+  maybeWarnKeystoreAutoDetect,
 } from "./index.js";
 
 describe("platform", () => {
@@ -75,12 +79,16 @@ describe("platform", () => {
 describe("linux auth selection", () => {
   const envBackup = { ...process.env };
   const realPlatform = process.platform;
+  let tmpDir = "";
 
   beforeEach(() => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     delete process.env.ABRA_AUTH;
     delete process.env.ABRA_SKIP_BIOMETRICS;
     delete process.env.ABRA_KEYSTORE;
+    // Hermetic: do not auto-detect a real ~/.abracadabra/master.key.enc on the host.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "abra-plat-"));
+    process.env.ABRA_DIR = tmpDir;
     resetPlatformForTests();
   });
 
@@ -89,6 +97,11 @@ describe("linux auth selection", () => {
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
     vi.restoreAllMocks();
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it("selects polkit when probe ok", () => {
@@ -155,6 +168,74 @@ describe("linux auth selection", () => {
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
     process.env.ABRA_AUTH = "polkit";
     expect(() => createAuth()).toThrow(/requires Linux/);
+  });
+});
+
+describe("maybeWarnKeystoreAutoDetect", () => {
+  afterEach(() => {
+    resetPlatformForTests();
+  });
+
+  it("writes once to stderr for linux auto-detect + non-TTY", () => {
+    const chunks: string[] = [];
+    const deps = {
+      env: {} as NodeJS.ProcessEnv,
+      platform: "linux" as const,
+      isTTY: false,
+      abraDir: () => "/tmp/abra-ad",
+      selectionReason: () => "auto-detected master.key.enc (linux)",
+      stderrWrite: (c: string) => {
+        chunks.push(c);
+      },
+    };
+    maybeWarnKeystoreAutoDetect(deps);
+    maybeWarnKeystoreAutoDetect(deps);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toContain("keystore auto-detected as passphrase-file");
+    expect(chunks[0]).toContain("/tmp/abra-ad");
+    expect(chunks[0]).toContain("upgrading-existing-units");
+  });
+
+  it("skips when TTY, ABRA_QUIET, explicit keystore, or non-linux", () => {
+    const write = vi.fn();
+    maybeWarnKeystoreAutoDetect({
+      env: {},
+      platform: "linux",
+      isTTY: true,
+      selectionReason: () => "auto-detected master.key.enc (linux)",
+      stderrWrite: write,
+    });
+    expect(write).not.toHaveBeenCalled();
+
+    resetPlatformForTests();
+    maybeWarnKeystoreAutoDetect({
+      env: { ABRA_QUIET: "1" },
+      platform: "linux",
+      isTTY: false,
+      selectionReason: () => "auto-detected master.key.enc (linux)",
+      stderrWrite: write,
+    });
+    expect(write).not.toHaveBeenCalled();
+
+    resetPlatformForTests();
+    maybeWarnKeystoreAutoDetect({
+      env: { ABRA_KEYSTORE: "passphrase-file" },
+      platform: "linux",
+      isTTY: false,
+      selectionReason: () => "explicit ABRA_KEYSTORE",
+      stderrWrite: write,
+    });
+    expect(write).not.toHaveBeenCalled();
+
+    resetPlatformForTests();
+    maybeWarnKeystoreAutoDetect({
+      env: {},
+      platform: "darwin",
+      isTTY: false,
+      selectionReason: () => "auto-detected master.key.enc (linux)",
+      stderrWrite: write,
+    });
+    expect(write).not.toHaveBeenCalled();
   });
 });
 

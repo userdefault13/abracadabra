@@ -63,7 +63,7 @@ const FP_REQUIRED =
   "LAN sync requires the host's TLS fingerprint — pass --fingerprint <fp> exactly as printed by `abra usb host`";
 
 const VAULT_LOCKED_MSG =
-  "vault is locked — start/unlock the agent first: abra unlock (use ssh -t) and retry";
+  "vault is locked — start/unlock the agent first: abra unlock (use ssh -t; Tailscale/non-interactive may need PATH=$HOME/.local/share/mise/shims:$PATH) and retry";
 
 function requireFingerprint(expectedFingerprint?: string): string {
   if (!expectedFingerprint || !expectedFingerprint.trim()) {

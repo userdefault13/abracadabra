@@ -28,8 +28,59 @@ const DANGEROUS_NODE_OPTIONS =
   /(?:^|\s)(--require|--import|--loader|--experimental-loader|--eval|--inspect(?:-brk|-port|-publish-uid)?(?:=|\s|$)|-e\b|-r\b)/;
 
 export type PeerAuthOk = { ok: true; pid: number; exe: string };
-export type PeerAuthFail = { ok: false; reason: string };
+export type PeerAuthFail = { ok: false; reason: string; hint?: string };
 export type PeerAuthResult = PeerAuthOk | PeerAuthFail;
+
+/** Static hint when peer resolution fails inside a user namespace (systemd --user sandbox). */
+export const USER_NAMESPACE_PEER_HINT =
+  "abra-agent is running inside a user namespace (likely systemd unit sandboxing: PrivateTmp/ProtectSystem/ProtectHome/PrivateUsers in a --user unit), so it cannot see the caller's PID. Use the shipped packaging/linux/abra-agent.service hardening (no namespace options) — see docs/LINUX-HEADLESS.md";
+
+/** Static hint when `ss -xpn` fails (often missing AF_NETLINK in RestrictAddressFamilies). */
+export const SS_NETLINK_HINT =
+  "RestrictAddressFamilies must include AF_NETLINK (ss uses sock_diag).";
+
+/**
+ * True when /proc/self/uid_map is not the initial user namespace mapping.
+ * Initial = single line "0 0 4294967295" (modulo whitespace). Unreadable → false.
+ */
+export function detectUserNamespace(
+  readFileSync: (path: string) => string | Buffer = (p) => fs.readFileSync(p),
+): boolean {
+  try {
+    const raw = readFileSync("/proc/self/uid_map");
+    const text = (typeof raw === "string" ? raw : raw.toString("utf8")).trim();
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length !== 1) return true;
+    const normalized = lines[0].trim().replace(/\s+/g, " ");
+    return normalized !== "0 0 4294967295";
+  } catch {
+    return false;
+  }
+}
+
+const PEER_HINT_REASONS = new Set([
+  "peer_pid_unresolved",
+  "ss_failed",
+  "fd_readlink_failed",
+]);
+
+/** Attach static operator hints for fail-closed peer failures (never peer cmdline/env). */
+export function peerAuthFail(
+  reason: string,
+  readFileSync?: (path: string) => string | Buffer,
+): PeerAuthFail {
+  if (!PEER_HINT_REASONS.has(reason)) {
+    return { ok: false, reason };
+  }
+  const inUserNs = detectUserNamespace(
+    readFileSync ?? ((p) => fs.readFileSync(p)),
+  );
+  const parts: string[] = [];
+  if (inUserNs) parts.push(USER_NAMESPACE_PEER_HINT);
+  if (reason === "ss_failed") parts.push(SS_NETLINK_HINT);
+  if (parts.length === 0) return { ok: false, reason };
+  return { ok: false, reason, hint: parts.join(" ") };
+}
 
 export interface SsUnixEntry {
   localInode: number;
@@ -329,7 +380,7 @@ export async function authorizePeer(
   try {
     inode = parseSocketInode(readlinkSync(`/proc/self/fd/${fd}`));
   } catch {
-    return { ok: false, reason: "fd_readlink_failed" };
+    return peerAuthFail("fd_readlink_failed", readFileSync);
   }
   if (inode === null) {
     return { ok: false, reason: "bad_socket_inode" };
@@ -339,13 +390,13 @@ export async function authorizePeer(
   try {
     ssOut = await runSs();
   } catch {
-    return { ok: false, reason: "ss_failed" };
+    return peerAuthFail("ss_failed", readFileSync);
   }
 
   const entries = parseSsUnixXpn(ssOut);
   const pid = resolvePeerPidFromSs(entries, inode);
   if (pid === null) {
-    return { ok: false, reason: "peer_pid_unresolved" };
+    return peerAuthFail("peer_pid_unresolved", readFileSync);
   }
 
   let peerExe: string;

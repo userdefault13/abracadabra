@@ -18,13 +18,18 @@ export {
 } from "./server.js";
 export {
   isAgentEnabled,
+  resolveAgentRuntimeBase,
   resolveAgentSocketPath,
   resolveIdleSeconds,
   resolveMaxAgeSeconds,
   ensureAgentRuntimeDir,
   mkAgentTestDir,
+  formatAgentSocketVia,
   DEFAULT_IDLE_SECONDS,
   DEFAULT_MAX_AGE_SECONDS,
+  type AgentRuntimeBase,
+  type AgentRuntimeSource,
+  type AgentPathDeps,
 } from "./paths.js";
 export {
   agentRequest,
@@ -65,5 +70,9 @@ export {
   parseSsUnixXpn,
   resolvePeerPidFromSs,
   isAllowedAbraCliPeer,
+  detectUserNamespace,
+  peerAuthFail,
+  USER_NAMESPACE_PEER_HINT,
+  SS_NETLINK_HINT,
   type PeerAuthResult,
 } from "./peer.js";
