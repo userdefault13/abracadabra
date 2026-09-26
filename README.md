@@ -168,12 +168,12 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra keys new <name> [-p projs] [--expires-in d]` | Issue an API key for `POST /secret` (printed once) |
 | `abra keys ls` / `keys rm <id>` | List (masked) / revoke API keys |
 | `abra usb list [--lan]` | List mounted volumes (and optional LAN peers) |
-| `abra usb backup [-v vol] [-f dir]` | Write a passphrase-encrypted bundle (vault + master key) to USB |
-| `abra usb restore [target]` | Restore vault + master key from a bundle |
-| `abra usb sync [-v vol] [--dry-run] [--theirs/--ours]` | Two-way 3-way-merge sync with the USB copy |
-| `abra usb host [--port] [--ttl]` | Start a short-lived TLS LAN sync host (PIN + mDNS) |
+| `abra usb backup [-v vol] [-f dir] [--project …]` | Write a passphrase-encrypted bundle to USB (full vault, or scoped project(s) with `--project`) |
+| `abra usb restore [target]` | Restore vault + master key from a full bundle; scoped bundles are merged instead |
+| `abra usb sync [-v vol] [-f file] [--project …] [--dry-run] [--theirs/--ours]` | Two-way 3-way-merge sync with a full USB copy, or one-way scoped merge with `--project` / scoped files |
+| `abra usb host [--port] [--ttl] [--project …]` | Start a short-lived TLS LAN sync host (PIN + mDNS); `--project` = scoped read-only share |
 | `abra usb peers` | Browse LAN for sync hosts |
-| `abra usb sync --lan [host] [--pin] [--fingerprint]` | Sync with a LAN host |
+| `abra usb sync --lan [host] --fingerprint <fp> [--project …] [--pin]` | Sync with a LAN host (fingerprint required; scoped with `--project`) |
 | `abra cartridge checkpoint [--full]` | Cloud checkpoint (metadata, or sealed full vault with `--full`) |
 | `abra cartridge restore` | Restore from latest full cartridge checkpoint |
 | `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
@@ -577,23 +577,46 @@ so merges work offline without leaving plaintext secrets on disk.
 ### LAN sync (same merge, no stick)
 
 One Mac hosts a short-lived TLS listener; the other joins with a PIN. mDNS
-advertises the host as `_abracadabra-sync._tcp`.
+advertises the host as `_abracadabra-sync._tcp`. The host prints a **full**
+SHA-256 TLS fingerprint — pass it with `--fingerprint` (required; auto-filled
+when you pick a peer via mDNS).
 
 ```sh
 # computer A
-abra usb host                  # Touch ID → prints PIN, fingerprint, ip:port
+abra usb host                  # Touch ID → prints PIN, full fingerprint, ip:port
 
 # computer B
 abra usb peers                 # optional: discover hosts
-abra usb sync --lan            # pick a peer, enter PIN
-abra usb sync --lan 192.168.1.20:7332 --pin 482910 --dry-run
-abra usb sync --lan 192.168.1.20:7332 --pin 482910 --theirs
+abra usb sync --lan --fingerprint <fp>            # pick a peer, enter PIN
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --pin 482910 --dry-run
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --pin 482910 --theirs
 ```
 
 The transfer uses the same `BackupBundle` format sealed with the **PIN** (not
 your USB passphrase). Confirm the TLS fingerprint when joining an untrusted
 network. The host stops after a successful push or when `--ttl` expires
 (default 10 minutes). The web dash USB panel can start/stop a host and join peers.
+
+### Sync one project (scoped, one-way)
+
+Share only named projects over LAN or a file bundle — never the master key,
+other projects, or system data.
+
+```sh
+# host (e.g. MacBook): share only gotchibot, read-only
+abra usb host --project gotchibot --no-advertise   # approve → prints PIN, full fingerprint, ip:port
+# receiver (e.g. Linux box, also fine over ssh -t with the agent unlocked)
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --project gotchibot --dry-run
+abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --project gotchibot
+```
+
+- **In a scoped bundle:** only the named projects' vars.
+- **Never included:** master key, other projects, `__abra_treasury__` / `__abra_*`, connections, passkeys, apiKeys.
+- **One-way:** host vault is untouched; `/lan/push` is refused (403). Host stays up until TTL/Ctrl-C so you can `--dry-run` then sync for real.
+- **Merge rules:** per key; never deletes local projects/keys; conflicts keep the receiver unless `--theirs`; report prints **names only**.
+- **No `sync-state.json`:** scoped flows neither read nor write it.
+- **`--fingerprint` required** (full SHA-256). Legacy 16-hex short fingerprints still match with a warning.
+- **File bundles:** `abra usb backup -f <dir> --project …` writes `scoped-<stamp>.abrabak` (does not update `latest.json`); merge with `abra usb sync -f <file>` (or `abra usb restore`, which merges scoped bundles instead of overwriting).
 
 ### `abra serve --lan`
 

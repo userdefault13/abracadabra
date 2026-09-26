@@ -58,11 +58,12 @@ describe("threeWayMerge", () => {
 });
 
 describe("tls-ephemeral", () => {
-  it("creates a self-signed cert with fingerprint", () => {
+  it("creates a self-signed cert with full fingerprint", () => {
     const tls = createEphemeralTls("test-abra");
     expect(tls.cert).toContain("BEGIN CERTIFICATE");
     expect(tls.key).toContain("BEGIN");
     expect(tls.fingerprint).toMatch(/^[0-9A-F:]+$/);
+    expect(tls.fingerprint.replace(/[^0-9A-Fa-f]/g, "")).toHaveLength(64);
     expect(fingerprintsMatch(tls.fingerprint, tls.fingerprint)).toBe(true);
     expect(fingerprintsMatch(tls.fingerprint, "00:11:22:33")).toBe(false);
   });
