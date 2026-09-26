@@ -7,7 +7,7 @@ import { sealBundle, sealScopedBundle, openBundle } from "../core/backup.js";
 import type { BackupBundle } from "../core/backup.js";
 import { loadVault, saveVault, encryptVault, decryptEnvelope } from "../core/vault.js";
 import { getMasterKey, authenticate } from "../platform/index.js";
-import { saveSyncState } from "../core/sync.js";
+import { saveSyncState, lanPeerId } from "../core/sync.js";
 import { createEphemeralTls } from "../core/tls-ephemeral.js";
 import {
   assertScopeNamesAllowed,
@@ -45,6 +45,8 @@ interface ActiveHost {
   failCount: number;
   locked: boolean;
   pulled: boolean;
+  /** Accept pushes that remove whole projects from this host (--allow-deletes). */
+  allowDeletes: boolean;
   /** When set, host is scoped (read-only; no push-back). */
   scope?: string[];
   onEvent?: (msg: string) => void;
@@ -184,6 +186,7 @@ export async function startLanHost(opts: {
   advertise?: boolean;
   projects?: string[];
   onEvent?: (msg: string) => void;
+  allowDeletes?: boolean;
 }): Promise<LanHostHandle> {
   if (active) await stopLanHost();
 
@@ -216,6 +219,7 @@ export async function startLanHost(opts: {
     failCount: 0,
     locked: false,
     pulled: false,
+    allowDeletes: opts.allowDeletes === true,
     scope,
     onEvent: opts.onEvent,
   };
@@ -370,12 +374,25 @@ export async function startLanHost(opts: {
             sendJson(res, 400, { error: "invalid or unreadable bundle" });
             return;
           }
-          await authenticate("abracadabra: apply LAN sync from peer");
           const peerMaster = Buffer.from(payload.masterKey, "base64");
           const vault = decryptEnvelope(payload.vaultEnc, peerMaster);
+          // Host-side delete gate: the push REPLACES this vault, so any project present
+          // here but missing from the pushed vault is a whole-project deletion.
+          if (!state.allowDeletes) {
+            const current = await loadVault();
+            const removed = Object.keys(current.projects).filter((n) => !vault.projects[n]);
+            if (removed.length > 0) {
+              sendJson(res, 409, {
+                error: `push would delete project(s) on this host: ${removed.join(", ")} — restart the host with --allow-deletes to accept`,
+                projectDeletions: removed,
+              });
+              return;
+            }
+          }
+          await authenticate("abracadabra: apply LAN sync from peer");
           // Re-encrypt under this machine's master key (same as USB sync apply).
           await saveVault(vault);
-          await saveSyncState(vault);
+          await saveSyncState(lanPeerId(payload.meta.deviceId), vault);
           sendJson(res, 200, { ok: true });
           void stopLanHost();
           return;

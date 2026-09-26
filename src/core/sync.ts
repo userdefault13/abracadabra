@@ -18,6 +18,12 @@ export interface Conflict {
   theirs?: VarEntry;
 }
 
+export interface ProjectDeletion {
+  project: string;
+  /** "here" = deleted on this machine (would remove from peer); "peer" = deleted on peer (would remove here). */
+  side: "here" | "peer";
+}
+
 /** Manual resolutions keyed "<scope>/<key>"; undefined value = delete. */
 export type Resolutions = Map<string, VarEntry | undefined>;
 
@@ -27,40 +33,41 @@ const SYNC_MAGIC = "abracadabra-sync-state";
 
 interface EncryptedSyncFile {
   format: typeof SYNC_MAGIC;
-  version: 1;
+  version: 1 | 2;
   iv: string;
   tag: string;
   data: string;
 }
 
-function encryptSyncState(state: SyncState, key: Buffer): EncryptedSyncFile {
+/** v2 plaintext: per-peer bases. */
+interface SyncStateV2 {
+  peers: Record<string, SyncState>;
+}
+
+function encryptBytes(plaintext: Buffer, key: Buffer): EncryptedSyncFile {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-  const plaintext = Buffer.from(JSON.stringify(state), "utf8");
   const data = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return {
     format: SYNC_MAGIC,
-    version: 1,
+    version: 2,
     iv: iv.toString("base64"),
     tag: cipher.getAuthTag().toString("base64"),
     data: data.toString("base64"),
   };
 }
 
-function decryptSyncState(file: EncryptedSyncFile, key: Buffer): SyncState {
+function decryptBytes(file: EncryptedSyncFile, key: Buffer): Buffer {
   const decipher = crypto.createDecipheriv(
     "aes-256-gcm",
     key,
     Buffer.from(file.iv, "base64"),
   );
   decipher.setAuthTag(Buffer.from(file.tag, "base64"));
-  const plaintext = Buffer.concat([
+  return Buffer.concat([
     decipher.update(Buffer.from(file.data, "base64")),
     decipher.final(),
   ]);
-  const state = JSON.parse(plaintext.toString("utf8")) as SyncState;
-  if (!state?.base) throw new Error("Invalid sync-state payload");
-  return state;
 }
 
 function isEncryptedSyncFile(raw: unknown): raw is EncryptedSyncFile {
@@ -68,11 +75,12 @@ function isEncryptedSyncFile(raw: unknown): raw is EncryptedSyncFile {
     typeof raw === "object" &&
     raw !== null &&
     (raw as EncryptedSyncFile).format === SYNC_MAGIC &&
-    typeof (raw as EncryptedSyncFile).data === "string"
+    typeof (raw as EncryptedSyncFile).data === "string" &&
+    ((raw as EncryptedSyncFile).version === 1 || (raw as EncryptedSyncFile).version === 2)
   );
 }
 
-function isLegacyPlainSyncState(raw: unknown): raw is SyncState {
+function isLegacyPlainSyncState(raw: unknown): boolean {
   return (
     typeof raw === "object" &&
     raw !== null &&
@@ -82,32 +90,63 @@ function isLegacyPlainSyncState(raw: unknown): raw is SyncState {
   );
 }
 
-/** Load last sync snapshot (encrypted with master key). Migrates legacy plaintext once. */
-export async function loadSyncState(): Promise<SyncState | null> {
+async function readPeersMap(): Promise<Record<string, SyncState>> {
   try {
     const raw = JSON.parse(fs.readFileSync(syncStateFile(), "utf8")) as unknown;
-    if (isLegacyPlainSyncState(raw)) {
-      await saveSyncState(raw.base);
-      return raw;
-    }
-    if (!isEncryptedSyncFile(raw)) return null;
+    // Legacy plaintext or encrypted v1: never use as a base; next save replaces with v2.
+    if (isLegacyPlainSyncState(raw)) return {};
+    if (!isEncryptedSyncFile(raw)) return {};
+    if (raw.version === 1) return {};
     const key = await getMasterKey();
-    return decryptSyncState(raw, key);
+    const plaintext = decryptBytes(raw, key);
+    const parsed = JSON.parse(plaintext.toString("utf8")) as SyncStateV2;
+    if (!parsed?.peers || typeof parsed.peers !== "object") return {};
+    return parsed.peers;
   } catch {
-    return null;
+    return {};
   }
 }
 
-/** Persist sync base encrypted with the Keychain/master key (mode 0600). */
-export async function saveSyncState(vault: Vault): Promise<void> {
+/**
+ * Load last sync snapshot for one peer (encrypted with master key).
+ * Legacy v1 / plaintext sync-state is never used as a base (returns null).
+ * Pass null/undefined peerId when the peer id is unavailable → additive merge.
+ */
+export async function loadSyncState(peerId: string | null | undefined): Promise<SyncState | null> {
+  if (!peerId) return null;
+  const peers = await readPeersMap();
+  const entry = peers[peerId];
+  if (!entry?.base) return null;
+  return entry;
+}
+
+/**
+ * Persist sync base for one peer (encrypted, mode 0600). Updates only that peer entry.
+ * No-ops when peerId is missing (legacy peer without deviceId/lineageId).
+ */
+export async function saveSyncState(
+  peerId: string | null | undefined,
+  vault: Vault,
+): Promise<void> {
+  if (!peerId) return;
   ensureDir();
+  const peers = await readPeersMap();
+  peers[peerId] = { lastSyncAt: Date.now(), base: vault };
   const key = await getMasterKey();
-  const state: SyncState = { lastSyncAt: Date.now(), base: vault };
-  const enc = encryptSyncState(state, key);
+  const enc = encryptBytes(Buffer.from(JSON.stringify({ peers } satisfies SyncStateV2), "utf8"), key);
   const file = syncStateFile();
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(enc), { mode: 0o600 });
   fs.renameSync(tmp, file);
+}
+
+/** Peer id helpers — return null when the remote id is missing (legacy). */
+export function usbPeerId(lineageId: string | undefined | null): string | null {
+  return lineageId ? `usb:${lineageId}` : null;
+}
+
+export function lanPeerId(deviceId: string | undefined | null): string | null {
+  return deviceId ? `lan:${deviceId}` : null;
 }
 
 function entryEq(a: VarEntry | undefined, b: VarEntry | undefined): boolean {
@@ -143,11 +182,8 @@ function mergeVarMaps(
       if (o) merged[key] = o;
     } else if (!oursChanged) {
       if (t) merged[key] = t;
-    } else if (o && t) {
-      if (o.updatedAt >= t.updatedAt) merged[key] = o;
-      else merged[key] = t;
-      if (o.updatedAt === t.updatedAt) conflicts.push({ scope, key, ours: o, theirs: t });
     } else {
+      // Both sides changed relative to base (including no base) and differ → conflict.
       conflicts.push({ scope, key, ours: o, theirs: t });
     }
   }
@@ -161,8 +197,13 @@ function mergeProjects(
   conflicts: Conflict[],
   resolutions: Resolutions,
   peerLabel: string,
-): { projects: Vault["projects"]; report: string[] } {
+): {
+  projects: Vault["projects"];
+  report: string[];
+  projectDeletions: ProjectDeletion[];
+} {
   const report: string[] = [];
+  const projectDeletions: ProjectDeletion[] = [];
   const mergedProjects: Vault["projects"] = {};
   const bProjects = base?.projects ?? {};
   const scopes = new Set([...Object.keys(ours.projects), ...Object.keys(theirs.projects)]);
@@ -182,9 +223,15 @@ function mergeProjects(
             : `+ project ${bold(name)} pulled from ${peerLabel}`,
         );
       } else {
+        // Whole-project deletion relative to base — gated by callers via --allow-deletes.
+        const side: ProjectDeletion["side"] = o ? "peer" : "here";
+        projectDeletions.push({ project: name, side });
         report.push(
-          `− project ${bold(name)} was deleted on ${o ? `${peerLabel} (removing here)` : `this machine (removing from ${peerLabel})`}`,
+          `− project ${bold(name)} was deleted on ${
+            o ? `${peerLabel} (removing here)` : `this machine (removing from ${peerLabel})`
+          }`,
         );
+        // Do not keep the survivor — deletion applies when allowed.
       }
       continue;
     }
@@ -201,7 +248,7 @@ function mergeProjects(
       );
     }
   }
-  return { projects: mergedProjects, report };
+  return { projects: mergedProjects, report, projectDeletions };
 }
 
 function mergeConnections(
@@ -246,7 +293,12 @@ export function threeWayMerge(
   base: Vault | null,
   resolutions: Resolutions,
   peerLabel = "peer",
-): { merged: Vault; conflicts: Conflict[]; report: string[] } {
+): {
+  merged: Vault;
+  conflicts: Conflict[];
+  report: string[];
+  projectDeletions: ProjectDeletion[];
+} {
   const conflicts: Conflict[] = [];
   const projects = mergeProjects(ours, theirs, base, conflicts, resolutions, peerLabel);
   const conns = mergeConnections(ours, theirs, base, conflicts, resolutions);
@@ -270,5 +322,21 @@ export function threeWayMerge(
     },
     conflicts,
     report: [...projects.report, ...conns.report],
+    projectDeletions: projects.projectDeletions,
   };
+}
+
+/** Red dry-run lines for whole-project deletions (shown at top of report). */
+export function formatProjectDeletionLines(
+  deletions: ProjectDeletion[],
+  peerLabel = "peer",
+): string[] {
+  const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+  return deletions.map((d) =>
+    red(
+      d.side === "peer"
+        ? `DELETE project ${d.project} (deleted on ${peerLabel} — would remove here)`
+        : `DELETE project ${d.project} (deleted here — would remove from ${peerLabel})`,
+    ),
+  );
 }
