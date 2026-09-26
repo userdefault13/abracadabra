@@ -3,7 +3,7 @@ import { mountedVolumes, resolveVolumePath, volumesRootLabel } from "./volumes.j
 import { threeWayMerge, type Resolutions } from "./sync.js";
 import type { Vault, VarEntry } from "./vault.js";
 import { fingerprintsMatch } from "./tls-ephemeral.js";
-import { createEphemeralTls } from "./tls-ephemeral.js";
+import { createEphemeralTls, sanitizeCommonName } from "./tls-ephemeral.js";
 
 function entry(value: string, updatedAt: number): VarEntry {
   return { value, secret: true, updatedAt };
@@ -66,5 +66,14 @@ describe("tls-ephemeral", () => {
     expect(tls.fingerprint.replace(/[^0-9A-Fa-f]/g, "")).toHaveLength(64);
     expect(fingerprintsMatch(tls.fingerprint, tls.fingerprint)).toBe(true);
     expect(fingerprintsMatch(tls.fingerprint, "00:11:22:33")).toBe(false);
+  });
+
+  it("sanitizes long / odd hostnames for the cert CN (≤ 64 chars)", () => {
+    const long = "iad20-fj918-d363a433-4ea7-4abb-b61b-19dfc107f694-FAF4CDEBA9F8.local";
+    expect(sanitizeCommonName(long).length).toBeLessThanOrEqual(64);
+    expect(sanitizeCommonName("a/b=c d")).toBe("a-b-c-d");
+    expect(sanitizeCommonName("///")).toBe("abracadabra-lan");
+    const tls = createEphemeralTls(long);
+    expect(tls.cert).toContain("BEGIN CERTIFICATE");
   });
 });

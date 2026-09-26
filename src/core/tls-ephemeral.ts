@@ -28,6 +28,15 @@ export function fingerprintFromDer(der: Buffer): string {
 }
 
 /** Generate a short-lived self-signed cert via openssl (macOS/Linux; Windows if openssl is on PATH). */
+/**
+ * X.509 CN must be ≤ 64 chars and must not contain "/" or "=" (openssl -subj syntax).
+ * Long macOS hostnames (e.g. CI runners, "*.local" names) otherwise make openssl fail.
+ */
+export function sanitizeCommonName(commonName: string): string {
+  const cleaned = commonName.replace(/[^A-Za-z0-9.-]/g, "-").slice(0, 64).replace(/^[-.]+|[-.]+$/g, "");
+  return cleaned || "abracadabra-lan";
+}
+
 export function createEphemeralTls(commonName = "abracadabra-lan"): EphemeralTls {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "abra-tls-"));
   const keyPath = path.join(dir, "key.pem");
@@ -48,7 +57,7 @@ export function createEphemeralTls(commonName = "abracadabra-lan"): EphemeralTls
         "1",
         "-nodes",
         "-subj",
-        `/CN=${commonName}`,
+        `/CN=${sanitizeCommonName(commonName)}`,
       ],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
