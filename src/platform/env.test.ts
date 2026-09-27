@@ -1,11 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   authSelectionReason,
   detectHeadlessSession,
+  keystoreFellBackFromKeytar,
   resolveAuthBackend,
   resolveKeystoreBackend,
+  setKeytarFallbackProbeForTests,
+  shouldFallBackFromKeytar,
   biometricsSkipped,
 } from "./env.js";
+
+beforeEach(() => setKeytarFallbackProbeForTests(() => false));
+afterEach(() => setKeytarFallbackProbeForTests(null));
 
 type SshKind = "none" | "SSH_CONNECTION" | "SSH_TTY";
 type DisplayKind = "none" | "DISPLAY" | "WAYLAND_DISPLAY";
@@ -237,5 +243,25 @@ describe("resolveAuthBackend other platforms", () => {
       "passphrase-file",
     );
     expect(resolveKeystoreBackend({}, "darwin")).toBe("macos-keychain");
+  });
+
+  it("falls back to passphrase-file on linux/win32 only when keytar isn't built", () => {
+    setKeytarFallbackProbeForTests(() => true);
+    expect(resolveKeystoreBackend({}, "linux")).toBe("passphrase-file");
+    expect(resolveKeystoreBackend({}, "win32")).toBe("passphrase-file");
+    expect(resolveKeystoreBackend({}, "darwin")).toBe("macos-keychain");
+    expect(resolveKeystoreBackend({ ABRA_KEYSTORE: "keytar" }, "linux")).toBe("keytar");
+    expect(keystoreFellBackFromKeytar({}, "linux")).toBe(true);
+    expect(keystoreFellBackFromKeytar({ ABRA_KEYSTORE: "passphrase-file" }, "linux")).toBe(false);
+    expect(resolveAuthBackend({ SSH_TTY: "/dev/pts/0" }, "linux")).toBe("passphrase");
+  });
+
+  it("never falls back away from an existing keyring-held vault", () => {
+    const s = (keytarLoadable: boolean, vaultExists: boolean, masterKeyFileExists: boolean) =>
+      shouldFallBackFromKeytar({ keytarLoadable, vaultExists, masterKeyFileExists });
+    expect(s(true, false, false)).toBe(false);
+    expect(s(false, false, false)).toBe(true);
+    expect(s(false, true, true)).toBe(true);
+    expect(s(false, true, false)).toBe(false);
   });
 });

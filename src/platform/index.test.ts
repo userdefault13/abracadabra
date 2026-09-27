@@ -6,6 +6,7 @@ import {
   resetPlatformForTests,
   biometricsSkipped,
   setProbePolkitForTests,
+  setKeytarFallbackProbeForTests,
   resolveAuthBackend,
 } from "./index.js";
 
@@ -15,12 +16,14 @@ describe("platform", () => {
 
   beforeEach(() => {
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(() => false);
   });
 
   afterEach(() => {
     process.env = { ...envBackup };
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(null);
     vi.restoreAllMocks();
   });
 
@@ -70,6 +73,17 @@ describe("platform", () => {
     process.env.ABRA_KEYSTORE = "nope";
     expect(() => createKeystore()).toThrow(/Unknown ABRA_KEYSTORE/);
   });
+
+  it("falls back to passphrase-file when keytar isn't built, and says so once", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    delete process.env.ABRA_KEYSTORE;
+    process.env.ABRA_DIR = "/nonexistent-abra-dir-for-test";
+    setKeytarFallbackProbeForTests(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(platformInfo().keystore).toBe("passphrase-file");
+    expect(createKeystore().id).toBe("passphrase-file");
+    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/keytar\) isn't built/));
+  });
 });
 
 describe("linux auth selection", () => {
@@ -82,12 +96,14 @@ describe("linux auth selection", () => {
     delete process.env.ABRA_SKIP_BIOMETRICS;
     delete process.env.ABRA_KEYSTORE;
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(() => false);
   });
 
   afterEach(() => {
     process.env = { ...envBackup };
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(null);
     vi.restoreAllMocks();
   });
 

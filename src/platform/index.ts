@@ -11,12 +11,15 @@ import {
   authSelectionReason,
   biometricsSkipped,
   detectHeadlessSession,
+  keystoreFellBackFromKeytar,
   resolveAuthBackend,
   resolveKeystoreBackend,
   UNSUPPORTED_PLATFORM_HINT,
   VALID_AUTH_BACKENDS,
   type HeadlessDetection,
 } from "./env.js";
+import { existsSync } from "node:fs";
+import { masterKeyFile } from "../core/paths.js";
 import { resetSessionForTests, isSessionUnlocked, lockSession } from "./session.js";
 import { isPassphraseVaultLocked } from "./keystore-passphrase.js";
 import { writeMasterKeyFile } from "./master-key-file.js";
@@ -31,8 +34,10 @@ export {
   authSelectionReason,
   biometricsSkipped,
   detectHeadlessSession,
+  keystoreFellBackFromKeytar,
   resolveAuthBackend,
   resolveKeystoreBackend,
+  setKeytarFallbackProbeForTests,
   VALID_AUTH_BACKENDS,
 } from "./env.js";
 export type { HeadlessDetection } from "./env.js";
@@ -63,6 +68,13 @@ export function createKeystore(): PlatformKeystore {
     case "keytar":
       return new KeytarKeystore();
     case "passphrase-file":
+      if (keystoreFellBackFromKeytar() && !existsSync(masterKeyFile())) {
+        process.stderr.write(
+          "abracadabra: OS keychain module (keytar) isn't built — newer npm skips install scripts. " +
+            "Using a passphrase-protected key file instead. For the OS keychain, reinstall before " +
+            "creating the vault with --allow-scripts=@userdefault/abracadabra,keytar\n",
+        );
+      }
       return new PassphraseFileKeystore();
     default:
       throw new Error(`Unknown ABRA_KEYSTORE="${backend}". ${UNSUPPORTED_PLATFORM_HINT}`);

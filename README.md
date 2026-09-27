@@ -72,6 +72,15 @@ npm install -g @userdefault/abracadabra
 abra project new myproj    # first run creates ~/.abracadabra/
 ```
 
+Newer npm skips install scripts and warns about `@userdefault/abracadabra` and `keytar`.
+That's safe to ignore: macOS builds the Touch ID helper on first use, and Linux/Windows
+fall back to a passphrase-protected key file when keytar's native module isn't built.
+To use the OS keychain on Linux/Windows, allow the scripts before creating the vault:
+
+```sh
+npm install -g @userdefault/abracadabra --allow-scripts=@userdefault/abracadabra,keytar
+```
+
 **From source:**
 
 ```sh
