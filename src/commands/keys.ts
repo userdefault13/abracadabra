@@ -19,7 +19,16 @@ function describeKey(k: ApiKey, vaultProjects: Set<string>): string {
   const unknown = (k.projects ?? []).filter((p) => !vaultProjects.has(p));
   const warn = unknown.length > 0 ? dim(` (unknown: ${unknown.join(",")})`) : "";
   const expiry = k.expiresAt ? ` · expires ${new Date(k.expiresAt).toLocaleDateString()}` : "";
-  return `${bold(k.prefix)}…  ${k.name} ${dim(`[${scope}${warn}]${expiry} · id ${k.id}`)}`;
+  const github = k.github
+    ? ` · github ${k.github.repositories.join(",")} (${Object.entries(k.github.permissions)
+        .map(([n, l]) => `${n}:${l}`)
+        .join(",")})`
+    : "";
+  return `${bold(k.prefix)}…  ${k.name} ${dim(`[${scope}${warn}]${expiry}${github} · id ${k.id}`)}`;
+}
+
+function findKey(all: ApiKey[], idOrPrefix: string): ApiKey | undefined {
+  return all.find((k) => k.id === idOrPrefix) ?? all.find((k) => k.prefix.startsWith(idOrPrefix));
 }
 
 export function registerKeyCommands(program: Command): void {
@@ -75,6 +84,42 @@ export function registerKeyCommands(program: Command): void {
         for (const k of all) {
           const expired = k.expiresAt && Date.now() > k.expiresAt;
           console.log(`${describeKey(k, projects)}${expired ? dim(" [EXPIRED]") : ""}`);
+        }
+      } catch (err) {
+        fail(err);
+      }
+    });
+
+  keys
+    .command("github <id>")
+    .description("Let an API key mint GitHub App tokens (POST /github/token) for these repos and permissions")
+    .option("--repos <repos>", "comma-separated repo names inside the App installation")
+    .option("--perms <perms>", "comma-separated name:read|write, e.g. contents:write,pull_requests:write")
+    .option("--clear", "remove the key's GitHub grant")
+    .action(async (idOrPrefix: string, opts: { repos?: string; perms?: string; clear?: boolean }) => {
+      try {
+        const { parseGrant } = await import("../core/github-app.js");
+        const grant = opts.clear
+          ? undefined
+          : opts.repos && opts.perms
+            ? parseGrant(opts.repos, opts.perms)
+            : fail("Pass --repos and --perms, or --clear");
+        await authenticate("abracadabra: change an API key's GitHub grant");
+        const vault = await loadVault();
+        const match = findKey(Object.values(vault.apiKeys ?? {}), idOrPrefix);
+        if (!match) fail(`No API key matching "${idOrPrefix}" (see: abra keys ls)`);
+        if (grant) match.github = grant;
+        else delete match.github;
+        await saveVault(vault);
+        console.log(
+          green(
+            grant
+              ? `✓ "${match.name}" may mint GitHub tokens for ${grant.repositories.join(",")}`
+              : `✓ Removed GitHub grant from "${match.name}"`,
+          ),
+        );
+        if (grant && !vault.connections?.github) {
+          console.error(dim("⚠ no GitHub App connected yet: abra connect github --pem <file> --app-id <id> --installation-id <id>"));
         }
       } catch (err) {
         fail(err);

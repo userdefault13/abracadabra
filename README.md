@@ -167,6 +167,7 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra serve [--port 7331] [--open] [--lan]` | Start the local biometric-gated API + web dash (`--lan` = TLS on all interfaces) |
 | `abra keys new <name> [-p projs] [--expires-in d]` | Issue an API key for `POST /secret` (printed once) |
 | `abra keys ls` / `keys rm <id>` | List (masked) / revoke API keys |
+| `abra keys github <id> --repos a,b --perms contents:write` | Let a key mint GitHub App tokens (`POST /github/token`) |
 | `abra usb list [--lan]` | List mounted volumes (and optional LAN peers) |
 | `abra usb backup [-v vol] [-f dir] [--project …]` | Write a passphrase-encrypted bundle to USB (full vault, or scoped project(s) with `--project`) |
 | `abra usb restore [target]` | Restore vault + master key from a full bundle; scoped bundles are merged instead |
@@ -254,6 +255,30 @@ Manage them from the dash too: **API Keys** panel in the sidebar.
 
 Other responses: `400` bad body · `404` unknown project/key · loopback-only.
 CORS is enabled for browser dapps; restrict it with `ABRA_API_ORIGIN=https://yourapp`.
+
+### GitHub tokens for agents (GitHub App)
+
+GitHub has no API for minting personal access tokens, but a GitHub App
+installation can mint tokens limited to some of its repos and permissions,
+valid for one hour. abra keeps the App's private key and mints per API key:
+
+```sh
+# App: repo permissions Contents + Pull requests (read & write), no webhook,
+# installed on only the repos agents may touch
+abra connect github --pem ~/Downloads/<app>.private-key.pem --app-id 123456 --installation-id 7890123
+abra keys github <key-id> --repos GotchiBot,AarcadeGh-t --perms contents:write,pull_requests:write
+```
+
+```sh
+curl -X POST http://127.0.0.1:7331/github/token -H "Authorization: Bearer abra_<id>_<secret>"
+# → {"token":"ghs_…","expires_at":"…","repositories":[…],"permissions":{…}}
+```
+
+The body may narrow the grant (`{"repositories":["GotchiBot"],"permissions":{"contents":"read"}}`);
+asking for anything outside it is a `403`, never a silent downgrade. Tokens are
+cached per key until five minutes before they expire. The App key is never issued
+into a project (`abra issue github` refuses). Use it as a git credential helper:
+`username=x-access-token`, `password=<token>`.
 
 ### Session grants (Touch ID once, then silent)
 

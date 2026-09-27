@@ -349,6 +349,47 @@ export const providers: Record<string, Provider> = {
       return vars;
     },
   },
+
+  github: {
+    id: "github",
+    label: "GitHub App (per-agent installation tokens)",
+    portalUrl: "https://github.com/settings/apps/new",
+    fields: [
+      { varName: "GITHUB_APP_ID", prompt: "App ID (App settings → General)", secret: false, required: true },
+      {
+        varName: "GITHUB_APP_INSTALLATION_ID",
+        prompt: "Installation ID (the number at the end of github.com/settings/installations/<id>)",
+        secret: false,
+        required: true,
+      },
+      {
+        varName: "GITHUB_APP_PRIVATE_KEY",
+        prompt: "Private key PEM — prefer: abra connect github --pem <file> --app-id <id> --installation-id <id>",
+        secret: true,
+        required: true,
+      },
+    ],
+    issueVars: () => {
+      // Copying the App key into a project would hand out every repo it can reach.
+      throw new Error("GitHub App keys are not issued to projects — grant an API key instead: abra keys github <id> --repos … --perms …");
+    },
+    importFromFile: async (raw) => {
+      const { verifyInstallation } = await import("../core/github-app.js");
+      const appId = String(raw.appId ?? raw.GITHUB_APP_ID ?? "").trim();
+      const installationId = String(raw.installationId ?? raw.GITHUB_APP_INSTALLATION_ID ?? "").trim();
+      const privateKey = String(raw.privateKey ?? raw.GITHUB_APP_PRIVATE_KEY ?? "").trim();
+      if (!/^\d+$/.test(appId)) throw new Error("App ID missing or not numeric (--app-id)");
+      if (!/^\d+$/.test(installationId)) throw new Error("Installation ID missing or not numeric (--installation-id)");
+      if (!privateKey.includes("PRIVATE KEY")) throw new Error("No PEM private key found (--pem <file>)");
+      const login = await verifyInstallation({ appId, installationId, privateKey });
+      console.error(`  verified — App ${appId} installed on ${login}`);
+      return {
+        GITHUB_APP_ID: { value: appId, secret: false },
+        GITHUB_APP_INSTALLATION_ID: { value: installationId, secret: false },
+        GITHUB_APP_PRIVATE_KEY: { value: `${privateKey}\n`, secret: true },
+      };
+    },
+  },
 };
 
 export function getProvider(id: string): Provider {
