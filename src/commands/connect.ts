@@ -111,6 +111,16 @@ export async function connect(providerId?: string, opts?: ConnectOptions): Promi
       return;
     }
 
+    if (provider.id === "github") {
+      console.log(
+        `${bold(provider.label)} needs the App's private key file (multi-line PEM, not pasteable):\n` +
+          `  abra connect github --pem <app>.private-key.pem --app-id <id> --installation-id <id>\n` +
+          dim("App ID: App settings page. Installation ID: end of github.com/settings/installations/<id>."),
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     if (vault.connections?.[provider.id]) {
       const answer = await prompt(
         `Already connected to ${provider.id}. Re-connect and overwrite? [y/N] `,
