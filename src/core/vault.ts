@@ -58,6 +58,17 @@ export interface ApiKey {
   projects: string[] | null;
   createdAt: number;
   expiresAt?: number;
+  /** GitHub App installation tokens this key may mint (POST /github/token); absent = none */
+  github?: GithubGrant;
+}
+
+export type GithubPermissionLevel = "read" | "write";
+
+export interface GithubGrant {
+  /** repo names inside the App installation (no owner prefix) */
+  repositories: string[];
+  /** e.g. { contents: "write", pull_requests: "write" } */
+  permissions: Record<string, GithubPermissionLevel>;
 }
 
 export interface Vault {

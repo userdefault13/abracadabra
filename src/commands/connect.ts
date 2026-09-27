@@ -24,7 +24,14 @@ export function listProviders(): void {
   console.log(dim("\nConnect: abra connect <provider>   Issue: abra issue <provider> <project>"));
 }
 
-export async function connect(providerId?: string, opts?: { json?: string }): Promise<void> {
+interface ConnectOptions {
+  json?: string;
+  pem?: string;
+  appId?: string;
+  installationId?: string;
+}
+
+export async function connect(providerId?: string, opts?: ConnectOptions): Promise<void> {
   if (!providerId) {
     listProviders();
     return;
@@ -34,14 +41,26 @@ export async function connect(providerId?: string, opts?: { json?: string }): Pr
     const vault = await loadVault();
 
     // ── non-interactive import from a downloaded key file ─────────────
-    if (opts?.json) {
+    const source = opts?.json ?? opts?.pem;
+    if (source) {
       const { readFileSync } = await import("node:fs");
       let raw: Record<string, string>;
-      try {
-        raw = JSON.parse(readFileSync(opts.json, "utf8"));
-      } catch {
-        fail(`Cannot read JSON file: ${opts.json}`);
+      if (opts?.pem) {
+        try {
+          raw = { privateKey: readFileSync(opts.pem, "utf8") };
+        } catch {
+          fail(`Cannot read PEM file: ${opts.pem}`);
+        }
+        if (!provider.importFromFile) fail(`Provider ${provider.id} does not support --pem`);
+      } else {
+        try {
+          raw = JSON.parse(readFileSync(source, "utf8"));
+        } catch {
+          fail(`Cannot read JSON file: ${source}`);
+        }
       }
+      if (opts?.appId) raw.appId = opts.appId;
+      if (opts?.installationId) raw.installationId = opts.installationId;
       let importedVars: Record<string, { value: string; secret: boolean; updatedAt: number }>;
 
       if (provider.importFromFile) {
@@ -74,15 +93,21 @@ export async function connect(providerId?: string, opts?: { json?: string }): Pr
         provider: provider.id,
         label: "imported",
         createdAt: Date.now(),
-        meta: { importedFrom: opts.json },
+        meta: { importedFrom: source },
         vars: importedVars,
       };
       await saveVault(vault);
-      console.log(green(`✓ Connected ${bold(provider.label)} from ${opts.json}`));
+      console.log(green(`✓ Connected ${bold(provider.label)} from ${source}`));
       for (const name of Object.keys(importedVars).sort()) {
         console.log(`  ${name}${importedVars[name].secret ? dim(" (secret)") : ""}`);
       }
-      console.log(dim(`Issue into a project with: abra issue ${provider.id} <project>`));
+      console.log(
+        dim(
+          provider.id === "github"
+            ? "Grant an API key with: abra keys github <id> --repos <a,b> --perms contents:write,pull_requests:write"
+            : `Issue into a project with: abra issue ${provider.id} <project>`,
+        ),
+      );
       return;
     }
 
@@ -210,6 +235,9 @@ export function registerConnectCommands(program: Command): void {
     .command("connect [provider]")
     .description(`Connect a third-party account (${Object.keys(providers).join(", ")}) — no arg lists providers`)
     .option("--json <path>", "import credentials from a downloaded key file (non-interactive)")
+    .option("--pem <path>", "github: import the App private key file (non-interactive)")
+    .option("--app-id <id>", "github: App ID")
+    .option("--installation-id <id>", "github: installation ID")
     .action(connect);
 
   program
