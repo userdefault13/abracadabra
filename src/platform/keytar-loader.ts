@@ -15,7 +15,8 @@ export async function loadKeytar() {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(
       `keytar native module unavailable (${detail}). ` +
-        "Install build tools and run: npm rebuild keytar. " +
+        "Newer npm skips install scripts: reinstall abracadabra with " +
+        "--allow-scripts=@userdefault/abracadabra,keytar (build tools needed if no prebuild). " +
         "Or set ABRA_KEYSTORE=passphrase-file — see docs/CROSS-PLATFORM.md",
     );
   }

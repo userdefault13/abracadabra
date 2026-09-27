@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { masterKeyFile, vaultFile } from "../core/paths.js";
+
 export type HeadlessDetection = {
   headless: boolean;
   reasons: string[];
@@ -60,14 +64,73 @@ export function headlessPassphrase(env: NodeJS.ProcessEnv = process.env): string
   return p || undefined;
 }
 
+let keytarLoadableCache: boolean | undefined;
+
+/** Whether keytar's native addon loads. Newer npm skips install scripts, leaving it unbuilt. */
+export function keytarLoadable(): boolean {
+  if (keytarLoadableCache === undefined) {
+    try {
+      createRequire(import.meta.url)("keytar");
+      keytarLoadableCache = true;
+    } catch {
+      keytarLoadableCache = false;
+    }
+  }
+  return keytarLoadableCache;
+}
+
+/**
+ * True → use passphrase-file instead of keytar. Only when keytar can't load AND
+ * the vault is new or already passphrase-wrapped: a vault whose key lives in the
+ * OS keyring must stay on keytar so the user gets the rebuild hint, not "not found".
+ */
+export function shouldFallBackFromKeytar(s: {
+  keytarLoadable: boolean;
+  vaultExists: boolean;
+  masterKeyFileExists: boolean;
+}): boolean {
+  if (s.keytarLoadable) return false;
+  return s.masterKeyFileExists || !s.vaultExists;
+}
+
+function defaultKeytarFallback(): boolean {
+  if (keytarLoadable()) return false;
+  return shouldFallBackFromKeytar({
+    keytarLoadable: false,
+    vaultExists: existsSync(vaultFile()),
+    masterKeyFileExists: existsSync(masterKeyFile()),
+  });
+}
+
+let keytarFallbackProbe: () => boolean = defaultKeytarFallback;
+
+/** Test hook — null restores the real probe. */
+export function setKeytarFallbackProbeForTests(fn: (() => boolean) | null): void {
+  keytarFallbackProbe = fn ?? defaultKeytarFallback;
+}
+
 export function resolveKeystoreBackend(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (env.ABRA_KEYSTORE) return env.ABRA_KEYSTORE;
   if (platform === "darwin") return "macos-keychain";
-  if (platform === "linux" || platform === "win32") return "keytar";
+  if (platform === "linux" || platform === "win32") {
+    return keytarFallbackProbe() ? "passphrase-file" : "keytar";
+  }
   return "passphrase-file";
+}
+
+/** Linux/Windows picked passphrase-file only because keytar's addon isn't built. */
+export function keystoreFellBackFromKeytar(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return (
+    !env.ABRA_KEYSTORE &&
+    (platform === "linux" || platform === "win32") &&
+    resolveKeystoreBackend(env, platform) === "passphrase-file"
+  );
 }
 
 /**

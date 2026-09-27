@@ -89,6 +89,11 @@ export interface PlatformKeystore {
 | Linux | [libsecret](https://wiki.gnome.org/Projects/Libsecret) via `secret-tool` or `keytar` | Passphrase-wrapped key file in `~/.abracadabra/master.key.enc` (unlock at `abra unlock`) |
 | Windows | Credential Manager via `keytar` or DPAPI | Same passphrase file fallback |
 
+Without `ABRA_KEYSTORE`, Linux/Windows pick `passphrase-file` automatically when keytar's
+native module won't load (newer npm skips install scripts) **and** the vault is new or
+already passphrase-wrapped. An existing vault whose key lives in the OS keyring stays on
+`keytar` and reports how to rebuild it — abra never silently switches away from it.
+
 ### Passphrase-file keystore (`ABRA_KEYSTORE=passphrase-file`)
 
 Used for headless/SSH Linux when no OS credential store is available.
