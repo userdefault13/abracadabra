@@ -4,6 +4,7 @@ import { NoTerminalError, isNoTerminalError, promptHidden } from "../core/prompt
 import { masterKeyFile, vaultFile } from "../core/paths.js";
 import { decryptVault } from "../core/vault.js";
 import { authenticate as platformAuthenticate } from "../platform/index.js";
+import { resolveAuthBackend } from "../platform/env.js";
 import { KeystoreError } from "../platform/types.js";
 import { KeytarKeystore } from "../platform/keystore-keytar.js";
 import {
@@ -17,6 +18,10 @@ const SUPPORTED_TARGETS = ["passphrase-file"] as const;
 const AUTH_REASON =
   "abracadabra: migrate vault master key from keytar to passphrase-file";
 
+/** Appended when PolKit denies migrate over a seatless SSH session. */
+export const MIGRATE_SSH_POLKIT_HINT =
+  "Over SSH (no local seat) PolKit cannot approve this. One-time path: ssh -t <host> 'ABRA_AUTH=password abra keystore migrate --to passphrase-file' — do not persist ABRA_AUTH=password in systemd units or shell rc.";
+
 export type MigrateSourceKeystore = {
   getMasterKey(): Promise<Buffer>;
   deleteMasterKey(): Promise<void>;
@@ -28,6 +33,8 @@ export type MigrateDeps = {
   /** Source keystore — defaults to `new KeytarKeystore()`. */
   sourceKeystore?: MigrateSourceKeystore;
   authenticate?: (reason: string) => Promise<void>;
+  /** Injectable auth backend id (defaults to resolveAuthBackend()). */
+  resolveAuthBackend?: () => string;
   promptHidden?: (question: string) => Promise<string>;
   /** Visible/hidden confirm on tty (defaults to promptHidden). */
   confirm?: (question: string) => Promise<string>;
@@ -58,8 +65,18 @@ function printNextSteps(log: (msg: string) => void): void {
   log("  abra doctor");
   log("  # master.key.enc now selects the passphrase-file keystore for the CLI and");
   log("  # abra-agent; ABRA_KEYSTORE is not needed.");
+  log("  # Explicit override (shell profile / abra-agent unit):");
+  log("  #   export ABRA_KEYSTORE=passphrase-file");
+  log("  #   Environment=ABRA_KEYSTORE=passphrase-file");
+  log("  # If ABRA_DIR is customized, set the same value in the unit and shell.");
   log("");
   log("Headless reveals will then prompt for this passphrase (use ssh -t).");
+}
+
+function isPolkitDenial(platform: NodeJS.Platform, authBackend: string, msg: string): boolean {
+  if (platform !== "linux") return false;
+  if (authBackend === "polkit") return true;
+  return /polkit|PolKit|pkcheck/i.test(msg);
 }
 
 /**
@@ -91,8 +108,17 @@ export async function cmdKeystoreMigrate(
 
   // Only keytar → passphrase-file is supported (implicit source).
   const source = deps.sourceKeystore ?? new KeytarKeystore();
+  const authBackendId = deps.resolveAuthBackend ?? (() => resolveAuthBackend());
 
-  await auth(AUTH_REASON);
+  try {
+    await auth(AUTH_REASON);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (isPolkitDenial(platform, authBackendId(), msg)) {
+      throw new Error(`${msg} ${MIGRATE_SSH_POLKIT_HINT}`);
+    }
+    throw e;
+  }
 
   let keytarKey: Buffer | undefined;
   let fileKey: Buffer | undefined;

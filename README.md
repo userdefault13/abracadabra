@@ -15,10 +15,10 @@ injects them invisibly into any command.
 | OS | Default keystore | Default auth | Notes |
 |----|------------------|--------------|-------|
 | macOS | Keychain | Touch ID | unchanged |
-| Linux | keytar (Secret Service) | password prompt | `libsecret-1-dev` for builds; fallback: `ABRA_KEYSTORE=passphrase-file` |
+| Linux | keytar (Secret Service) or auto-detect passphrase-file | PolKit (graphical) / passphrase (headless + passphrase-file) | Headless SSH: [docs/LINUX-HEADLESS.md](docs/LINUX-HEADLESS.md); `libsecret-1-dev` for keytar builds |
 | Windows | keytar (Credential Vault) | password prompt | fallback: `ABRA_KEYSTORE=passphrase-file` |
 
-> Design + task list: [docs/CROSS-PLATFORM.md](docs/CROSS-PLATFORM.md).
+> Design + task list: [docs/CROSS-PLATFORM.md](docs/CROSS-PLATFORM.md). Linux SSH / systemd --user: [docs/LINUX-HEADLESS.md](docs/LINUX-HEADLESS.md).
 
 ```sh
 npm install -g @userdefault/abracadabra   # compiles Touch ID helper on first install (Xcode CLT required)

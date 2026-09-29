@@ -1,11 +1,25 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
 import { masterKeyFile, vaultFile } from "../core/paths.js";
 
 export type HeadlessDetection = {
   headless: boolean;
   reasons: string[];
 };
+
+/**
+ * Resolve vault directory from an env map (hermetic for tests).
+ * ABRA_DIR (trimmed) → else HOME/.abracadabra → else os.homedir()/.abracadabra.
+ */
+export function resolveAbraDirFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const fromEnv = env.ABRA_DIR?.trim();
+  if (fromEnv) return fromEnv;
+  const home = env.HOME?.trim();
+  if (home) return path.join(home, ".abracadabra");
+  return path.join(os.homedir(), ".abracadabra");
+}
 
 /**
  * Detect whether this Linux session can show a graphical approval dialog.
@@ -131,6 +145,22 @@ export function resolveKeystoreBackend(
     return keytarFallbackProbe() || masterKeyFileProbe() ? "passphrase-file" : "keytar";
   }
   return "passphrase-file";
+}
+
+/**
+ * Human-readable why resolveKeystoreBackend picked its value (for doctor).
+ * Only the master.key.enc case starts with "auto-detected".
+ */
+export function keystoreSelectionReason(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (env.ABRA_KEYSTORE) return "explicit ABRA_KEYSTORE";
+  if (platform === "linux" || platform === "win32") {
+    if (masterKeyFileProbe()) return "auto-detected master.key.enc";
+    if (keytarFallbackProbe()) return "keytar addon not built";
+  }
+  return "platform default";
 }
 
 /** Linux/Windows picked passphrase-file only because keytar's addon isn't built. */

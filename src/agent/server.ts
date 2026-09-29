@@ -35,6 +35,7 @@ import { vaultFile } from "../core/paths.js";
 import { resolveKeystoreBackend } from "../platform/env.js";
 import {
   authorizePeer as defaultAuthorizePeer,
+  detectUserNamespace,
   type PeerAuthResult,
   type PeerCheckDeps,
 } from "./peer.js";
@@ -168,13 +169,13 @@ async function requireAbraCliPeer(
 ): Promise<AgentResponse | null> {
   const result = await authorize(socket);
   if (result.ok) return null;
-  // Log op + reason only — never full cmdline or env.
-  logOp(op, `forbidden_peer reason=${result.reason}`);
-  return fail(
-    id,
-    "forbidden_peer",
-    "Peer is not the abra CLI (client should fall back to direct keystore)",
-  );
+  // Log op + reason (+ static hint) only — never full cmdline or env.
+  const hintSuffix = result.hint ? ` — ${result.hint}` : "";
+  logOp(op, `forbidden_peer reason=${result.reason}${hintSuffix}`);
+  const clientMsg = result.hint
+    ? `Peer is not the abra CLI (client should fall back to direct keystore). ${result.hint}`
+    : "Peer is not the abra CLI (client should fall back to direct keystore)";
+  return fail(id, "forbidden_peer", clientMsg);
 }
 
 async function handleRequest(
@@ -597,6 +598,12 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     sleepWatch: sleep,
   };
   logOp("listen", socketPath);
+  if (process.platform === "linux" && detectUserNamespace()) {
+    logOp(
+      "warn",
+      "running inside a user namespace — peer PID checks will fail closed (forbidden_peer peer_pid_unresolved). Use packaging/linux/abra-agent.service hardening (no PrivateTmp/ProtectSystem/ProtectHome/PrivateUsers) — see docs/LINUX-HEADLESS.md",
+    );
+  }
   return { socketPath, state };
 }
 
