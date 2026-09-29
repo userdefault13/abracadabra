@@ -87,12 +87,32 @@ async function fetchNpmLatest(): Promise<ReleaseManifest | null> {
   return null;
 }
 
-export async function resolveLatestRelease(): Promise<{ manifest: ReleaseManifest; source: "cdn" | "npm" } | null> {
-  const cdn = await fetchCdnLatest();
-  if (cdn) return { manifest: cdn, source: "cdn" };
-  const npm = await fetchNpmLatest();
+type LatestRelease = { manifest: ReleaseManifest; source: "cdn" | "npm" };
+
+/**
+ * Newest installable release across the CDN manifest and npm. The CDN manifest
+ * can lag npm, and its .pkg only installs on macOS, so it never hides a newer
+ * npm release.
+ */
+export function pickLatestRelease(
+  cdn: ReleaseManifest | null,
+  npm: ReleaseManifest | null,
+  platform: NodeJS.Platform = process.platform,
+): LatestRelease | null {
+  const cdnUsable = cdn && (platform === "darwin" || !cdn.url?.endsWith(".pkg")) ? cdn : null;
+  if (cdnUsable && npm) {
+    return isNewerSemver(npm.version, cdnUsable.version)
+      ? { manifest: npm, source: "npm" }
+      : { manifest: cdnUsable, source: "cdn" };
+  }
+  if (cdnUsable) return { manifest: cdnUsable, source: "cdn" };
   if (npm) return { manifest: npm, source: "npm" };
   return null;
+}
+
+export async function resolveLatestRelease(): Promise<LatestRelease | null> {
+  const [cdn, npm] = await Promise.all([fetchCdnLatest(), fetchNpmLatest()]);
+  return pickLatestRelease(cdn, npm);
 }
 
 export type UpdateCheckResult = {
