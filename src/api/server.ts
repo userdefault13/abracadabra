@@ -67,6 +67,74 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+/**
+ * POST /github/token — mint a GitHub App installation token for an API key.
+ * API key only (no Touch ID path): the key's `github` grant is the authorization.
+ * Body (optional): { repositories?: string[], permissions?: { name: "read"|"write" } }
+ */
+async function githubToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!isLoopbackAddress(req.socket.remoteAddress ?? "") && !lanMode) {
+    send(res, 403, { error: "loopback connections only" });
+    return;
+  }
+  if (licenseEnforcementEnabled() && !(await isLicensed())) {
+    send(res, 403, { error: "license_required" });
+    return;
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    send(res, 401, { error: "API key required (Authorization: Bearer abra_…)" });
+    return;
+  }
+  let body: { repositories?: unknown; permissions?: unknown };
+  try {
+    const raw = await readBody(req);
+    body = raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    send(res, 400, { error: "invalid JSON body" });
+    return;
+  }
+
+  const vault = await loadVault();
+  const { findValidApiKey } = await import("../core/apikeys.js");
+  const record = findValidApiKey(vault, authHeader.slice(7).trim());
+  if (!record) {
+    send(res, 401, { error: "invalid or expired API key" });
+    return;
+  }
+  if (!record.github) {
+    send(res, 403, { error: `API key "${record.name}" has no GitHub grant (abra keys github ${record.id} …)` });
+    return;
+  }
+  const github = await import("../core/github-app.js");
+  const creds = github.appCredentialsFromVault(vault);
+  if (!creds) {
+    send(res, 503, { error: "GitHub App not connected (abra connect github --pem …)" });
+    return;
+  }
+  let scope;
+  try {
+    scope = github.resolveScope(record.github, body);
+  } catch (err) {
+    send(res, 403, { error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  try {
+    const minted = await github.mintInstallationToken(creds, scope, record.id);
+    console.log(
+      `✓ minted GitHub token for API key "${record.name}" (${record.id}): ${minted.repositories.join(",")} until ${minted.expiresAt}`,
+    );
+    send(res, 200, {
+      token: minted.token,
+      expires_at: minted.expiresAt,
+      repositories: minted.repositories,
+      permissions: minted.permissions,
+    });
+  } catch (err) {
+    send(res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 interface SecretRequest {
   project?: string;
   keys?: string[];
@@ -224,6 +292,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           console.log(`✓ revoked ${revoked} session grant(s)`);
           send(res, 200, { revoked });
           return;
+        }
+
+        if (method === "POST" && pathname === "/github/token") {
+          return await githubToken(req, res);
         }
 
         if (req.method === "POST" && req.url === "/secret") {

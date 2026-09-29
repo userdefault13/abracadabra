@@ -99,9 +99,11 @@ ssh -t <host> 'PATH=$HOME/.local/share/mise/shims:$PATH abra unlock'
 
 ## Keystore auto-detect
 
-On Linux, when `ABRA_KEYSTORE` is unset and `<ABRA_DIR>/master.key.enc` exists,
-both CLI and agent select `passphrase-file`. Explicit `ABRA_KEYSTORE` always
-wins. Darwin / Windows never auto-detect.
+On Linux and Windows, when `ABRA_KEYSTORE` is unset and `<ABRA_DIR>/master.key.enc`
+exists, both CLI and agent select `passphrase-file` (even when keytar loads).
+They also fall back to `passphrase-file` when keytar's native addon isn't built
+and the vault is new or already passphrase-wrapped. Explicit `ABRA_KEYSTORE`
+always wins. Darwin never auto-detects.
 
 If you set a custom `ABRA_DIR`, the **same** value must appear in the agent unit
 and your shell so keystore backends match (agent mismatch check).
@@ -134,10 +136,13 @@ ExecStartPre=/usr/bin/abra agent status --wait --timeout 600
 abra doctor
 ```
 
-Shows keystore + auth backends and selection reasons (including
-`auto-detected master.key.enc (linux)`), plus an **abra-agent socket** line
-(path + source + reason, or why the agent is disabled). When keystore was
-auto-detected and the agent is locked or not running, doctor also warns about
+Shows keystore + auth backends and selection reasons (`explicit ABRA_KEYSTORE`,
+`auto-detected master.key.enc`, `keytar addon not built`, or `platform default`),
+plus an **abra-agent socket** line (path + source + reason, or why the agent is
+disabled). For `passphrase-file`, the lock line reflects abra-agent: when the
+agent holds the key doctor reports `passphrase vault unlocked (abra-agent holds
+the key)`. When keystore was auto-detected from `master.key.enc` and the agent
+is locked or not running, doctor also warns about
 systemd units that may fail with `vault locked` on restart — see
 [Upgrading existing units](#upgrading-existing-units). Never prints secrets.
 

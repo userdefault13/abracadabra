@@ -112,7 +112,8 @@ describe("cmdKeystoreMigrate", () => {
 
     expect(source.deleteCalls).toBe(0);
     expect(allOutput()).toMatch(/Keytar copy kept/i);
-    expect(allOutput()).toMatch(/ABRA_KEYSTORE=passphrase-file/);
+    expect(allOutput()).toMatch(/restart abra-agent/);
+    expect(allOutput()).toMatch(/ABRA_KEYSTORE is not needed/);
     expect(allOutput()).not.toContain(key.toString("base64"));
     expect(allOutput()).not.toContain(key.toString("hex"));
     expect(allOutput()).not.toContain(PASS);

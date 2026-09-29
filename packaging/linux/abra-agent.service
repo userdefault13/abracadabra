@@ -39,8 +39,11 @@
 # If you customize ABRA_DIR, set the same value here and in your shell so the
 # agent and CLI share the vault / master.key.enc.
 #
-# Passphrase-file keystore: optional when ~/.abracadabra/master.key.enc exists
-# (Linux auto-detect). Uncomment to force the backend explicitly:
+# Passphrase-file keystore (headless / SSH): picked automatically, by the agent
+# and the CLI alike (Linux and Windows), once ~/.abracadabra/master.key.enc
+# exists. Unlock with `abra unlock` on a terminal — the CLI pushes the key via
+# unlock.key; the agent never prompts (Tailscale SSH form below). Uncomment
+# only to force the backend:
 # Environment=ABRA_KEYSTORE=passphrase-file
 #
 # Dependent units that need the vault unlocked can wait, e.g.:

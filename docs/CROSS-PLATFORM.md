@@ -89,6 +89,16 @@ export interface PlatformKeystore {
 | Linux | [libsecret](https://wiki.gnome.org/Projects/Libsecret) via `secret-tool` or `keytar` | Passphrase-wrapped key file in `~/.abracadabra/master.key.enc` (unlock at `abra unlock`) |
 | Windows | Credential Manager via `keytar` or DPAPI | Same passphrase file fallback |
 
+Without `ABRA_KEYSTORE`, Linux/Windows pick `passphrase-file` automatically when keytar's
+native module won't load (newer npm skips install scripts) **and** the vault is new or
+already passphrase-wrapped. An existing vault whose key lives in the OS keyring stays on
+`keytar` and reports how to rebuild it — abra never silently switches away from it.
+
+Once `~/.abracadabra/master.key.enc` exists (a passphrase vault, or after
+`abra keystore migrate --to passphrase-file`), the CLI **and abra-agent** pick
+`passphrase-file` even when keytar loads, so they always agree. `ABRA_KEYSTORE` is only
+needed to override that.
+
 ### Passphrase-file keystore (`ABRA_KEYSTORE=passphrase-file`)
 
 Used for headless/SSH Linux when no OS credential store is available.
@@ -105,7 +115,7 @@ Used for headless/SSH Linux when no OS credential store is available.
 
 Use when you need headless Linux (SSH / systemd) with `passphrase-file` + the
 `passphrase` approval backend, but the master key still lives in keytar (Secret
-Service / Credential Vault). On Linux, once `master.key.enc` exists it is
+Service / Credential Vault). On Linux and Windows, once `master.key.enc` exists it is
 **auto-detected** (no required `ABRA_KEYSTORE` export). Full SSH walkthrough:
 [LINUX-HEADLESS.md](./LINUX-HEADLESS.md).
 
@@ -123,7 +133,7 @@ abra keystore migrate --to passphrase-file
 
 - The master key bytes do **not** change — only the wrap moves into `master.key.enc` (v2). `vault.enc` is untouched.
 - **Keep-by-default:** without `--remove-old`, the keytar copy stays. While it exists, any same-user process with an unlocked keyring can still read the key. Remove later with `abra keystore migrate --to passphrase-file --remove-old` (types `delete` on `/dev/tty` after verify).
-- Then: `abra doctor` (optional explicit `export ABRA_KEYSTORE=passphrase-file` / unit `Environment=`). If `ABRA_DIR` is customized, set the same value in the agent unit and shell.
+- Then: `systemctl --user restart abra-agent` (Linux) so the agent picks up `master.key.enc`, `abra unlock`, and `abra doctor`. No `ABRA_KEYSTORE` needed: `master.key.enc` selects `passphrase-file` for the CLI and the agent (an explicit `export ABRA_KEYSTORE=passphrase-file` / unit `Environment=` still overrides). If `ABRA_DIR` is customized, set the same value in the agent unit and shell.
 
 macOS keychain → passphrase-file is not supported yet.
 
@@ -531,7 +541,7 @@ cp "$PKG/packaging/linux/abra-agent.service" ~/.config/systemd/user/
 # Edit ExecStart to absolute node + absolute …/dist/agent/server.js
 # (same node realpath + same package install as `abra` — peer check)
 # Passphrase-file: optional Environment=ABRA_KEYSTORE=passphrase-file when
-# master.key.enc exists (Linux auto-detect). Match ABRA_DIR if customized.
+# master.key.enc exists (auto-detected). Match ABRA_DIR if customized.
 # Do not rely on mise/nvm PATH in the user manager.
 systemctl --user daemon-reload
 systemctl --user enable --now abra-agent

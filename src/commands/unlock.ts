@@ -10,6 +10,7 @@ import { verifyVaultPassphrase } from "../platform/keystore-passphrase.js";
 import { unlockSession } from "../platform/session.js";
 import {
   shouldTryAgent,
+  agentStatus,
   agentUnlockKey,
   AgentClientError,
   resolveAgentSocketPath,
@@ -113,19 +114,47 @@ export function cmdLock(): void {
   console.log("✓ Vault session locked");
 }
 
+export type UnlockState = "not-applicable" | "session" | "agent" | "locked";
+
+/**
+ * Whether vault I/O can proceed without a prompt: this process holds the key,
+ * or abra-agent does. A fresh process (systemd ExecStartPre) never has its own
+ * session, so the agent is what counts there.
+ */
+export async function resolveUnlockState(
+  deps: {
+    info?: () => { keystore: string; vaultLocked: boolean };
+    tryAgent?: () => boolean;
+    status?: () => Promise<{ locked: boolean }>;
+  } = {},
+): Promise<{ state: UnlockState; keystore: string }> {
+  const info = (deps.info ?? platformInfo)();
+  if (info.keystore !== "passphrase-file") return { state: "not-applicable", keystore: info.keystore };
+  if (!info.vaultLocked) return { state: "session", keystore: info.keystore };
+  if ((deps.tryAgent ?? shouldTryAgent)()) {
+    try {
+      const st = await (deps.status ?? agentStatus)();
+      if (!st.locked) return { state: "agent", keystore: info.keystore };
+    } catch {
+      /* agent down → locked */
+    }
+  }
+  return { state: "locked", keystore: info.keystore };
+}
+
 export async function cmdUnlockStatus(): Promise<void> {
-  const info = platformInfo();
-  if (info.keystore !== "passphrase-file") {
+  const { state, keystore } = await resolveUnlockState();
+  if (state === "not-applicable") {
     console.log(
-      `unlock: not applicable (keystore=${info.keystore}). ` +
+      `unlock: not applicable (keystore=${keystore}). ` +
         `If you migrated to passphrase-file, master.key.enc was not found in ${abraDir()}; ` +
         `set ABRA_DIR or ABRA_KEYSTORE=passphrase-file.`,
     );
     return;
   }
-  if (info.vaultLocked) {
+  if (state === "locked") {
     console.log("unlock: locked — run: abra unlock");
     process.exit(1);
   }
-  console.log("unlock: session active");
+  console.log(state === "agent" ? "unlock: abra-agent holds the key" : "unlock: session active");
 }

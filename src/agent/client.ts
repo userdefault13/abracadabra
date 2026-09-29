@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import {
   isAgentEnabled,
   resolveAgentSocketPath,
+  type AgentPathDeps,
 } from "./paths.js";
 import {
   MAX_FRAME_BYTES,
@@ -383,10 +384,10 @@ export async function saveVaultViaAgent(
 }
 
 /** True when abra vault I/O should attempt the agent first. */
-export function shouldTryAgent(): boolean {
-  if (!isAgentEnabled()) return false;
+export function shouldTryAgent(deps?: AgentPathDeps): boolean {
+  if (!isAgentEnabled(deps)) return false;
   try {
-    resolveAgentSocketPath();
+    resolveAgentSocketPath(deps);
     return true;
   } catch {
     return false;

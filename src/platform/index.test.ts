@@ -9,6 +9,8 @@ import {
   resetPlatformForTests,
   biometricsSkipped,
   setProbePolkitForTests,
+  setKeytarFallbackProbeForTests,
+  setMasterKeyFileProbeForTests,
   resolveAuthBackend,
   maybeWarnKeystoreAutoDetect,
 } from "./index.js";
@@ -19,12 +21,16 @@ describe("platform", () => {
 
   beforeEach(() => {
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(() => false);
+    setMasterKeyFileProbeForTests(() => false);
   });
 
   afterEach(() => {
     process.env = { ...envBackup };
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(null);
+    setMasterKeyFileProbeForTests(null);
     vi.restoreAllMocks();
   });
 
@@ -74,6 +80,17 @@ describe("platform", () => {
     process.env.ABRA_KEYSTORE = "nope";
     expect(() => createKeystore()).toThrow(/Unknown ABRA_KEYSTORE/);
   });
+
+  it("falls back to passphrase-file when keytar isn't built, and says so once", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    delete process.env.ABRA_KEYSTORE;
+    process.env.ABRA_DIR = "/nonexistent-abra-dir-for-test";
+    setKeytarFallbackProbeForTests(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(platformInfo().keystore).toBe("passphrase-file");
+    expect(createKeystore().id).toBe("passphrase-file");
+    expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/keytar\) isn't built/));
+  });
 });
 
 describe("linux auth selection", () => {
@@ -90,12 +107,14 @@ describe("linux auth selection", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "abra-plat-"));
     process.env.ABRA_DIR = tmpDir;
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(() => false);
   });
 
   afterEach(() => {
     process.env = { ...envBackup };
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(null);
     vi.restoreAllMocks();
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -183,7 +202,7 @@ describe("maybeWarnKeystoreAutoDetect", () => {
       platform: "linux" as const,
       isTTY: false,
       abraDir: () => "/tmp/abra-ad",
-      selectionReason: () => "auto-detected master.key.enc (linux)",
+      selectionReason: () => "auto-detected master.key.enc",
       stderrWrite: (c: string) => {
         chunks.push(c);
       },
@@ -202,7 +221,7 @@ describe("maybeWarnKeystoreAutoDetect", () => {
       env: {},
       platform: "linux",
       isTTY: true,
-      selectionReason: () => "auto-detected master.key.enc (linux)",
+      selectionReason: () => "auto-detected master.key.enc",
       stderrWrite: write,
     });
     expect(write).not.toHaveBeenCalled();
@@ -212,7 +231,7 @@ describe("maybeWarnKeystoreAutoDetect", () => {
       env: { ABRA_QUIET: "1" },
       platform: "linux",
       isTTY: false,
-      selectionReason: () => "auto-detected master.key.enc (linux)",
+      selectionReason: () => "auto-detected master.key.enc",
       stderrWrite: write,
     });
     expect(write).not.toHaveBeenCalled();
@@ -232,7 +251,7 @@ describe("maybeWarnKeystoreAutoDetect", () => {
       env: {},
       platform: "darwin",
       isTTY: false,
-      selectionReason: () => "auto-detected master.key.enc (linux)",
+      selectionReason: () => "auto-detected master.key.enc",
       stderrWrite: write,
     });
     expect(write).not.toHaveBeenCalled();

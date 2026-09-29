@@ -1,6 +1,6 @@
 {
   "name": "@userdefault/abracadabra",
-  "version": "1.0.3",
+  "version": "1.0.6",
   "description": "Terminal vault for env vars & passwords with biometric-gated local API",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
@@ -50,9 +50,11 @@
     "bonjour-service": "^1.4.4",
     "commander": "^12.1.0",
     "ink": "^7.1.1",
-    "keytar": "^7.9.0",
     "react": "^19.2.8",
     "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "keytar": "^7.9.0"
   },
   "devDependencies": {
     "@types/bonjour": "^3.5.13",

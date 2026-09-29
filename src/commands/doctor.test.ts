@@ -3,7 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cmdDoctor } from "./doctor.js";
-import { resetPlatformForTests, platformInfo } from "../platform/index.js";
+import {
+  resetPlatformForTests,
+  platformInfo,
+  setKeytarFallbackProbeForTests,
+  setMasterKeyFileProbeForTests,
+} from "../platform/index.js";
 
 type PlatformInfo = ReturnType<typeof platformInfo>;
 
@@ -13,7 +18,7 @@ function baseInfo(overrides: Partial<PlatformInfo> = {}): PlatformInfo {
     keystore: "passphrase-file",
     auth: "passphrase",
     authSelectionReason: "platform default",
-    keystoreSelectionReason: "auto-detected master.key.enc (linux)",
+    keystoreSelectionReason: "auto-detected master.key.enc",
     biometricsSkipped: false,
     vaultLocked: true,
     headless: { headless: true, reasons: ["SSH_CONNECTION set"] },
@@ -45,12 +50,16 @@ describe("cmdDoctor headless / passphrase", () => {
     delete process.env.XDG_SESSION_TYPE;
     process.env.SSH_CONNECTION = "10.0.0.1 22 10.0.0.2 22";
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(() => false);
+    setMasterKeyFileProbeForTests(() => false);
   });
 
   afterEach(() => {
     process.env = { ...envBackup };
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
+    setKeytarFallbackProbeForTests(null);
+    setMasterKeyFileProbeForTests(null);
     vi.restoreAllMocks();
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -69,7 +78,7 @@ describe("cmdDoctor headless / passphrase", () => {
   it("passphrase auth prints ok line about terminal prompts", async () => {
     process.env.ABRA_AUTH = "passphrase";
     process.env.ABRA_KEYSTORE = "passphrase-file";
-    await cmdDoctor();
+    await cmdDoctor({ agentEnabled: () => false });
     expect(
       lines.some(
         (l) =>
@@ -227,6 +236,96 @@ describe("cmdDoctor auto-detect keystore + agent risk", () => {
       resolveSocketPath: () => "/run/user/1000/abra/agent.sock",
     });
     expect(hasAutoDetectWarning()).toBe(false);
+  });
+
+  function hasLockedWarning(): boolean {
+    return lines.some((l) => l.startsWith("warn") && l.includes("passphrase vault locked"));
+  }
+
+  const runUserDeps = {
+    resolveRuntimeBase: () => ({
+      dir: "/run/user/1000",
+      source: "run-user-fallback" as const,
+      reason: "XDG_RUNTIME_DIR unset",
+    }),
+    resolveSocketPath: () => "/run/user/1000/abra/agent.sock",
+  };
+
+  it("agent unlocked + in-process locked → ok from agent, no locked or auto-detect warning", async () => {
+    await cmdDoctor({
+      ...runUserDeps,
+      platformInfo: () => baseInfo({ vaultLocked: true }),
+      probeAgentStatus: async () => "unlocked",
+      agentEnabled: () => true,
+    });
+    expect(
+      lines.some(
+        (l) =>
+          l.startsWith("ok") &&
+          l.includes("passphrase vault unlocked (abra-agent holds the key)"),
+      ),
+    ).toBe(true);
+    expect(hasLockedWarning()).toBe(false);
+    expect(hasAutoDetectWarning()).toBe(false);
+  });
+
+  it("agent locked + no session → locked warning", async () => {
+    await cmdDoctor({
+      ...runUserDeps,
+      platformInfo: () => baseInfo({ vaultLocked: true }),
+      probeAgentStatus: async () => "locked",
+      agentEnabled: () => true,
+    });
+    expect(hasLockedWarning()).toBe(true);
+    expect(lines.some((l) => l.includes("abra-agent holds the key"))).toBe(false);
+  });
+
+  it("agent not running + in-process locked → locked warning", async () => {
+    await cmdDoctor({
+      ...runUserDeps,
+      platformInfo: () => baseInfo({ vaultLocked: true }),
+      probeAgentStatus: async () => "not_running",
+      agentEnabled: () => true,
+    });
+    expect(hasLockedWarning()).toBe(true);
+    expect(hasAutoDetectWarning()).toBe(true);
+  });
+
+  it("agent disabled + in-process unlocked → ok session, no probe", async () => {
+    const probe = vi.fn(async () => "unlocked" as const);
+    await cmdDoctor({
+      platformInfo: () => baseInfo({ vaultLocked: false }),
+      probeAgentStatus: probe,
+      agentEnabled: () => false,
+      resolveRuntimeBase: () => ({ dir: null, source: "none", reason: "missing" }),
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(
+      lines.some((l) => l.startsWith("ok") && l.includes("passphrase vault session unlocked")),
+    ).toBe(true);
+    expect(hasLockedWarning()).toBe(false);
+  });
+
+  it("agent disabled + in-process locked → locked warning and auto-detect warning", async () => {
+    await cmdDoctor({
+      platformInfo: () => baseInfo({ vaultLocked: true }),
+      probeAgentStatus: async () => "unlocked",
+      agentEnabled: () => false,
+      resolveRuntimeBase: () => ({ dir: null, source: "none", reason: "missing" }),
+    });
+    expect(hasLockedWarning()).toBe(true);
+    expect(hasAutoDetectWarning()).toBe(true);
+  });
+
+  it("keytar-not-built fallback + agent locked → no auto-detect warning", async () => {
+    await cmdDoctor({
+      ...runUserDeps,
+      platformInfo: () => baseInfo({ keystoreSelectionReason: "keytar addon not built" }),
+      probeAgentStatus: async () => "locked",
+      agentEnabled: () => true,
+    });
+    expect(hasAutoDetectWarning()).toBe(false);
+    expect(hasLockedWarning()).toBe(true);
   });
 
   it("non-linux → no auto-detect warning", async () => {

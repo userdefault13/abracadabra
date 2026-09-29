@@ -1,15 +1,12 @@
-import fs from "node:fs";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { masterKeyFile, vaultFile } from "../core/paths.js";
 
 export type HeadlessDetection = {
   headless: boolean;
   reasons: string[];
-};
-
-export type KeystoreResolveOpts = {
-  /** Injectable for hermetic tests (defaults to fs.existsSync). */
-  existsSync?: (path: string) => boolean;
 };
 
 /**
@@ -81,43 +78,101 @@ export function headlessPassphrase(env: NodeJS.ProcessEnv = process.env): string
   return p || undefined;
 }
 
+let keytarLoadableCache: boolean | undefined;
+
+/** Whether keytar's native addon loads. Newer npm skips install scripts, leaving it unbuilt. */
+export function keytarLoadable(): boolean {
+  if (keytarLoadableCache === undefined) {
+    try {
+      createRequire(import.meta.url)("keytar");
+      keytarLoadableCache = true;
+    } catch {
+      keytarLoadableCache = false;
+    }
+  }
+  return keytarLoadableCache;
+}
+
 /**
- * Keystore backend selection.
- *
- * Explicit ABRA_KEYSTORE always wins. On Linux only, when unset, auto-detect
- * passphrase-file if `<ABRA_DIR>/master.key.enc` exists (headless SSH case).
- * Darwin / win32 never auto-detect — Keychain / keytar users must not silently
- * switch when a leftover master.key.enc is present.
+ * True → use passphrase-file instead of keytar. Only when keytar can't load AND
+ * the vault is new or already passphrase-wrapped: a vault whose key lives in the
+ * OS keyring must stay on keytar so the user gets the rebuild hint, not "not found".
+ */
+export function shouldFallBackFromKeytar(s: {
+  keytarLoadable: boolean;
+  vaultExists: boolean;
+  masterKeyFileExists: boolean;
+}): boolean {
+  if (s.keytarLoadable) return false;
+  return s.masterKeyFileExists || !s.vaultExists;
+}
+
+function defaultKeytarFallback(): boolean {
+  if (keytarLoadable()) return false;
+  return shouldFallBackFromKeytar({
+    keytarLoadable: false,
+    vaultExists: existsSync(vaultFile()),
+    masterKeyFileExists: existsSync(masterKeyFile()),
+  });
+}
+
+let keytarFallbackProbe: () => boolean = defaultKeytarFallback;
+
+/** Test hook — null restores the real probe. */
+export function setKeytarFallbackProbeForTests(fn: (() => boolean) | null): void {
+  keytarFallbackProbe = fn ?? defaultKeytarFallback;
+}
+
+let masterKeyFileProbe: () => boolean = () => existsSync(masterKeyFile());
+
+/** Test hook — null restores the real probe. */
+export function setMasterKeyFileProbeForTests(fn: (() => boolean) | null): void {
+  masterKeyFileProbe = fn ?? (() => existsSync(masterKeyFile()));
+}
+
+/**
+ * Linux/Windows: master.key.enc means the vault is passphrase-wrapped (new install
+ * fallback or `abra keystore migrate`), so the CLI and abra-agent both pick
+ * passphrase-file without ABRA_KEYSTORE — even when keytar loads.
  */
 export function resolveKeystoreBackend(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_KEYSTORE) return env.ABRA_KEYSTORE;
-  if (platform === "linux") {
-    const exists = opts.existsSync ?? ((p: string) => fs.existsSync(p));
-    const enc = path.join(resolveAbraDirFromEnv(env), "master.key.enc");
-    if (exists(enc)) return "passphrase-file";
-  }
   if (platform === "darwin") return "macos-keychain";
-  if (platform === "linux" || platform === "win32") return "keytar";
+  if (platform === "linux" || platform === "win32") {
+    return keytarFallbackProbe() || masterKeyFileProbe() ? "passphrase-file" : "keytar";
+  }
   return "passphrase-file";
 }
 
-/** Human-readable why resolveKeystoreBackend picked its value (for doctor). */
+/**
+ * Human-readable why resolveKeystoreBackend picked its value (for doctor).
+ * Only the master.key.enc case starts with "auto-detected".
+ */
 export function keystoreSelectionReason(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_KEYSTORE) return "explicit ABRA_KEYSTORE";
-  if (platform === "linux") {
-    const exists = opts.existsSync ?? ((p: string) => fs.existsSync(p));
-    const enc = path.join(resolveAbraDirFromEnv(env), "master.key.enc");
-    if (exists(enc)) return "auto-detected master.key.enc (linux)";
+  if (platform === "linux" || platform === "win32") {
+    if (masterKeyFileProbe()) return "auto-detected master.key.enc";
+    if (keytarFallbackProbe()) return "keytar addon not built";
   }
   return "platform default";
+}
+
+/** Linux/Windows picked passphrase-file only because keytar's addon isn't built. */
+export function keystoreFellBackFromKeytar(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return (
+    !env.ABRA_KEYSTORE &&
+    (platform === "linux" || platform === "win32") &&
+    keytarFallbackProbe()
+  );
 }
 
 /**
@@ -130,14 +185,13 @@ export function keystoreSelectionReason(
 export function resolveAuthBackend(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_AUTH) return env.ABRA_AUTH;
   if (biometricsSkipped(env)) return "none";
   if (platform === "darwin") return "macos-touchid";
   if (platform === "linux") {
     const { headless } = detectHeadlessSession(env, platform);
-    const keystore = resolveKeystoreBackend(env, platform, opts);
+    const keystore = resolveKeystoreBackend(env, platform);
     if (headless && keystore === "passphrase-file") return "passphrase";
     // Headless + keytar (or other): still "polkit" — PolkitAuth denies with a
     // headless hint (no dialog). Never auto-select "password" on Linux.
@@ -152,14 +206,13 @@ export function resolveAuthBackend(
 export function authSelectionReason(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  opts: KeystoreResolveOpts = {},
 ): string {
   if (env.ABRA_AUTH) return "explicit ABRA_AUTH";
   if (biometricsSkipped(env)) return "ABRA_SKIP_BIOMETRICS / ABRA_AUTH=none";
   if (platform === "darwin") return "darwin default (macos-touchid)";
   if (platform === "linux") {
     const { headless } = detectHeadlessSession(env, platform);
-    const keystore = resolveKeystoreBackend(env, platform, opts);
+    const keystore = resolveKeystoreBackend(env, platform);
     if (headless && keystore === "passphrase-file") return "headless + passphrase-file";
     if (headless) return "headless + keytar → polkit denies";
     return "graphical session";

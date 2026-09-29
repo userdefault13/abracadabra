@@ -86,27 +86,51 @@ function defaultProbeAgent(deps: DoctorDeps): () => Promise<AgentStatusState> {
   };
 }
 
+/** `disabled`: agent use is off (ABRA_AGENT=0, win32, or no runtime dir). */
+export type DoctorAgentState = AgentStatusState | "disabled";
+
+/** Same gate as unlock-status: isAgentEnabled, then a one-shot status probe. */
+async function resolveDoctorAgentState(deps: DoctorDeps): Promise<DoctorAgentState> {
+  const enabled = deps.agentEnabled?.() ?? isAgentEnabled(deps.pathDeps);
+  if (!enabled) return "disabled";
+  const probe = deps.probeAgentStatus ?? defaultProbeAgent(deps);
+  try {
+    return await probe();
+  } catch {
+    return "not_running";
+  }
+}
+
+/**
+ * The in-process session is only one holder of the key; a fresh doctor process
+ * never has one, so abra-agent is authoritative when it is reachable.
+ */
+function reportPassphraseLock(vaultLocked: boolean, agent: DoctorAgentState): void {
+  if (agent === "unlocked") {
+    ok("passphrase vault unlocked (abra-agent holds the key)");
+    return;
+  }
+  if (!vaultLocked) {
+    ok("passphrase vault session unlocked");
+    return;
+  }
+  const suffix = agent === "locked" ? " (abra-agent is running but locked)" : "";
+  warn(`passphrase vault locked${suffix} — run: abra unlock`);
+}
+
 /**
  * Warn when Linux auto-detected passphrase-file and the agent is locked / down:
  * systemd units that call `abra run` may fail with "vault locked" (no TTY) on restart.
  */
-async function warnAutoDetectAgentRisk(
+function warnAutoDetectAgentRisk(
   info: ReturnType<typeof platformInfo>,
-  deps: DoctorDeps,
-): Promise<void> {
+  agent: DoctorAgentState,
+): void {
   if (info.platform !== "linux") return;
   if (!info.keystoreSelectionReason.startsWith("auto-detected")) return;
+  if (agent === "unlocked") return;
 
-  const probe = deps.probeAgentStatus ?? defaultProbeAgent(deps);
-  let state: AgentStatusState;
-  try {
-    state = await probe();
-  } catch {
-    state = "not_running";
-  }
-  if (state === "unlocked") return;
-
-  const agentLabel = state === "locked" ? "locked" : "not running";
+  const agentLabel = agent === "locked" ? "locked" : "not running";
   warn(
     `⚠ keystore auto-detected as passphrase-file (master.key.enc present, ABRA_KEYSTORE unset). ` +
       `abra-agent is ${agentLabel}: systemd units that run abra and restart now will fail with ` +
@@ -148,7 +172,9 @@ export async function cmdDoctor(deps: DoctorDeps = {}): Promise<void> {
   }
 
   reportAgentSocket(deps);
-  await warnAutoDetectAgentRisk(info, deps);
+  const agent: DoctorAgentState =
+    info.keystore === "passphrase-file" ? await resolveDoctorAgentState(deps) : "disabled";
+  warnAutoDetectAgentRisk(info, agent);
 
   const vault = vaultFile();
   if (existsSync(vault)) {
@@ -158,11 +184,7 @@ export async function cmdDoctor(deps: DoctorDeps = {}): Promise<void> {
   }
 
   if (info.keystore === "passphrase-file") {
-    if (info.vaultLocked) {
-      warn("passphrase vault locked — run: abra unlock");
-    } else {
-      ok("passphrase vault session unlocked");
-    }
+    reportPassphraseLock(info.vaultLocked, agent);
   }
 
   const health = await platformHealth();
