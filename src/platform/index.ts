@@ -38,6 +38,7 @@ export {
   resolveAuthBackend,
   resolveKeystoreBackend,
   setKeytarFallbackProbeForTests,
+  setMasterKeyFileProbeForTests,
   VALID_AUTH_BACKENDS,
 } from "./env.js";
 export type { HeadlessDetection } from "./env.js";

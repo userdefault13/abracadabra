@@ -109,6 +109,18 @@ export function setKeytarFallbackProbeForTests(fn: (() => boolean) | null): void
   keytarFallbackProbe = fn ?? defaultKeytarFallback;
 }
 
+let masterKeyFileProbe: () => boolean = () => existsSync(masterKeyFile());
+
+/** Test hook — null restores the real probe. */
+export function setMasterKeyFileProbeForTests(fn: (() => boolean) | null): void {
+  masterKeyFileProbe = fn ?? (() => existsSync(masterKeyFile()));
+}
+
+/**
+ * Linux/Windows: master.key.enc means the vault is passphrase-wrapped (new install
+ * fallback or `abra keystore migrate`), so the CLI and abra-agent both pick
+ * passphrase-file without ABRA_KEYSTORE — even when keytar loads.
+ */
 export function resolveKeystoreBackend(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -116,7 +128,7 @@ export function resolveKeystoreBackend(
   if (env.ABRA_KEYSTORE) return env.ABRA_KEYSTORE;
   if (platform === "darwin") return "macos-keychain";
   if (platform === "linux" || platform === "win32") {
-    return keytarFallbackProbe() ? "passphrase-file" : "keytar";
+    return keytarFallbackProbe() || masterKeyFileProbe() ? "passphrase-file" : "keytar";
   }
   return "passphrase-file";
 }
@@ -129,7 +141,7 @@ export function keystoreFellBackFromKeytar(
   return (
     !env.ABRA_KEYSTORE &&
     (platform === "linux" || platform === "win32") &&
-    resolveKeystoreBackend(env, platform) === "passphrase-file"
+    keytarFallbackProbe()
   );
 }
 
