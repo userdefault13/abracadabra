@@ -20,9 +20,10 @@
 # Env: ABRA_AGENT_IDLE_SECONDS (default 900). ABRA_AGENT_MAX_AGE_SECONDS (default
 # 28800 = 8h, clamped). ABRA_AGENT=0 disables client use.
 #
-# Passphrase-file keystore (headless / SSH): uncomment so the agent matches the
-# CLI. Unlock with `abra unlock` on a terminal — the CLI pushes the key via
-# unlock.key; the agent never prompts.
+# Passphrase-file keystore (headless / SSH): picked automatically, by the agent
+# and the CLI alike, once ~/.abracadabra/master.key.enc exists. Unlock with
+# `abra unlock` on a terminal — the CLI pushes the key via unlock.key; the agent
+# never prompts. Uncomment only to force the backend:
 # Environment=ABRA_KEYSTORE=passphrase-file
 #
 # Sleep lock: agent spawns /usr/bin/gdbus (or /usr/bin/dbus-monitor) to watch

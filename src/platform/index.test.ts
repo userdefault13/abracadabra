@@ -7,6 +7,7 @@ import {
   biometricsSkipped,
   setProbePolkitForTests,
   setKeytarFallbackProbeForTests,
+  setMasterKeyFileProbeForTests,
   resolveAuthBackend,
 } from "./index.js";
 
@@ -17,6 +18,7 @@ describe("platform", () => {
   beforeEach(() => {
     resetPlatformForTests();
     setKeytarFallbackProbeForTests(() => false);
+    setMasterKeyFileProbeForTests(() => false);
   });
 
   afterEach(() => {
@@ -24,6 +26,7 @@ describe("platform", () => {
     Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     resetPlatformForTests();
     setKeytarFallbackProbeForTests(null);
+    setMasterKeyFileProbeForTests(null);
     vi.restoreAllMocks();
   });
 

@@ -53,10 +53,11 @@ function formatKeystoreError(err: KeystoreError): Error {
 function printNextSteps(log: (msg: string) => void): void {
   log("");
   log("Next steps:");
-  log("  export ABRA_KEYSTORE=passphrase-file");
-  log("  # also add to your shell profile, and for abra-agent systemd:");
-  log("  # Environment=ABRA_KEYSTORE=passphrase-file");
+  log("  systemctl --user restart abra-agent   # Linux, if the agent runs");
+  log("  abra unlock");
   log("  abra doctor");
+  log("  # master.key.enc now selects the passphrase-file keystore for the CLI and");
+  log("  # abra-agent; ABRA_KEYSTORE is not needed.");
   log("");
   log("Headless reveals will then prompt for this passphrase (use ssh -t).");
 }

@@ -6,12 +6,19 @@ import {
   resolveAuthBackend,
   resolveKeystoreBackend,
   setKeytarFallbackProbeForTests,
+  setMasterKeyFileProbeForTests,
   shouldFallBackFromKeytar,
   biometricsSkipped,
 } from "./env.js";
 
-beforeEach(() => setKeytarFallbackProbeForTests(() => false));
-afterEach(() => setKeytarFallbackProbeForTests(null));
+beforeEach(() => {
+  setKeytarFallbackProbeForTests(() => false);
+  setMasterKeyFileProbeForTests(() => false);
+});
+afterEach(() => {
+  setKeytarFallbackProbeForTests(null);
+  setMasterKeyFileProbeForTests(null);
+});
 
 type SshKind = "none" | "SSH_CONNECTION" | "SSH_TTY";
 type DisplayKind = "none" | "DISPLAY" | "WAYLAND_DISPLAY";
@@ -254,6 +261,15 @@ describe("resolveAuthBackend other platforms", () => {
     expect(keystoreFellBackFromKeytar({}, "linux")).toBe(true);
     expect(keystoreFellBackFromKeytar({ ABRA_KEYSTORE: "passphrase-file" }, "linux")).toBe(false);
     expect(resolveAuthBackend({ SSH_TTY: "/dev/pts/0" }, "linux")).toBe("passphrase");
+  });
+
+  it("a passphrase-wrapped vault (master.key.enc) picks passphrase-file even when keytar loads", () => {
+    setMasterKeyFileProbeForTests(() => true);
+    expect(resolveKeystoreBackend({}, "linux")).toBe("passphrase-file");
+    expect(resolveKeystoreBackend({}, "win32")).toBe("passphrase-file");
+    expect(resolveKeystoreBackend({}, "darwin")).toBe("macos-keychain");
+    expect(resolveKeystoreBackend({ ABRA_KEYSTORE: "keytar" }, "linux")).toBe("keytar");
+    expect(keystoreFellBackFromKeytar({}, "linux")).toBe(false);
   });
 
   it("never falls back away from an existing keyring-held vault", () => {

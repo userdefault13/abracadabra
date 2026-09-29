@@ -94,6 +94,11 @@ native module won't load (newer npm skips install scripts) **and** the vault is 
 already passphrase-wrapped. An existing vault whose key lives in the OS keyring stays on
 `keytar` and reports how to rebuild it — abra never silently switches away from it.
 
+Once `~/.abracadabra/master.key.enc` exists (a passphrase vault, or after
+`abra keystore migrate --to passphrase-file`), the CLI **and abra-agent** pick
+`passphrase-file` even when keytar loads, so they always agree. `ABRA_KEYSTORE` is only
+needed to override that.
+
 ### Passphrase-file keystore (`ABRA_KEYSTORE=passphrase-file`)
 
 Used for headless/SSH Linux when no OS credential store is available.
@@ -121,7 +126,7 @@ abra keystore migrate --to passphrase-file
 
 - The master key bytes do **not** change — only the wrap moves into `master.key.enc` (v2). `vault.enc` is untouched.
 - **Keep-by-default:** without `--remove-old`, the keytar copy stays. While it exists, any same-user process with an unlocked keyring can still read the key. Remove later with `abra keystore migrate --to passphrase-file --remove-old` (types `delete` on `/dev/tty` after verify).
-- Then: `export ABRA_KEYSTORE=passphrase-file` (shell profile + `Environment=ABRA_KEYSTORE=passphrase-file` in the abra-agent unit) and `abra doctor`.
+- Then: `systemctl --user restart abra-agent` (Linux) so the agent picks up `master.key.enc`, `abra unlock`, and `abra doctor`. No `ABRA_KEYSTORE` needed: `master.key.enc` selects `passphrase-file` for the CLI and the agent.
 
 macOS keychain → passphrase-file is not supported yet.
 
