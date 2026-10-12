@@ -39,7 +39,7 @@ export function sanitizeCommonName(commonName: string): string {
   return cleaned || "abracadabra-lan";
 }
 
-export function createEphemeralTls(commonName = "abracadabra-lan"): EphemeralTls {
+export function createEphemeralTls(commonName = "abracadabra-lan", opts: { days?: number } = {}): EphemeralTls {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "abra-tls-"));
   const keyPath = path.join(dir, "key.pem");
   const certPath = path.join(dir, "cert.pem");
@@ -56,7 +56,7 @@ export function createEphemeralTls(commonName = "abracadabra-lan"): EphemeralTls
         "-out",
         certPath,
         "-days",
-        "1",
+        String(opts.days ?? 1),
         "-nodes",
         "-subj",
         `/CN=${sanitizeCommonName(commonName)}`,

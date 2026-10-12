@@ -73,6 +73,24 @@ export function ed25519PrivateKey(identity: SyncIdentity): KeyObject {
   });
 }
 
+export function x25519PrivateKey(identity: SyncIdentity): KeyObject {
+  decodeRawKey(identity.x25519.privateKey);
+  return crypto.createPrivateKey({
+    key: {
+      kty: "OKP",
+      crv: "X25519",
+      x: b64ToB64url(identity.x25519.publicKey),
+      d: b64ToB64url(identity.x25519.privateKey),
+    },
+    format: "jwk",
+  });
+}
+
+/** Raw 32-byte public key (base64) of an OKP KeyObject. */
+export function rawPublicKey(key: KeyObject): string {
+  return exportRaw(key, "x");
+}
+
 /** Both public keys parse as valid curve points of the right type. */
 export function assertValidPublicKeys(ed25519: string, x25519: string): void {
   ed25519PublicKey(ed25519);

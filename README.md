@@ -186,6 +186,8 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra usb sync --lan [host] --fingerprint <fp> [--project …] [--pin]` | Sync with a LAN host (fingerprint required; scoped with `--project`) |
 | `abra sync pair --listen` / `abra sync pair <host:port> --fingerprint <fp>` | (preview) Pair this vault with another machine — see [docs/SYNC.md](docs/SYNC.md) |
 | `abra sync whoami` / `peers [--json]` / `unpair <name\|id>` | (preview) Own sync identity fingerprint / paired peers / remove a peer |
+| `abra sync inbox [--enable [--bind <ip>] [--port <n>] \| --disable \| --status \| --apply <id\|all> \| --reject <id\|all>]` | (preview) Receiver inbox in `abra-agent`: list / apply / reject queued sealed bundles |
+| `abra sync accept [--from <peer>] [-p <proj,…>] [--auto] [--remove] [--list]` | (preview) Which inbound bundles auto-apply; default is to queue |
 | `abra cartridge checkpoint [--full]` | Cloud checkpoint (metadata, or sealed full vault with `--full`) |
 | `abra cartridge restore` | Restore from latest full cartridge checkpoint |
 | `abra update [--check\|--apply\|--force]` | Check or install updates from CDN / npm |
@@ -666,11 +668,16 @@ abra usb sync --lan 192.168.1.20:7332 --fingerprint <fp> --project gotchibot
 - **`--fingerprint` required** (full SHA-256). Legacy 16-hex short fingerprints still match with a warning.
 - **File bundles:** `abra usb backup -f <dir> --project …` writes `scoped-<stamp>.abrabak` (does not update `latest.json`); merge with `abra usb sync -f <file>` (or `abra usb restore`, which merges scoped bundles instead of overwriting).
 
-### `abra sync` (preview): pairing
+### `abra sync` (preview): pairing + receiver inbox
 
 `abra sync pair --listen` / `abra sync pair <host:port> --fingerprint <fp>` pairs
-two vaults (device identity keys + a 6-word safety code). Phase 1 only pairs —
-nothing syncs yet. See [docs/SYNC.md](docs/SYNC.md).
+two vaults (device identity keys + a 6-word safety code). On a receiver,
+`abra sync inbox --enable` runs an HTTPS inbox inside `abra-agent` (on your
+Tailscale IP by default). It accepts only bundles signed by a peer paired as
+source and sealed to this machine's key. Bundles are queued unless
+`abra sync accept … --auto` matches and the agent is unlocked. Merges are
+receiver-wins and never delete. The sender side (`abra sync push`) is not
+available yet. See [docs/SYNC.md](docs/SYNC.md).
 
 ### `abra serve --lan`
 

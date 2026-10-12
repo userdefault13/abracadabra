@@ -17,7 +17,20 @@ export type AgentOp =
   | "grant.add"
   | "grant.list"
   | "grant.revoke"
-  | "grant.check";
+  | "grant.check"
+  | "inbox.status";
+
+/** Sync inbox listener state — settings and counts only, no vault data. */
+export interface AgentInboxStatusBody {
+  configured: boolean;
+  enabled: boolean;
+  listening: boolean;
+  bind: string | null;
+  port: number | null;
+  sources: number;
+  queued: number;
+  error: string | null;
+}
 
 export interface AgentStatusBody {
   locked: boolean;
@@ -96,7 +109,8 @@ export type AgentRequest =
       op: "grant.check";
       project: string;
       caller: GrantCaller;
-    };
+    }
+  | { v: typeof PROTOCOL_VERSION; id: string; op: "inbox.status" };
 
 export type AgentResponse =
   | {
@@ -168,6 +182,13 @@ export type AgentResponse =
   | {
       v: typeof PROTOCOL_VERSION;
       id: string;
+      ok: true;
+      op: "inbox.status";
+      inbox: AgentInboxStatusBody;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
       ok: false;
       error: string;
       code: AgentErrorCode;
@@ -196,6 +217,7 @@ export function isAgentRequest(raw: unknown): raw is AgentRequest {
     case "lock":
     case "vault.load":
     case "grant.list":
+    case "inbox.status":
       return true;
     case "unlock.key":
       return typeof r.key === "string";

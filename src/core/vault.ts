@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import { vaultFile, ensureDir } from "./paths.js";
 import { getKeystore } from "../platform/index.js";
@@ -97,6 +98,22 @@ export interface SyncPeer {
   lastAddress?: string;
 }
 
+/** `abra sync accept` rule for inbound bundles. No matching rule → queue. */
+export interface SyncAcceptRule {
+  /** Source peer identity id, or "*" for every paired source. */
+  from: string;
+  projects: string[] | "*";
+  auto: boolean;
+}
+
+/** `abra sync inbox --enable` settings for the abra-agent receiver listener. */
+export interface SyncInboxSettings {
+  enabled: boolean;
+  /** Explicit listen IP; absent → this machine's Tailscale IPv4 at listener start. */
+  bind?: string;
+  port: number;
+}
+
 export interface Vault {
   version: 1;
   projects: Record<string, Project>;
@@ -107,10 +124,14 @@ export interface Vault {
   syncIdentity?: SyncIdentity;
   /** Device-local, keyed by peer identity id. */
   syncPeers?: Record<string, SyncPeer>;
+  /** Device-local inbound accept policy. */
+  syncAccept?: SyncAcceptRule[];
+  /** Device-local receiver inbox settings. */
+  syncInbox?: SyncInboxSettings;
 }
 
 /** Vault fields bound to this machine — stripped from every export, never taken from a peer. */
-export const DEVICE_LOCAL_VAULT_FIELDS = ["syncIdentity", "syncPeers"] as const;
+export const DEVICE_LOCAL_VAULT_FIELDS = ["syncIdentity", "syncPeers", "syncAccept", "syncInbox"] as const;
 
 /** Shallow copy without device-local fields (for bundles, sync bases, restores). */
 export function withoutDeviceLocal(vault: Vault): Vault {
@@ -122,8 +143,15 @@ export function withoutDeviceLocal(vault: Vault): Vault {
 /** `incoming` with device-local fields taken from `local` only (peer's are dropped). */
 export function keepDeviceLocal(incoming: Vault, local: Vault): Vault {
   const out = withoutDeviceLocal(incoming);
-  if (local.syncIdentity) out.syncIdentity = local.syncIdentity;
-  if (local.syncPeers) out.syncPeers = local.syncPeers;
+  return { ...out, ...pickDeviceLocal(local) };
+}
+
+function pickDeviceLocal(vault: Vault): Partial<Vault> {
+  const out: Partial<Vault> = {};
+  if (vault.syncIdentity !== undefined) out.syncIdentity = vault.syncIdentity;
+  if (vault.syncPeers !== undefined) out.syncPeers = vault.syncPeers;
+  if (vault.syncAccept !== undefined) out.syncAccept = vault.syncAccept;
+  if (vault.syncInbox !== undefined) out.syncInbox = vault.syncInbox;
   return out;
 }
 
@@ -263,11 +291,13 @@ export function decryptEnvelope(
 
 /**
  * Persist a vault restored from a backup/checkpoint under `masterKey`.
- * Device-local sync identity + peers are dropped so a cloned vault never shares
- * an identity with its origin — the user re-pairs after restore.
+ * Device-local sync identity, peers, accept policy and inbox settings are
+ * dropped so a cloned vault never shares an identity with its origin — the
+ * user re-pairs after restore. The inbox's public-key mirror goes with them.
  */
 export function writeRestoredVault(vault: Vault, masterKey: Buffer): { droppedSyncPairing: boolean } {
   writeEncryptedVaultFile(encryptVault(withoutDeviceLocal(vault), masterKey));
+  fs.rmSync(path.join(path.dirname(vaultFile()), "sync-inbox", "anchors.json"), { force: true });
   return { droppedSyncPairing: hasDeviceLocal(vault) };
 }
 

@@ -11,6 +11,7 @@ import {
   type AgentRequest,
   type AgentResponse,
   type AgentStatusBody,
+  type AgentInboxStatusBody,
   type AgentErrorCode,
   type AgentVaultBinding,
 } from "./protocol.js";
@@ -92,6 +93,7 @@ export async function agentRequest(
     | { op: "grant.list" }
     | { op: "grant.revoke"; grantId?: string; all?: boolean }
     | { op: "grant.check"; project: string; caller: GrantCaller }
+    | { op: "inbox.status" }
   ),
   opts?: AgentClientOpts,
 ): Promise<AgentResponse> {
@@ -179,6 +181,17 @@ export async function agentStatus(opts?: AgentClientOpts): Promise<AgentStatusBo
     );
   }
   return res.status;
+}
+
+export async function agentInboxStatus(opts?: AgentClientOpts): Promise<AgentInboxStatusBody> {
+  const res = await agentRequest({ op: "inbox.status" }, opts);
+  if (!res.ok || res.op !== "inbox.status") {
+    throw new AgentClientError(
+      !res.ok ? res.error : "Unexpected inbox.status response",
+      !res.ok ? res.code : "internal",
+    );
+  }
+  return res.inbox;
 }
 
 export async function agentUnlock(opts?: AgentClientOpts): Promise<void> {

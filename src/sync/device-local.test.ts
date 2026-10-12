@@ -23,6 +23,7 @@ import * as platform from "../platform/index.js";
 import { setDefaultKdfForTests } from "../platform/master-key-file.js";
 import { generateSyncIdentity, getOrCreateSyncIdentity } from "./identity.js";
 import { planPeerUpsert } from "./peers.js";
+import { anchorsFile, anchorsFromVault, writeAnchors } from "../core/sync-inbox-store.js";
 
 vi.mock("../platform/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../platform/index.js")>();
@@ -36,23 +37,30 @@ function entry(value: string) {
   return { value, secret: true, updatedAt: 1 };
 }
 
-/** A vault with projects + a sync identity + one paired peer. */
+/** A vault with projects + a sync identity + one paired peer + accept policy + inbox settings. */
 function pairedVault(projects: Vault["projects"]): Vault {
   const base: Vault = { version: 1, projects, connections: {}, passkeys: [], apiKeys: {} };
   const withId = getOrCreateSyncIdentity(base).vault;
   const peer = generateSyncIdentity();
-  return planPeerUpsert(withId, {
+  const paired = planPeerUpsert(withId, {
     id: peer.id,
     name: "mini",
     ed25519: peer.ed25519.publicKey,
     x25519: peer.x25519.publicKey,
     role: "receiver",
   }).vault;
+  return {
+    ...paired,
+    syncAccept: [{ from: "*", projects: "*", auto: true }],
+    syncInbox: { enabled: true, port: 7333, bind: "100.64.0.1" },
+  };
 }
 
 function expectNoIdentityMaterial(text: string, v: Vault) {
   expect(text).not.toContain("syncIdentity");
   expect(text).not.toContain("syncPeers");
+  expect(text).not.toContain("syncAccept");
+  expect(text).not.toContain("syncInbox");
   expect(text).not.toContain(v.syncIdentity!.ed25519.privateKey);
   expect(text).not.toContain(v.syncIdentity!.x25519.privateKey);
 }
@@ -108,19 +116,25 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
     const { merged } = threeWayMerge(ours, theirs, null, new Map(), "LAN peer");
     expect(merged.syncIdentity).toEqual(ours.syncIdentity);
     expect(merged.syncPeers).toEqual(ours.syncPeers);
+    expect(merged.syncAccept).toEqual(ours.syncAccept);
+    expect(merged.syncInbox).toEqual(ours.syncInbox);
     expect(Object.keys(merged.projects).sort()).toEqual(["a", "b"]);
 
     const bare: Vault = { version: 1, projects: {} };
     const fromBare = threeWayMerge(bare, theirs, null, new Map(), "USB").merged;
     expect(fromBare.syncIdentity).toBeUndefined();
     expect(fromBare.syncPeers).toBeUndefined();
+    expect(fromBare.syncAccept).toBeUndefined();
+    expect(fromBare.syncInbox).toBeUndefined();
   });
 
-  it("scoped merge keeps local identity/peers", () => {
+  it("scoped merge keeps local identity/peers/policy/inbox", () => {
     const local = pairedVault({});
     const { merged } = mergeScopedProjects(local, { app: { createdAt: 1, vars: { K: entry("x") } } });
     expect(merged.syncIdentity).toEqual(local.syncIdentity);
     expect(merged.syncPeers).toEqual(local.syncPeers);
+    expect(merged.syncAccept).toEqual(local.syncAccept);
+    expect(merged.syncInbox).toEqual(local.syncInbox);
     expect(merged.projects.app).toBeDefined();
   });
 
@@ -135,15 +149,20 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
     expect(v.syncIdentity).toBeDefined(); // not mutated
   });
 
-  it("restore drops identity/peers (cloned vaults must re-pair)", () => {
-    useTempDir();
+  it("restore drops identity/peers/policy/inbox and the inbox trust mirror (cloned vaults must re-pair)", () => {
+    const dir = useTempDir();
     const v = pairedVault({ a: { createdAt: 1, vars: { K: entry("1") } } });
+    writeAnchors(dir, anchorsFromVault(v));
+    expect(fs.existsSync(anchorsFile(dir))).toBe(true);
     const key = crypto.randomBytes(32);
     const res = writeRestoredVault(v, key);
     expect(res.droppedSyncPairing).toBe(true);
+    expect(fs.existsSync(anchorsFile(dir))).toBe(false);
     const restored = decryptVault(JSON.parse(fs.readFileSync(vaultFile(), "utf8")), key);
     expect(restored.syncIdentity).toBeUndefined();
     expect(restored.syncPeers).toBeUndefined();
+    expect(restored.syncAccept).toBeUndefined();
+    expect(restored.syncInbox).toBeUndefined();
     expect(restored.projects.a.vars.K.value).toBe("1");
     expect(writeRestoredVault({ version: 1, projects: {} }, key).droppedSyncPairing).toBe(false);
   });
@@ -155,6 +174,8 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
     const base = (await loadSyncState("lan:peer"))!.base;
     expect(base.syncIdentity).toBeUndefined();
     expect(base.syncPeers).toBeUndefined();
+    expect(base.syncAccept).toBeUndefined();
+    expect(base.syncInbox).toBeUndefined();
     expect(base.projects.a).toBeDefined();
     expect(fs.existsSync(syncStateFile())).toBe(true);
   });
@@ -205,7 +226,11 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
       expectNoIdentityMaterial(JSON.stringify(remote), hostVault);
 
       // An older peer pushes a vault that includes ITS OWN identity + peers.
-      const peerVault = pairedVault({ keep: { createdAt: 1, vars: { A: entry("b") } } });
+      const peerVault: Vault = {
+        ...pairedVault({ keep: { createdAt: 1, vars: { A: entry("b") } } }),
+        syncAccept: [],
+        syncInbox: { enabled: false, port: 1 },
+      };
       const peerKey = crypto.randomBytes(32);
       const pushed = await post("/lan/push", {
         bundle: sealBundle(encryptVault(peerVault, peerKey), peerKey, host.pin),
@@ -215,6 +240,8 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
       expect(after.projects.keep.vars.A.value).toBe("b");
       expect(after.syncIdentity).toEqual(hostVault.syncIdentity);
       expect(after.syncPeers).toEqual(hostVault.syncPeers);
+      expect(after.syncAccept).toEqual(hostVault.syncAccept);
+      expect(after.syncInbox).toEqual(hostVault.syncInbox);
     },
     20_000,
   );
