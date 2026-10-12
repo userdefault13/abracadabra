@@ -1,12 +1,11 @@
 import https from "node:https";
-import tls from "node:tls";
-import net from "node:net";
+import type { TLSSocket } from "node:tls";
 import type { BackupBundle } from "../core/backup.js";
 import { openBundle, openAnyBundle, sealBundle, ScopedBundleError } from "../core/backup.js";
 import {
   loadVault,
   saveVault,
-  encryptVault,
+  encryptVaultForExport,
   decryptEnvelope,
 } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
@@ -25,10 +24,7 @@ import {
   type Resolutions,
   type ProjectDeletion,
 } from "../core/sync.js";
-import {
-  fingerprintFromDer,
-  fingerprintsMatch,
-} from "../core/tls-ephemeral.js";
+import { connectPinnedTls } from "../core/tls-ephemeral.js";
 import {
   assertScopeNamesAllowed,
   mergeScopedProjects,
@@ -110,61 +106,6 @@ export function parseHostPort(target: string): { host: string; port: number } {
   return { host, port };
 }
 
-/**
- * Open a TLS socket, verify the peer cert fingerprint BEFORE any HTTP bytes
- * (and thus the PIN) are sent. Node skips checkServerIdentity when
- * rejectUnauthorized is false, so we verify on secureConnect ourselves.
- */
-function connectVerifiedTls(
-  host: string,
-  port: number,
-  expectedFingerprint: string,
-): Promise<{ socket: tls.TLSSocket; peerFingerprint: string }> {
-  return new Promise((resolve, reject) => {
-    const isIp = net.isIP(host) !== 0;
-    const socket = tls.connect({
-      host,
-      port,
-      servername: isIp ? undefined : host,
-      rejectUnauthorized: false,
-    });
-    let settled = false;
-    const fail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      try {
-        socket.destroy();
-      } catch {
-        /* ignore */
-      }
-      reject(err);
-    };
-    socket.once("error", (err) => fail(err instanceof Error ? err : new Error(String(err))));
-    socket.once("secureConnect", () => {
-      try {
-        const cert = socket.getPeerCertificate(true);
-        if (!cert?.raw) {
-          fail(new Error("TLS fingerprint unavailable — refusing unauthenticated peer"));
-          return;
-        }
-        const peerFp = fingerprintFromDer(cert.raw as Buffer);
-        if (!fingerprintsMatch(expectedFingerprint, peerFp)) {
-          fail(
-            new Error(
-              `TLS fingerprint mismatch (expected ${expectedFingerprint}, got ${peerFp}) — PIN not sent`,
-            ),
-          );
-          return;
-        }
-        settled = true;
-        resolve({ socket, peerFingerprint: peerFp });
-      } catch (err) {
-        fail(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-  });
-}
-
 function httpsRequest(opts: {
   host: string;
   port: number;
@@ -176,10 +117,10 @@ function httpsRequest(opts: {
 }): Promise<{ status: number; json: unknown; peerFingerprint: string }> {
   return new Promise((resolve, reject) => {
     void (async () => {
-      let verified: { socket: tls.TLSSocket; peerFingerprint: string };
+      let verified: { socket: TLSSocket; peerFingerprint: string };
       try {
         // Pin the cert on the raw TLS socket first; only then hand it to https.
-        verified = await connectVerifiedTls(opts.host, opts.port, opts.expectedFingerprint);
+        verified = await connectPinnedTls(opts.host, opts.port, opts.expectedFingerprint);
       } catch (err) {
         reject(err);
         return;
@@ -444,14 +385,14 @@ export async function applyLanSync(
   if (report.length === 0 && projectDeletions.length === 0) {
     await saveSyncState(peerId, local);
     const masterKey = await getMasterKey();
-    const out = sealBundle(encryptVault(local, masterKey), masterKey, pin);
+    const out = sealBundle(encryptVaultForExport(local, masterKey), masterKey, pin);
     await pushBundle(target, pin, out, fp);
     return { changed: false, report: [] };
   }
 
   await saveVault(merged);
   const masterKey = await getMasterKey();
-  const out = sealBundle(encryptVault(merged, masterKey), masterKey, pin);
+  const out = sealBundle(encryptVaultForExport(merged, masterKey), masterKey, pin);
   await pushBundle(target, pin, out, fp);
   await saveSyncState(peerId, merged);
   return { changed: true, report };

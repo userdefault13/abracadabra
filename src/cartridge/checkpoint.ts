@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import os from "node:os";
 import { abraDir } from "../core/paths.js";
-import { loadVault, encryptVault } from "../core/vault.js";
+import { loadVault, encryptVaultForExport } from "../core/vault.js";
 import { getMasterKey } from "../platform/index.js";
 import { sealBundle } from "../core/backup.js";
 import type { BackupBundle } from "../core/backup.js";
@@ -105,7 +105,7 @@ export async function buildFullCheckpointState(
   const meta = await buildMetadata(ownerWallet);
   const vault = await loadVault();
   const masterKey = await getMasterKey();
-  const sealedVault = sealBundle(encryptVault(vault, masterKey), masterKey, passphrase, {
+  const sealedVault = sealBundle(encryptVaultForExport(vault, masterKey), masterKey, passphrase, {
     kdf: CLOUD_SCRYPT,
   });
   return { schemaVersion: 2, ...meta, sealedVault };

@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import tls from "node:tls";
 
 export interface EphemeralTls {
   key: string;
@@ -75,6 +77,61 @@ export function createEphemeralTls(commonName = "abracadabra-lan"): EphemeralTls
 
 export function fingerprintOfPem(certPem: string): string {
   return fingerprintFromPem(certPem);
+}
+
+/**
+ * Open a TLS socket and verify the peer cert fingerprint BEFORE any application
+ * bytes (and thus any PIN) are written. Node skips checkServerIdentity when
+ * rejectUnauthorized is false, so we verify on secureConnect ourselves.
+ */
+export function connectPinnedTls(
+  host: string,
+  port: number,
+  expectedFingerprint: string,
+): Promise<{ socket: tls.TLSSocket; peerFingerprint: string }> {
+  return new Promise((resolve, reject) => {
+    const isIp = net.isIP(host) !== 0;
+    const socket = tls.connect({
+      host,
+      port,
+      servername: isIp ? undefined : host,
+      rejectUnauthorized: false,
+    });
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        /* ignore */
+      }
+      reject(err);
+    };
+    socket.once("error", (err) => fail(err instanceof Error ? err : new Error(String(err))));
+    socket.once("secureConnect", () => {
+      try {
+        const cert = socket.getPeerCertificate(true);
+        if (!cert?.raw) {
+          fail(new Error("TLS fingerprint unavailable — refusing unauthenticated peer"));
+          return;
+        }
+        const peerFp = fingerprintFromDer(cert.raw as Buffer);
+        if (!fingerprintsMatch(expectedFingerprint, peerFp)) {
+          fail(
+            new Error(
+              `TLS fingerprint mismatch (expected ${expectedFingerprint}, got ${peerFp}) — PIN not sent`,
+            ),
+          );
+          return;
+        }
+        settled = true;
+        resolve({ socket, peerFingerprint: peerFp });
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  });
 }
 
 /**

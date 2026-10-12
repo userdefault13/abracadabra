@@ -71,12 +71,64 @@ export interface GithubGrant {
   permissions: Record<string, GithubPermissionLevel>;
 }
 
+/**
+ * This vault's `abra sync` device identity. Keys are base64 of the raw 32-byte
+ * values (Ed25519 seed / X25519 scalar for private keys). Private halves exist
+ * only inside the encrypted vault — never exported, synced, or printed.
+ */
+export interface SyncIdentity {
+  id: string;
+  createdAt: number;
+  ed25519: { publicKey: string; privateKey: string };
+  x25519: { publicKey: string; privateKey: string };
+}
+
+/** What THE PEER is relative to this vault: "source" pushes to me, "receiver" receives from me. */
+export type SyncPeerRole = "source" | "receiver";
+
+export interface SyncPeer {
+  name: string;
+  idFingerprint: string;
+  /** base64 raw 32-byte public keys */
+  ed25519: string;
+  x25519: string;
+  role: SyncPeerRole;
+  pairedAt: number;
+  lastAddress?: string;
+}
+
 export interface Vault {
   version: 1;
   projects: Record<string, Project>;
   connections?: Record<string, Connection>;
   passkeys?: PasskeyCredential[];
   apiKeys?: Record<string, ApiKey>;
+  /** Device-local: never leaves this machine (see withoutDeviceLocal). */
+  syncIdentity?: SyncIdentity;
+  /** Device-local, keyed by peer identity id. */
+  syncPeers?: Record<string, SyncPeer>;
+}
+
+/** Vault fields bound to this machine — stripped from every export, never taken from a peer. */
+export const DEVICE_LOCAL_VAULT_FIELDS = ["syncIdentity", "syncPeers"] as const;
+
+/** Shallow copy without device-local fields (for bundles, sync bases, restores). */
+export function withoutDeviceLocal(vault: Vault): Vault {
+  const out: Vault = { ...vault };
+  for (const field of DEVICE_LOCAL_VAULT_FIELDS) delete out[field];
+  return out;
+}
+
+/** `incoming` with device-local fields taken from `local` only (peer's are dropped). */
+export function keepDeviceLocal(incoming: Vault, local: Vault): Vault {
+  const out = withoutDeviceLocal(incoming);
+  if (local.syncIdentity) out.syncIdentity = local.syncIdentity;
+  if (local.syncPeers) out.syncPeers = local.syncPeers;
+  return out;
+}
+
+export function hasDeviceLocal(vault: Vault): boolean {
+  return DEVICE_LOCAL_VAULT_FIELDS.some((f) => vault[f] !== undefined);
 }
 
 export interface EncryptedFile {
@@ -110,6 +162,11 @@ export function encryptVault(vault: Vault, key: Buffer): EncryptedFile {
     tag: cipher.getAuthTag().toString("base64"),
     data: data.toString("base64"),
   };
+}
+
+/** Encrypt a vault that is leaving this machine (USB/LAN/cartridge bundles). */
+export function encryptVaultForExport(vault: Vault, key: Buffer): EncryptedFile {
+  return encryptVault(withoutDeviceLocal(vault), key);
 }
 
 /** Shared AES-256-GCM decrypt of a vault.enc envelope. */
@@ -202,6 +259,16 @@ export function decryptEnvelope(
   key: Buffer,
 ): Vault {
   return decryptVault({ format: "abracadabra-vault", version: 1, ...env }, key);
+}
+
+/**
+ * Persist a vault restored from a backup/checkpoint under `masterKey`.
+ * Device-local sync identity + peers are dropped so a cloned vault never shares
+ * an identity with its origin — the user re-pairs after restore.
+ */
+export function writeRestoredVault(vault: Vault, masterKey: Buffer): { droppedSyncPairing: boolean } {
+  writeEncryptedVaultFile(encryptVault(withoutDeviceLocal(vault), masterKey));
+  return { droppedSyncPairing: hasDeviceLocal(vault) };
 }
 
 /** Atomically persist an envelope to VAULT_FILE (usb restore). */

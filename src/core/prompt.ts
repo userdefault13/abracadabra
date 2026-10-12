@@ -101,6 +101,30 @@ export function setOpenTtyForTests(fn: (() => TtyHandles) | null): void {
 }
 
 /**
+ * Visible one-line answer read from the controlling terminal — never stdin
+ * pipes, env, or flags. Throws NoTerminalError when there is no TTY.
+ */
+export async function promptTtyLine(question: string): Promise<string> {
+  let handles: TtyHandles;
+  try {
+    handles = openTtyImpl();
+  } catch {
+    throw new NoTerminalError();
+  }
+  const rl = readline.createInterface({ input: handles.input, output: handles.output });
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      rl.once("close", () => reject(new NoTerminalError()));
+      rl.question(question, (answer) => resolve(answer));
+    });
+  } finally {
+    rl.removeAllListeners("close");
+    rl.close();
+    handles.close();
+  }
+}
+
+/**
  * Hidden passphrase / secret prompt.
  *
  * Reads from the controlling terminal (`/dev/tty`) with echo off — never from
@@ -114,12 +138,15 @@ export function setOpenTtyForTests(fn: (() => TtyHandles) | null): void {
  *
  * @param output Used only for the Windows stdin fallback (and legacy callers
  *   such as PasswordPromptAuth). Ignored when `/dev/tty` is available.
+ * @param opts.allowHeadless false for non-passphrase secrets (e.g. a pairing PIN)
+ *   so the headless vault passphrase is never sent somewhere else.
  */
 export async function promptHidden(
   question: string,
   output: NodeJS.WritableStream = process.stderr,
+  opts: { allowHeadless?: boolean } = {},
 ): Promise<string> {
-  const headless = headlessPassphrase();
+  const headless = opts.allowHeadless === false ? undefined : headlessPassphrase();
   if (headless) return headless;
 
   // Open tty BEFORE writing any prompt text (no partial leak on open failure).

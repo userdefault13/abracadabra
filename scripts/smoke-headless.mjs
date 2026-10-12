@@ -2,6 +2,7 @@
 /**
  * F3 — headless CLI smoke: set → run → env (passphrase-file, isolated ABRA_DIR)
  * G2 — USB bundle restore on a fresh ABRA_DIR (Linux passphrase-file path)
+ * S1 — abra sync whoami/peers; restore drops the origin sync identity
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -81,7 +82,7 @@ function f3Smoke(env) {
   }
 }
 
-async function g2Smoke(originEnv, bundlePath) {
+async function g2Smoke(originEnv, bundlePath, originIdentityId) {
   log("G2", "fresh ABRA_DIR usb restore");
   const homeB = mkdtempSync(join(tmpdir(), "abra-smoke-b-"));
   const abraDirB = join(homeB, ".abracadabra-restore");
@@ -105,9 +106,31 @@ async function g2Smoke(originEnv, bundlePath) {
       ),
       "post-restore abra run",
     );
+
+    log("S1", "restore drops the origin's sync identity + peers");
+    const peersR = runAbra(["sync", "peers", "--json"], envB);
+    assertOk(peersR, "abra sync peers (restored)");
+    if (JSON.parse(peersR.stdout).length !== 0) die("restored vault kept sync peers");
+    const whoR = runAbra(["sync", "whoami", "--json"], envB);
+    assertOk(whoR, "abra sync whoami (restored)");
+    const who = JSON.parse(whoR.stdout);
+    if (!who.created || who.id === originIdentityId) die("restored vault reused the origin sync identity");
   } finally {
     rmSync(homeB, { recursive: true, force: true });
   }
+}
+
+function syncIdentitySmoke(env) {
+  log("S1", "abra sync whoami creates an identity once");
+  const first = runAbra(["sync", "whoami", "--json"], env);
+  assertOk(first, "abra sync whoami");
+  const a = JSON.parse(first.stdout);
+  const second = runAbra(["sync", "whoami", "--json"], env);
+  assertOk(second, "abra sync whoami (again)");
+  const b = JSON.parse(second.stdout);
+  if (!a.created || b.created || a.id !== b.id) die("sync whoami did not persist a stable identity");
+  if (/privateKey/.test(first.stdout + second.stdout)) die("sync whoami printed private key material");
+  return a.id;
 }
 
 async function main() {
@@ -118,6 +141,7 @@ async function main() {
 
   try {
     f3Smoke(envA);
+    const originIdentityId = syncIdentitySmoke(envA);
 
     log("G2", "seal USB bundle from origin vault");
     assertOk(
@@ -139,17 +163,18 @@ async function main() {
 
     const vault = await loadVault();
     const masterKey = await getMasterKey();
+    // Raw encryptVault (not ForExport): mimics an older bundle that still carries the sync identity.
     const bundle = sealBundle(encryptVault(vault, masterKey), masterKey, BUNDLE_PASS);
     writeFileSync(bundlePath, JSON.stringify(bundle, null, 2), { mode: 0o600 });
 
-    await g2Smoke(envA, bundlePath);
+    await g2Smoke(envA, bundlePath, originIdentityId);
   } catch (err) {
     die(err instanceof Error ? `${err.message}\n${err.stack}` : String(err));
   } finally {
     rmSync(homeA, { recursive: true, force: true });
   }
 
-  console.log("[smoke] OK — F3 + G2 passed");
+  console.log("[smoke] OK — F3 + G2 + S1 passed");
 }
 
 main().catch((e) => die(e?.message || String(e)));

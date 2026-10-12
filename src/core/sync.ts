@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import type { Vault, VarEntry, Connection } from "./vault.js";
+import { keepDeviceLocal, withoutDeviceLocal } from "./vault.js";
 import { syncStateFile, ensureDir } from "./paths.js";
 import { getMasterKey } from "../platform/index.js";
 
@@ -131,7 +132,7 @@ export async function saveSyncState(
   if (!peerId) return;
   ensureDir();
   const peers = await readPeersMap();
-  peers[peerId] = { lastSyncAt: Date.now(), base: vault };
+  peers[peerId] = { lastSyncAt: Date.now(), base: withoutDeviceLocal(vault) };
   const key = await getMasterKey();
   const enc = encryptBytes(Buffer.from(JSON.stringify({ peers } satisfies SyncStateV2), "utf8"), key);
   const file = syncStateFile();
@@ -313,13 +314,16 @@ export function threeWayMerge(
   const apiKeys = oK !== bK ? ours.apiKeys : theirs.apiKeys;
 
   return {
-    merged: {
-      version: 1,
-      projects: projects.projects,
-      connections: conns.connections,
-      passkeys,
-      apiKeys,
-    },
+    merged: keepDeviceLocal(
+      {
+        version: 1,
+        projects: projects.projects,
+        connections: conns.connections,
+        passkeys,
+        apiKeys,
+      },
+      ours,
+    ),
     conflicts,
     report: [...projects.report, ...conns.report],
     projectDeletions: projects.projectDeletions,

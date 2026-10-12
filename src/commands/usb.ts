@@ -4,9 +4,9 @@ import { Command } from "commander";
 import {
   loadVault,
   saveVault,
-  encryptVault,
+  encryptVaultForExport,
   decryptEnvelope,
-  writeEncryptedFile,
+  writeRestoredVault,
 } from "../core/vault.js";
 import type { Vault, VarEntry } from "../core/vault.js";
 import { getMasterKey, restoreMasterKey, authenticate } from "../platform/index.js";
@@ -332,7 +332,7 @@ export async function createBackup(targetDirOrVolume: string, passphrase: string
   const masterKey = await getMasterKey();
   return writeBundleToDir(
     bundleDirFor(targetDirOrVolume),
-    encryptVault(vault, masterKey),
+    encryptVaultForExport(vault, masterKey),
     masterKey,
     passphrase,
   );
@@ -452,7 +452,7 @@ export async function applySync(
   const peerId = usbPeerId(lineageId);
   const file = writeBundleToDir(
     path.dirname(p.latestFile),
-    encryptVault(p.merged, masterKey),
+    encryptVaultForExport(p.merged, masterKey),
     masterKey,
     passphrase,
     { lineageId },
@@ -741,7 +741,7 @@ export function registerUsbCommands(program: Command): void {
         }
         if ((await promptHidden("Repeat passphrase: ")) !== pass1) fail("Passphrases do not match");
 
-        const file = writeBundleToDir(dir, encryptVault(vault, masterKey), masterKey, pass1);
+        const file = writeBundleToDir(dir, encryptVaultForExport(vault, masterKey), masterKey, pass1);
         console.log(green(`✓ Backup written: ${file}`));
         console.log(dim(`  restore with: abra usb restore`));
       } catch (err) {
@@ -803,9 +803,12 @@ export function registerUsbCommands(program: Command): void {
         await authenticate("abracadabra: restore vault from USB backup");
         const masterKeyBuf = Buffer.from(payload.masterKey, "base64");
         await restoreMasterKey(masterKeyBuf, activePassphrase ?? undefined);
-        writeEncryptedFile(payload.vaultEnc);
+        const { droppedSyncPairing } = writeRestoredVault(vault, masterKeyBuf);
         fs.rmSync(syncStateFile(), { force: true });
         console.log(green("✓ Restored vault and master key"));
+        if (droppedSyncPairing) {
+          console.log(dim("  sync identity/peers are not restored — re-pair with: abra sync pair"));
+        }
       } catch (err) {
         fail(err);
       }
@@ -1059,7 +1062,7 @@ export function registerUsbCommands(program: Command): void {
             const lineageId = payload.meta.lineageId ?? crypto.randomUUID();
             const file = writeBundleToDir(
               path.dirname(latest),
-              encryptVault(merged, masterKey),
+              encryptVaultForExport(merged, masterKey),
               masterKey,
               pass,
               { lineageId },
@@ -1091,7 +1094,7 @@ export function registerUsbCommands(program: Command): void {
           const lineageId = crypto.randomUUID();
           const file = writeBundleToDir(
             dir,
-            encryptVault(localVault, masterKey),
+            encryptVaultForExport(localVault, masterKey),
             masterKey,
             pass,
             { lineageId },

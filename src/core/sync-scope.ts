@@ -85,13 +85,8 @@ export function mergeScopedProjects(
     conflicts: [],
   };
 
-  const merged: Vault = {
-    version: 1,
-    projects: structuredClone(local.projects),
-    connections: local.connections ? structuredClone(local.connections) : undefined,
-    passkeys: local.passkeys ? structuredClone(local.passkeys) : undefined,
-    apiKeys: local.apiKeys ? structuredClone(local.apiKeys) : undefined,
-  };
+  // Clone everything local (incl. device-local syncIdentity/syncPeers); only projects change.
+  const merged: Vault = structuredClone(local);
 
   for (const [projectName, incomingProject] of Object.entries(incoming)) {
     const localProject = merged.projects[projectName];
