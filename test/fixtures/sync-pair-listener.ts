@@ -39,7 +39,14 @@ try {
       log: (line) => process.stderr.write(`${line}\n`),
     },
   );
-  emit({ type: "done", ok: true, safetyCode: result.safetyCode, peerId: result.peerId, peerSaved: result.peerSaved });
+  emit({
+    type: "done",
+    ok: true,
+    safetyCode: result.safetyCode,
+    peerId: result.peerId,
+    peerSaved: result.peerSaved,
+    peerSaveError: result.peerSaveError,
+  });
   process.exit(0);
 } catch (err) {
   emit({ type: "done", ok: false, error: err instanceof Error ? err.message : String(err) });

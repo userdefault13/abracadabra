@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
+import type net from "node:net";
 import tls from "node:tls";
 import type { Vault } from "../core/vault.js";
 import { createEphemeralTls, type EphemeralTls } from "../core/tls-ephemeral.js";
@@ -8,6 +10,7 @@ import { NoTerminalError } from "../core/prompt.js";
 import { generateSyncIdentity, getOrCreateSyncIdentity, identityFingerprint } from "./identity.js";
 import {
   assertFullTlsFingerprint,
+  LineChannel,
   pairConnect,
   pairListen,
   parsePairTarget,
@@ -50,7 +53,7 @@ function side(host: string, opts: { confirm?: () => Promise<boolean>; pin?: stri
     now: () => 1_700_000_000_000,
     randomBytes: (n) => crypto.randomBytes(n),
     log: (l) => lines.push(l),
-    timeouts: { stepMs: 5_000, confirmMs: 5_000, savedAckMs: 2_000 },
+    timeouts: { stepMs: 5_000, confirmMs: 5_000, savedAckMs: 2_000, closeMs: 2_000 },
   };
   return { deps, saves, stored: () => stored, lines };
 }
@@ -86,6 +89,72 @@ describe("pair target / fingerprint parsing", () => {
     expect(() => assertFullTlsFingerprint(undefined)).toThrow(/--fingerprint/);
     expect(() => assertFullTlsFingerprint("AA:BB:CC:DD:EE:FF:00:11")).toThrow(/full TLS fingerprint/);
     expect(assertFullTlsFingerprint("ab".repeat(32))).toBe("ab".repeat(32));
+  });
+});
+
+/** Just enough of net.Socket for LineChannel, with events driven by the test. */
+class FakeSocket extends EventEmitter {
+  destroyed = false;
+  writableEnded = false;
+  setEncoding() {
+    return this;
+  }
+  write() {
+    return true;
+  }
+  end() {
+    this.writableEnded = true;
+    return this;
+  }
+  destroy() {
+    if (!this.destroyed) {
+      this.destroyed = true;
+      this.emit("close");
+    }
+    return this;
+  }
+}
+
+describe("LineChannel — peer closes right after its last frame", () => {
+  const ack = `${JSON.stringify({ t: "saved", ok: true })}\n`;
+
+  it("delivers the ack even when a reset and close arrive in the same tick", async () => {
+    const sock = new FakeSocket();
+    const ch = new LineChannel(sock as unknown as net.Socket, 50);
+    const pending = ch.next(1_000, "the ack");
+    sock.emit("data", ack);
+    sock.emit("error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
+    sock.destroy();
+    await expect(pending).resolves.toEqual({ t: "saved", ok: true });
+  });
+
+  it("frames received before end/close stay readable; only then does the close reason surface", async () => {
+    const sock = new FakeSocket();
+    const ch = new LineChannel(sock as unknown as net.Socket, 50);
+    sock.emit("data", `${JSON.stringify({ t: "confirm", ok: true })}\n${ack}`);
+    sock.emit("end");
+    sock.destroy();
+    await expect(ch.next(1_000, "confirm")).resolves.toMatchObject({ t: "confirm", ok: true });
+    await expect(ch.next(1_000, "the ack")).resolves.toEqual({ t: "saved", ok: true });
+    await expect(ch.next(1_000, "more")).rejects.toThrow(/peer disconnected/);
+  });
+
+  it("close() half-closes, then resolves only once the peer closes (or force-destroys after closeMs)", async () => {
+    const sock = new FakeSocket();
+    const ch = new LineChannel(sock as unknown as net.Socket, 60_000);
+    let closed = false;
+    const p = ch.close().then(() => (closed = true));
+    expect(sock.writableEnded).toBe(true);
+    expect(sock.destroyed).toBe(false);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closed).toBe(false);
+    sock.destroy(); // peer's FIN → socket fully closed
+    await p;
+    expect(closed).toBe(true);
+
+    const hung = new FakeSocket();
+    await new LineChannel(hung as unknown as net.Socket, 20).close();
+    expect(hung.destroyed).toBe(true);
   });
 });
 
@@ -134,6 +203,43 @@ describe.skipIf(!hasOpenssl)("abra sync pair protocol (in-process)", () => {
       expect(out).not.toContain(v.syncIdentity!.ed25519.privateKey);
       expect(out).not.toContain(v.syncIdentity!.x25519.privateKey);
       expect(out).toContain(lr.safetyCode.words.join(" "));
+    }
+  });
+
+  it("the listener settles only after the connector has read the ack and closed its side", async () => {
+    const L = side("a");
+    const C = side("b");
+    const { info, done } = await startListener(L);
+    let connectorEndedAt = 0;
+    let listenerSettledAt = 0;
+    const realConnect = tls.connect as (...args: unknown[]) => tls.TLSSocket;
+    // A slow connector: its FIN goes out 300ms after it decides to close.
+    const spy = vi.spyOn(tls, "connect").mockImplementation(((...args: unknown[]) => {
+      const sock = realConnect(...args);
+      const realEnd = sock.end.bind(sock) as () => tls.TLSSocket;
+      sock.end = (() => {
+        setTimeout(() => {
+          connectorEndedAt ||= Date.now();
+          realEnd();
+        }, 300);
+        return sock;
+      }) as typeof sock.end;
+      return sock;
+    }) as typeof tls.connect);
+    try {
+      const [lr, cr] = await Promise.all([
+        done.then((r) => {
+          listenerSettledAt = Date.now();
+          return r;
+        }),
+        connect(C, info),
+      ]);
+      expect(cr.peerSaved, cr.peerSaveError).toBe(true);
+      expect(lr.peerSaved, lr.peerSaveError).toBe(true);
+      expect(connectorEndedAt).toBeGreaterThan(0);
+      expect(listenerSettledAt).toBeGreaterThanOrEqual(connectorEndedAt);
+    } finally {
+      spy.mockRestore();
     }
   });
 

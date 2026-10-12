@@ -58,12 +58,15 @@ export interface PairTimeouts {
   confirmMs: number;
   /** Waiting for the peer's "saved" ack after our write. */
   savedAckMs: number;
+  /** After our half-close, waiting for the peer to close its side before destroying the socket. */
+  closeMs: number;
 }
 
 export const DEFAULT_PAIR_TIMEOUTS: PairTimeouts = {
   stepMs: 30_000,
   confirmMs: 5 * 60_000,
   savedAckMs: 15_000,
+  closeMs: 5_000,
 };
 
 export interface PairDeps {
@@ -93,6 +96,8 @@ export interface PairResult {
   myRole: SyncPeerRole;
   /** False when the peer's "saved" ack never arrived (it may not have written). */
   peerSaved: boolean;
+  /** Why `peerSaved` is false. */
+  peerSaveError?: string;
 }
 
 export class PairAbortedError extends Error {
@@ -104,14 +109,25 @@ export class PairAbortedError extends Error {
 
 type Msg = { t: string; [k: string]: unknown };
 
-/** Newline-delimited JSON over a socket; buffered so messages are never lost to timing. */
-class LineChannel {
+/**
+ * Newline-delimited JSON over a socket; buffered so messages are never lost to timing.
+ * Frames already received stay readable via next() after the socket ends or errors.
+ */
+export class LineChannel {
   private buf = "";
   private queue: Msg[] = [];
   private waiters: { resolve: (m: Msg) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }[] = [];
   private closedErr: Error | null = null;
+  private closing = false;
+  private readonly closed: Promise<void>;
 
-  constructor(private socket: net.Socket) {
+  constructor(
+    private socket: net.Socket,
+    private closeMs: number = DEFAULT_PAIR_TIMEOUTS.closeMs,
+  ) {
+    this.closed = socket.destroyed
+      ? Promise.resolve()
+      : new Promise((resolve) => socket.once("close", () => resolve()));
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => this.onData(chunk));
     socket.on("end", () => this.fail(new Error("peer disconnected")));
@@ -183,14 +199,25 @@ class LineChannel {
     });
   }
 
-  /** Flush pending writes then close; force-destroy shortly after. */
-  close(): void {
-    try {
-      this.socket.end();
-    } catch {
-      /* ignore */
+  /**
+   * Half-close (flush our frames, send FIN), then resolve once the peer has closed
+   * its side, force-destroying after `closeMs`. Await this before the process may
+   * exit: exiting or destroying with frames in flight can turn into a TCP RST, and
+   * Windows drops received-but-unread data when an RST arrives.
+   */
+  close(): Promise<void> {
+    if (!this.closing) {
+      this.closing = true;
+      try {
+        this.socket.end();
+      } catch {
+        /* ignore */
+      }
+      const timer = setTimeout(() => this.socket.destroy(), this.closeMs);
+      timer.unref();
+      void this.closed.then(() => clearTimeout(timer));
     }
-    setTimeout(() => this.socket.destroy(), 1000).unref();
+    return this.closed;
   }
 }
 
@@ -345,13 +372,17 @@ async function confirmAndSave(s: Session, deps: PairDeps): Promise<PairResult> {
   s.ch.send({ t: "saved", ok: true });
 
   let peerSaved = false;
+  let peerSaveError: string | undefined;
   try {
     const ack = await s.ch.next(t.savedAckMs, "the peer's save acknowledgement");
-    peerSaved = ack.t === "saved" && ack.ok === true;
-  } catch {
-    peerSaved = false;
+    if (ack.t === "saved" && ack.ok === true) peerSaved = true;
+    else if (ack.t === "saved") peerSaveError = "the peer reported that its save failed";
+    else if (ack.t === "error") peerSaveError = `peer error: ${peerErrorText(ack)}`;
+    else peerSaveError = `unexpected ${JSON.stringify(ack.t.slice(0, 40))} message instead of the save acknowledgement`;
+  } catch (err) {
+    peerSaveError = err instanceof Error ? err.message : String(err);
   }
-  s.ch.close();
+  await s.ch.close();
 
   return {
     peerId: s.candidate.id,
@@ -361,6 +392,7 @@ async function confirmAndSave(s: Session, deps: PairDeps): Promise<PairResult> {
     safetyCode: code,
     myRole: s.myRole,
     peerSaved,
+    ...(peerSaveError !== undefined ? { peerSaveError } : {}),
   };
 }
 
@@ -459,7 +491,7 @@ export async function pairListen(opts: PairListenOptions, deps: PairDeps): Promi
     server.on("error", (err) => finish(err));
 
     server.on("secureConnection", (socket: tls.TLSSocket) => {
-      const ch = new LineChannel(socket);
+      const ch = new LineChannel(socket, t.closeMs);
       if (busy || settled) {
         ch.send({ t: "error", error: "listener busy" });
         ch.close();
@@ -504,9 +536,10 @@ export async function pairListen(opts: PairListenOptions, deps: PairDeps): Promi
             opts,
             deps,
           });
+          await ch.close();
           finish(null, result);
         } catch (err) {
-          ch.close();
+          await ch.close();
           finish(err instanceof Error ? err : new Error(String(err)));
         }
       })();
@@ -671,8 +704,29 @@ export async function pairConnect(opts: PairConnectOptions, deps: PairDeps): Pro
 
   // Fingerprint is verified on the raw TLS socket before the PIN is written.
   const { socket, peerFingerprint } = await connectPinnedTls(host, port, fingerprint);
-  const ch = new LineChannel(socket);
+  const ch = new LineChannel(socket, t.closeMs);
+  try {
+    return await connectorSession(ch, { vault, identity, created, pin, host, peerFingerprint, opts, deps });
+  } finally {
+    await ch.close();
+  }
+}
 
+async function connectorSession(
+  ch: LineChannel,
+  ctx: {
+    vault: Vault;
+    identity: SyncIdentity;
+    created: boolean;
+    pin: string;
+    host: string;
+    peerFingerprint: string;
+    opts: PairConnectOptions;
+    deps: PairDeps;
+  },
+): Promise<PairResult> {
+  const { vault, identity, created, pin, host, peerFingerprint, opts, deps } = ctx;
+  const t = timeoutsOf(deps);
   const mine = ownHello(identity, deps, opts.role ?? null);
   ch.send({ t: "hello", pin, hello: mine });
 

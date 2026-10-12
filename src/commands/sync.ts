@@ -152,7 +152,9 @@ function printResult(result: PairResult, deps: SyncDeps) {
   deps.log(dim(`  ${describeRoles(result.myRole)}`));
   if (!result.peerSaved) {
     deps.log(
-      yellow("⚠ the peer did not acknowledge its save — it may not have saved; run abra sync peers on both machines"),
+      yellow(
+        `⚠ the peer did not acknowledge its save (${result.peerSaveError ?? "no acknowledgement"}) — it may not have saved; run abra sync peers on both machines`,
+      ),
     );
   }
 }

@@ -26,7 +26,15 @@ const PASS = "loopback-test-passphrase"; // test-only headless vault passphrase
 
 type Event =
   | { type: "listening"; port: number; pin: string; tlsFingerprint: string; identityFingerprint: string }
-  | { type: "done"; ok: boolean; error?: string; safetyCode?: { words: string[]; digits: string }; peerId?: string };
+  | {
+      type: "done";
+      ok: boolean;
+      error?: string;
+      safetyCode?: { words: string[]; digits: string };
+      peerId?: string;
+      peerSaved?: boolean;
+      peerSaveError?: string;
+    };
 
 function vaultEnv(dir: string): Record<string, string> {
   return {
@@ -135,7 +143,8 @@ describe.skipIf(!hasOpenssl)("abra sync pair — loopback, two processes", () =>
     expect(done.ok, done.error).toBe(true);
     expect(await h.exited).toBe(0);
     expect(done.safetyCode).toEqual(result.safetyCode);
-    expect(result.peerSaved).toBe(true);
+    expect(result.peerSaved, result.peerSaveError).toBe(true);
+    expect(done.peerSaved, done.peerSaveError).toBe(true);
     expect(result.myRole).toBe("receiver");
 
     const b = await loadVault(); // still dirB env
