@@ -35,3 +35,31 @@ describe("no private key on cast argv (source scan)", () => {
     expect(hits).toEqual([]);
   });
 });
+
+describe("abra sync: secrets stay off argv and out of files", () => {
+  it("sync pair has no --pin and no confirmation-skipping flag", async () => {
+    const { Command } = await import("commander");
+    const { registerSyncCommands } = await import("../commands/sync.js");
+    const program = new Command();
+    registerSyncCommands(program);
+    const pair = program.commands.find((c) => c.name() === "sync")!.commands.find((c) => c.name() === "pair")!;
+    const flags = pair.options.map((o) => o.long);
+    expect(flags).toContain("--fingerprint");
+    for (const forbidden of ["--pin", "--yes", "--confirm", "--code"]) {
+      expect(flags).not.toContain(forbidden);
+    }
+  });
+
+  it("src/sync never touches the filesystem (identity keys live only in the vault)", async () => {
+    const files = await collectSourceFiles(path.join(SRC_ROOT, "sync"));
+    expect(files.length).toBeGreaterThan(0);
+    const hits: string[] = [];
+    for (const file of files) {
+      const text = await fs.readFile(file, "utf8");
+      if (/from "node:fs"|from "fs"|require\("(node:)?fs"\)/.test(text)) {
+        hits.push(path.relative(SRC_ROOT, file));
+      }
+    }
+    expect(hits).toEqual([]);
+  });
+});

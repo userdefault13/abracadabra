@@ -1,14 +1,20 @@
 import https from "node:https";
 import http from "node:http";
-import crypto from "node:crypto";
 import os from "node:os";
 import type { Server as HttpsServer } from "node:https";
 import { sealBundle, sealScopedBundle, openBundle } from "../core/backup.js";
 import type { BackupBundle } from "../core/backup.js";
-import { loadVault, saveVault, encryptVault, decryptEnvelope } from "../core/vault.js";
+import {
+  loadVault,
+  saveVault,
+  encryptVaultForExport,
+  decryptEnvelope,
+  keepDeviceLocal,
+} from "../core/vault.js";
 import { getMasterKey, authenticate } from "../platform/index.js";
 import { saveSyncState, lanPeerId } from "../core/sync.js";
 import { createEphemeralTls } from "../core/tls-ephemeral.js";
+import { generatePin, timingSafePin, PIN_MAX_FAILURES } from "../core/pin.js";
 import {
   assertScopeNamesAllowed,
   validateScope,
@@ -70,19 +76,6 @@ function privateAddresses(): string[] {
   return out;
 }
 
-function generatePin(): string {
-  return String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
-}
-
-function timingSafePin(expected: Buffer, provided: string): boolean {
-  const got = Buffer.from(provided.normalize("NFKC"), "utf8");
-  if (got.length !== expected.length) {
-    crypto.timingSafeEqual(expected, expected);
-    return false;
-  }
-  return crypto.timingSafeEqual(expected, got);
-}
-
 function readJson(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -125,7 +118,7 @@ function extractPin(req: http.IncomingMessage): string {
 async function buildFullSealedBundle(pin: string): Promise<BackupBundle> {
   const vault = await loadVault();
   const masterKey = await getMasterKey();
-  return sealBundle(encryptVault(vault, masterKey), masterKey, pin);
+  return sealBundle(encryptVaultForExport(vault, masterKey), masterKey, pin);
 }
 
 async function buildScopedSealedBundle(
@@ -260,7 +253,7 @@ export async function startLanHost(opts: {
           const pinIn = extractPin(req);
           if (!timingSafePin(state.pinBuf, pinIn)) {
             state.failCount += 1;
-            if (state.failCount >= 8) state.locked = true;
+            if (state.failCount >= PIN_MAX_FAILURES) state.locked = true;
             sendJson(res, 401, { error: "invalid PIN" });
             return;
           }
@@ -358,7 +351,7 @@ export async function startLanHost(opts: {
           const pinIn = extractPin(req);
           if (!timingSafePin(state.pinBuf, pinIn)) {
             state.failCount += 1;
-            if (state.failCount >= 8) state.locked = true;
+            if (state.failCount >= PIN_MAX_FAILURES) state.locked = true;
             sendJson(res, 401, { error: "invalid PIN" });
             return;
           }
@@ -375,11 +368,12 @@ export async function startLanHost(opts: {
             return;
           }
           const peerMaster = Buffer.from(payload.masterKey, "base64");
-          const vault = decryptEnvelope(payload.vaultEnc, peerMaster);
+          const current = await loadVault();
+          // The push replaces this vault, but sync identity/peers stay this machine's own.
+          const vault = keepDeviceLocal(decryptEnvelope(payload.vaultEnc, peerMaster), current);
           // Host-side delete gate: the push REPLACES this vault, so any project present
           // here but missing from the pushed vault is a whole-project deletion.
           if (!state.allowDeletes) {
-            const current = await loadVault();
             const removed = Object.keys(current.projects).filter((n) => !vault.projects[n]);
             if (removed.length > 0) {
               sendJson(res, 409, {
