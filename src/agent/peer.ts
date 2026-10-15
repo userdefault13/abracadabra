@@ -7,6 +7,17 @@
  *
  * Non-Linux: reject unless a test-only `authorizePeer` override is supplied
  * (no /proc, no reliable equivalent without native addons).
+ *
+ * Why `ss` and not something cheaper:
+ * - SO_PEERCRED would hand us the peer pid straight from the kernel, but Node
+ *   exposes no getsockopt on net.Socket; it needs a native addon. Not used.
+ * - /proc/net/unix lists each socket's inode but never its peer inode, so it
+ *   cannot pair our accepted socket with the client end. Only sock_diag
+ *   (UNIX_DIAG_PEER, i.e. netlink) can — hence ss, hence AF_NETLINK in the unit.
+ * - `ss -p` builds its pid map by walking every /proc/<pid>/fd before applying
+ *   any filter, so `ss -xpn src <path>` would not make the expensive part
+ *   cheaper (and unix filters see only the server-side path). We run the full
+ *   listing, with a generous timeout and a few retries under load.
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -18,7 +29,24 @@ import type net from "node:net";
 const execFileAsync = promisify(execFile);
 
 const SS_CANDIDATES = ["/usr/bin/ss", "/usr/sbin/ss", "/bin/ss"] as const;
-const SS_TIMEOUT_MS = 1500;
+/** Per-attempt ss timeout. `-p` scans every /proc/<pid>/fd and spikes under load. */
+export const SS_TIMEOUT_MS = 5000;
+export const SS_MAX_ATTEMPTS = 3;
+/** Sleep before attempt 2, 3, … */
+export const SS_RETRY_BACKOFF_MS = [100, 300] as const;
+/** Upper bound for the whole ss phase (all attempts + backoff). */
+export const PEER_CHECK_BUDGET_MS = 12_000;
+
+/** ss stderr when sock_diag is blocked (RestrictAddressFamilies / seccomp / LSM). */
+const SS_NETLINK_STDERR =
+  /Cannot open netlink socket|Operation not permitted|Address family not supported|EAFNOSUPPORT|EPERM/i;
+
+export const SS_NETLINK_HINT =
+  "ss could not use sock_diag (netlink). If abra-agent runs as a systemd unit, " +
+  "set RestrictAddressFamilies=AF_UNIX AF_NETLINK, then: " +
+  "systemctl --user daemon-reload && systemctl --user restart abra-agent";
+export const SS_RETRY_HINT = "ss timed out (system load?) — retry: abra unlock";
+export const SS_GENERIC_RETRY_HINT = "peer lookup via ss failed — retry: abra unlock";
 
 /** Node flags that can inject code or a debugger before the script runs. */
 const DANGEROUS_NODE_FLAG =
@@ -48,9 +76,99 @@ export interface PeerCheckDeps {
   readlinkSync?: (p: string) => string;
   readFileSync?: (p: string) => Buffer;
   realpathSync?: (p: string) => string;
-  /** Return stdout of `ss -xpn` (injected in tests). */
-  runSs?: () => Promise<string>;
+  /** Return stdout of `ss -xpn` (injected in tests). Throw SsRunError to classify. */
+  runSs?: (opts: { timeoutMs: number }) => Promise<string>;
   existsSync?: (p: string) => boolean;
+  /** Backoff sleep between ss attempts (tests inject a no-op). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Monotonic clock in ms (tests). */
+  now?: () => number;
+  /** Diagnostic log line sink. Never receives peer cmdline / env. */
+  log?: (msg: string) => void;
+}
+
+export type SsFailureKind =
+  | "timeout"
+  | "exit"
+  | "not_found"
+  | "maxbuffer"
+  | "spawn"
+  | "netlink";
+
+export class SsRunError extends Error {
+  constructor(
+    readonly kind: SsFailureKind,
+    readonly exitCode: number | null = null,
+  ) {
+    super(`ss_failed:${kind}`);
+    this.name = "SsRunError";
+  }
+}
+
+/** Map an execFile rejection (or anything thrown by runSs) to a failure kind. */
+export function classifySsError(err: unknown): SsRunError {
+  if (err instanceof SsRunError) return err;
+  const e = (err ?? {}) as {
+    code?: unknown;
+    killed?: boolean;
+    signal?: unknown;
+    stderr?: unknown;
+  };
+  if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return new SsRunError("maxbuffer");
+  }
+  // execFile's timeout kills the child (killed=true, signal=SIGTERM).
+  if (e.killed === true || e.code === "ETIMEDOUT") {
+    return new SsRunError("timeout");
+  }
+  const stderr = typeof e.stderr === "string" ? e.stderr : "";
+  if (stderr && SS_NETLINK_STDERR.test(stderr)) {
+    return new SsRunError("netlink", typeof e.code === "number" ? e.code : null);
+  }
+  if (typeof e.code === "number") return new SsRunError("exit", e.code);
+  if (e.code === "ENOENT") return new SsRunError("not_found");
+  return new SsRunError("spawn");
+}
+
+/** `ss_failed:timeout`, `ss_failed:exit_1`, … */
+export function ssFailureReason(err: SsRunError): string {
+  if (err.kind === "exit" && err.exitCode !== null) {
+    return `ss_failed:exit_${err.exitCode}`;
+  }
+  return `ss_failed:${err.kind}`;
+}
+
+function isRetryableSsError(err: SsRunError): boolean {
+  // Missing binary / blocked netlink will not fix themselves in 300ms.
+  return err.kind !== "not_found" && err.kind !== "netlink";
+}
+
+/**
+ * Static, non-sensitive remediation text for a peer-check failure reason.
+ * Uses only the agent's own node path + CLI entrypoint — never peer data.
+ */
+export function peerFailureHint(
+  reason: string,
+  agent: { execPath: string; cliEntrypoint: string },
+): string | undefined {
+  if (reason === "exe_mismatch") {
+    return (
+      `abra-agent runs under node ${agent.execPath}; the CLI must use the same node binary ` +
+      `(a #!/usr/bin/env node shebang picks the first node on PATH). ` +
+      `Rerun: ${agent.execPath} ${agent.cliEntrypoint} unlock`
+    );
+  }
+  if (reason === "ss_failed:netlink" || reason === "ss_no_peer_info") {
+    return SS_NETLINK_HINT;
+  }
+  if (reason === "ss_failed:timeout") return SS_RETRY_HINT;
+  if (reason === "ss_failed:not_found") {
+    return "ss (iproute2) not found in /usr/bin, /usr/sbin or /bin — install iproute2";
+  }
+  if (reason.startsWith("ss_failed") || reason.startsWith("peer_pid_unresolved")) {
+    return SS_GENERIC_RETRY_HINT;
+  }
+  return undefined;
 }
 
 /** Resolve this package's `dist/index.js` from the agent module location. */
@@ -118,9 +236,13 @@ export function parseSsUnixXpn(stdout: string): SsUnixEntry[] {
       const p = Number(usersMatch[1]);
       if (Number.isSafeInteger(p) && p > 0) pid = p;
     }
-    // Multiple users:(...) groups on one line → ambiguous; drop pid.
+    // Multiple users:(...) groups, or several holders inside one group
+    // (`users:(("a",pid=1,fd=3),("b",pid=2,fd=4))` — inherited / passed fd)
+    // → ambiguous; drop pid.
     const userGroups = line.match(/users:\(/g);
     if (userGroups && userGroups.length > 1) pid = null;
+    const pidFields = line.match(/[(,]pid=\d+/g);
+    if (pidFields && pidFields.length > 1) pid = null;
 
     out.push({ localInode, peerInode, pid });
   }
@@ -135,19 +257,77 @@ export function resolvePeerPidFromSs(
   entries: SsUnixEntry[],
   localInode: number,
 ): number | null {
+  const r = resolvePeerFromSs(entries, localInode);
+  return r.ok ? r.pid : null;
+}
+
+export type SsPeerResolution =
+  | { ok: true; pid: number }
+  | {
+      ok: false;
+      /** local_not_found / peer_not_found / peer_pid_missing may be a race. */
+      detail:
+        | "local_not_found"
+        | "peer_not_found"
+        | "peer_pid_missing"
+        | "ambiguous";
+      retryable: boolean;
+    };
+
+/**
+ * Same as resolvePeerPidFromSs, but says why it failed. "Not visible yet"
+ * outcomes are retryable (the client's row can lag the accept, or the fd
+ * scan can miss a just-created fd); ambiguity never is.
+ */
+export function resolvePeerFromSs(
+  entries: SsUnixEntry[],
+  localInode: number,
+): SsPeerResolution {
   const ours = entries.filter((e) => e.localInode === localInode);
-  if (ours.length !== 1) return null;
+  if (ours.length === 0) {
+    return { ok: false, detail: "local_not_found", retryable: true };
+  }
+  if (ours.length !== 1) {
+    return { ok: false, detail: "ambiguous", retryable: false };
+  }
   const peerInode = ours[0].peerInode;
-  if (peerInode === localInode) return null;
+  if (peerInode === localInode) {
+    return { ok: false, detail: "ambiguous", retryable: false };
+  }
 
   const peers = entries.filter((e) => e.localInode === peerInode);
-  if (peers.length !== 1) return null;
+  if (peers.length === 0) {
+    return { ok: false, detail: "peer_not_found", retryable: true };
+  }
+  if (peers.length !== 1) {
+    return { ok: false, detail: "ambiguous", retryable: false };
+  }
   const pid = peers[0].pid;
-  if (pid === null || pid <= 0) return null;
+  if (pid === null || pid <= 0) {
+    return { ok: false, detail: "peer_pid_missing", retryable: true };
+  }
 
   // Pairing is uniquely determined by inode uniqueness above. Do not reject
   // when the same pid appears on other ESTAB rows (e.g. D-Bus / Secret Service).
-  return pid;
+  return { ok: true, pid };
+}
+
+/**
+ * True when ss printed connected unix rows but none carry a peer inode — ss
+ * fell back to /proc/net/unix because netlink (sock_diag) was unavailable.
+ */
+export function ssOutputLacksPeerInfo(stdout: string): boolean {
+  let estab = 0;
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("u_str") || !/\bESTAB\b/.test(line)) continue;
+    const beforeUsers = (line.split(/\susers:/)[0] ?? line).trimEnd();
+    const m = beforeUsers.match(/(\d+)\s+\*\s+(\d+)\s*$/);
+    if (!m) continue;
+    estab++;
+    if (Number(m[2]) > 0) return false;
+  }
+  return estab > 0;
 }
 
 export function parseProcCmdline(buf: Buffer): string[] {
@@ -281,7 +461,10 @@ export function isAllowedAbraCliPeer(
   return { allowed: true };
 }
 
-async function defaultRunSs(existsSync: (p: string) => boolean): Promise<string> {
+async function defaultRunSs(
+  existsSync: (p: string) => boolean,
+  timeoutMs: number,
+): Promise<string> {
   let ssPath: string | null = null;
   for (const c of SS_CANDIDATES) {
     if (existsSync(c)) {
@@ -290,14 +473,77 @@ async function defaultRunSs(existsSync: (p: string) => boolean): Promise<string>
     }
   }
   if (!ssPath) {
-    throw new Error("ss_not_found");
+    throw new SsRunError("not_found");
   }
-  const { stdout } = await execFileAsync(ssPath, ["-xpn"], {
-    timeout: SS_TIMEOUT_MS,
-    maxBuffer: 4 * 1024 * 1024,
-    encoding: "utf8",
-  });
-  return typeof stdout === "string" ? stdout : String(stdout);
+  try {
+    const { stdout } = await execFileAsync(ssPath, ["-xpn"], {
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+      encoding: "utf8",
+    });
+    return typeof stdout === "string" ? stdout : String(stdout);
+  } catch (e) {
+    throw classifySsError(e);
+  }
+}
+
+function defaultPeerLog(msg: string): void {
+  process.stderr.write(`abra-agent: peer ${msg}\n`);
+}
+
+/**
+ * Run ss until our socket's peer resolves to exactly one pid, or give up.
+ * Each attempt is resolved from its own snapshot — retries never merge data
+ * across snapshots, so a retry can only fail closed or find the same unique pid.
+ */
+async function resolvePeerPidWithRetry(
+  localInode: number,
+  deps: {
+    runSs: (opts: { timeoutMs: number }) => Promise<string>;
+    sleep: (ms: number) => Promise<void>;
+    now: () => number;
+    log: (msg: string) => void;
+  },
+): Promise<{ ok: true; pid: number } | { ok: false; reason: string }> {
+  const deadline = deps.now() + PEER_CHECK_BUDGET_MS;
+  let lastReason = "ss_failed:spawn";
+
+  for (let attempt = 1; attempt <= SS_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      const backoff =
+        SS_RETRY_BACKOFF_MS[Math.min(attempt - 2, SS_RETRY_BACKOFF_MS.length - 1)];
+      if (deps.now() + backoff >= deadline) break;
+      await deps.sleep(backoff);
+    }
+    const timeoutMs = Math.min(SS_TIMEOUT_MS, deadline - deps.now());
+    if (timeoutMs <= 0) break;
+
+    let out: string;
+    try {
+      out = await deps.runSs({ timeoutMs });
+    } catch (e) {
+      const err = classifySsError(e);
+      lastReason = ssFailureReason(err);
+      deps.log(`${lastReason} attempt=${attempt}/${SS_MAX_ATTEMPTS}`);
+      if (!isRetryableSsError(err)) return { ok: false, reason: lastReason };
+      continue;
+    }
+
+    if (ssOutputLacksPeerInfo(out)) {
+      deps.log(`ss_no_peer_info attempt=${attempt}/${SS_MAX_ATTEMPTS}`);
+      return { ok: false, reason: "ss_no_peer_info" };
+    }
+
+    const r = resolvePeerFromSs(parseSsUnixXpn(out), localInode);
+    if (r.ok) {
+      if (attempt > 1) deps.log(`resolved attempt=${attempt}/${SS_MAX_ATTEMPTS}`);
+      return r;
+    }
+    lastReason = `peer_pid_unresolved:${r.detail}`;
+    deps.log(`${lastReason} attempt=${attempt}/${SS_MAX_ATTEMPTS}`);
+    if (!r.retryable) return { ok: false, reason: lastReason };
+  }
+  return { ok: false, reason: lastReason };
 }
 
 /**
@@ -318,7 +564,14 @@ export async function authorizePeer(
   const realpathSync = deps.realpathSync ?? ((p: string) => fs.realpathSync(p));
   const existsSync = deps.existsSync ?? ((p: string) => fs.existsSync(p));
   const getFd = deps.getSocketFd ?? getSocketFd;
-  const runSs = deps.runSs ?? (() => defaultRunSs(existsSync));
+  const runSs =
+    deps.runSs ??
+    ((o: { timeoutMs: number }) => defaultRunSs(existsSync, o.timeoutMs));
+  const sleep =
+    deps.sleep ??
+    ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = deps.now ?? (() => performance.now());
+  const log = deps.log ?? defaultPeerLog;
 
   const fd = getFd(socket);
   if (fd === null) {
@@ -335,18 +588,16 @@ export async function authorizePeer(
     return { ok: false, reason: "bad_socket_inode" };
   }
 
-  let ssOut: string;
-  try {
-    ssOut = await runSs();
-  } catch {
-    return { ok: false, reason: "ss_failed" };
+  const resolved = await resolvePeerPidWithRetry(inode, {
+    runSs,
+    sleep,
+    now,
+    log,
+  });
+  if (!resolved.ok) {
+    return { ok: false, reason: resolved.reason };
   }
-
-  const entries = parseSsUnixXpn(ssOut);
-  const pid = resolvePeerPidFromSs(entries, inode);
-  if (pid === null) {
-    return { ok: false, reason: "peer_pid_unresolved" };
-  }
+  const pid = resolved.pid;
 
   let peerExe: string;
   try {

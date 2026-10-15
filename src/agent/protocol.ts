@@ -19,6 +19,18 @@ export type AgentOp =
   | "grant.revoke"
   | "grant.check";
 
+/** Ops that unlock the in-memory master key, return vault plaintext, or manage grants. */
+export const SENSITIVE_OPS: ReadonlySet<AgentOp> = new Set<AgentOp>([
+  "unlock",
+  "unlock.key",
+  "vault.load",
+  "vault.save",
+  "grant.add",
+  "grant.list",
+  "grant.revoke",
+  "grant.check",
+]);
+
 export interface AgentStatusBody {
   locked: boolean;
   /** Milliseconds until idle lock; null when locked or no idle timer. */
@@ -171,6 +183,10 @@ export type AgentResponse =
       ok: false;
       error: string;
       code: AgentErrorCode;
+      /** forbidden_peer: static reason code (e.g. `exe_mismatch`, `ss_failed:timeout`). */
+      reason?: string;
+      /** forbidden_peer: static remediation text. Never contains peer cmdline/env. */
+      hint?: string;
     };
 
 function isGrantCaller(raw: unknown): raw is GrantCaller {
