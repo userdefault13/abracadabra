@@ -83,8 +83,12 @@ describe("cmdSetupLauncher", () => {
     cmdSetupLauncher({ dir }, deps);
     const target = path.join(dir, "abra");
     expect(fs.existsSync(target)).toBe(true);
-    const mode = fs.statSync(target).mode & 0o777;
-    expect(mode).toBe(0o755);
+    // Injected platform is linux (launcher is written), but real win32 hosts
+    // have no POSIX mode bits — skip the 0755 check there.
+    if (process.platform !== "win32") {
+      const mode = fs.statSync(target).mode & 0o777;
+      expect(mode).toBe(0o755);
+    }
     const body = fs.readFileSync(target, "utf8");
     expect(body).toContain("v9.9.9");
     expect(body).toContain(`exec '${node}' '${entry}' "$@"\n`);
