@@ -53,6 +53,11 @@ import {
   type SleepWatchHandle,
 } from "./sleep-watch.js";
 import { AgentInbox, type AgentInboxController, type AgentInboxDeps } from "./inbox.js";
+import {
+  AgentRemoteUnlock,
+  type AgentRemoteUnlockController,
+  type AgentRemoteUnlockDeps,
+} from "./remote-unlock.js";
 
 export type { AgentStatusBody };
 
@@ -91,6 +96,11 @@ export interface StartAgentOpts {
    * - factory → wrap/replace the default deps (tests)
    */
   syncInbox?: false | ((defaults: AgentInboxDeps) => AgentInboxController);
+  /**
+   * Remote unlock listener (port 7335, Tailscale-only). Off unless
+   * ABRA_REMOTE_UNLOCK=1 and enrolled. `false` disables; factory for tests.
+   */
+  remoteUnlock?: false | ((defaults: AgentRemoteUnlockDeps) => AgentRemoteUnlockController);
 }
 
 let running: {
@@ -103,6 +113,7 @@ let running: {
   authorizePeer: AuthorizePeerFn;
   sleepWatch: SleepWatchHandle | null;
   inbox: AgentInboxController | null;
+  remoteUnlock: AgentRemoteUnlockController | null;
 } | null = null;
 
 const INBOX_OFF: AgentInboxStatusBody = {
@@ -669,6 +680,23 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     inbox = typeof opts?.syncInbox === "function" ? opts.syncInbox(defaults) : new AgentInbox(defaults);
   }
 
+  let remoteUnlock: AgentRemoteUnlockController | null = null;
+  if (opts?.remoteUnlock !== false) {
+    const defaults: AgentRemoteUnlockDeps = {
+      base: path.dirname(vaultPath()),
+      state,
+      vaultPath,
+      log: (detail) => logOp("remote-unlock", detail),
+      onUnlocked: () => {
+        void running?.inbox?.onUnlock();
+      },
+    };
+    remoteUnlock =
+      typeof opts?.remoteUnlock === "function"
+        ? opts.remoteUnlock(defaults)
+        : new AgentRemoteUnlock(defaults);
+  }
+
   running = {
     server,
     state,
@@ -679,18 +707,25 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     authorizePeer: authorize,
     sleepWatch: sleep,
     inbox,
+    remoteUnlock,
   };
   await inbox?.start();
+  await remoteUnlock?.start();
   logOp("listen", socketPath);
   return { socketPath, state };
 }
 
 export async function stopAgent(): Promise<void> {
   if (!running) return;
-  const { server, state, socketPath, sleepWatch, inbox } = running;
+  const { server, state, socketPath, sleepWatch, inbox, remoteUnlock } = running;
   running = null;
   try {
     sleepWatch?.stop();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await remoteUnlock?.stop();
   } catch {
     /* ignore */
   }

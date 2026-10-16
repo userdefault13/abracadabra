@@ -1,6 +1,6 @@
 /**
  * Remote unlock (hub-held unwrap key + bot leases) is off by default.
- * Nothing auto-starts; later PRs gate listeners / unlock on this flag.
+ * Enroll + the abra-agent unlock listener (port 7335) require this flag.
  * Explicit CLI (e.g. `abra remote whoami`) may still be invoked by hand.
  */
 export function isRemoteUnlockEnabled(): boolean {
