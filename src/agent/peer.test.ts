@@ -14,13 +14,35 @@ import {
   peerFailureHint,
   resolvePeerFromSs,
   ssOutputLacksPeerInfo,
+  formatExeIdentityLog,
+  sameFileByIdentityOrPath,
   SsRunError,
   SS_MAX_ATTEMPTS,
   SS_NETLINK_HINT,
   SS_RETRY_HINT,
   SS_TIMEOUT_MS,
+  type FileIdentity,
   type PeerCheckDeps,
+  type StatSyncFn,
 } from "./peer.js";
+
+const NODE_ID: FileIdentity = { dev: 1n, ino: 100n };
+const OTHER_NODE_ID: FileIdentity = { dev: 1n, ino: 999n };
+const CLI_ID: FileIdentity = { dev: 1n, ino: 200n };
+const OTHER_CLI_ID: FileIdentity = { dev: 1n, ino: 888n };
+
+function fileId(dev: bigint | number, ino: bigint | number): FileIdentity {
+  return { dev: BigInt(dev), ino: BigInt(ino) };
+}
+
+/** Map absolute paths → identity; throws if missing (fail-closed). */
+function mapStatSync(map: Record<string, FileIdentity>): StatSyncFn {
+  return (p) => {
+    const id = map[p];
+    if (!id) throw Object.assign(new Error("ENOENT"), { code: "ENOENT", path: p });
+    return { dev: id.dev, ino: id.ino };
+  };
+}
 
 /** Realistic `ss -xpn` excerpt (iproute2 unix ESTAB + users). */
 const SS_FIXTURE = `
@@ -162,8 +184,10 @@ describe("isAllowedAbraCliPeer", () => {
       peerArgv: [node, "/tmp/evil.js"],
       cliEntrypointRealpath: cli,
       realpathSync,
+      // Fake paths: stats fail → string fallback → script_stat_failed.
+      // Identity mismatch is covered separately below.
     });
-    expect(r).toEqual({ allowed: false, reason: "argv_script_mismatch" });
+    expect(r).toEqual({ allowed: false, reason: "script_stat_failed" });
   });
 
   it("rejects node flags before the script", () => {
@@ -229,7 +253,8 @@ describe("isAllowedAbraCliPeer", () => {
         return realpathSync(p);
       },
     });
-    expect(r).toEqual({ allowed: false, reason: "argv_script_mismatch" });
+    // Stats fail on synthetic paths; differing realpaths → script_stat_failed.
+    expect(r).toEqual({ allowed: false, reason: "script_stat_failed" });
   });
 
   it("rejects relative argv[1] when peer cwd is unreadable", () => {
@@ -267,14 +292,21 @@ describe("isAllowedAbraCliPeer", () => {
       if (p === pkgCli || p === miseNode) return p;
       return p;
     };
+    const ids = mapStatSync({
+      [pkgCli]: CLI_ID,
+      [npmBin]: CLI_ID,
+    });
     // launcher script: exec node dist/index.js → argv = [node, abs index, …]
     expect(
       isAllowedAbraCliPeer({
         peerExeRealpath: miseNode,
         agentExecRealpath: miseNode,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
         peerArgv: [miseNode, pkgCli, "unlock"],
         cliEntrypointRealpath: pkgCli,
         realpathSync: rp,
+        statSync: ids,
       }),
     ).toEqual({ allowed: true });
     // npm bin symlink …/bin/abra → …/dist/index.js
@@ -282,9 +314,12 @@ describe("isAllowedAbraCliPeer", () => {
       isAllowedAbraCliPeer({
         peerExeRealpath: miseNode,
         agentExecRealpath: miseNode,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
         peerArgv: [miseNode, npmBin, "unlock"],
         cliEntrypointRealpath: pkgCli,
         realpathSync: rp,
+        statSync: ids,
       }),
     ).toEqual({ allowed: true });
     // direct node dist/index.js
@@ -292,9 +327,12 @@ describe("isAllowedAbraCliPeer", () => {
       isAllowedAbraCliPeer({
         peerExeRealpath: miseNode,
         agentExecRealpath: miseNode,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
         peerArgv: [miseNode, pkgCli, "ls"],
         cliEntrypointRealpath: pkgCli,
         realpathSync: rp,
+        statSync: ids,
       }),
     ).toEqual({ allowed: true });
   });
@@ -304,29 +342,200 @@ describe("isAllowedAbraCliPeer", () => {
       isAllowedAbraCliPeer({
         peerExeRealpath: "/other/node",
         agentExecRealpath: node,
+        peerExeId: OTHER_NODE_ID,
+        agentExeId: NODE_ID,
         peerArgv: [node, cli],
         cliEntrypointRealpath: cli,
         realpathSync,
+        statSync: mapStatSync({ [cli]: CLI_ID }),
       }).allowed,
     ).toBe(false);
     expect(
       isAllowedAbraCliPeer({
         peerExeRealpath: node,
         agentExecRealpath: node,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
         peerArgv: [node, "/tmp/copy-of-index.js"],
         cliEntrypointRealpath: cli,
         realpathSync,
+        statSync: mapStatSync({
+          "/tmp/copy-of-index.js": OTHER_CLI_ID,
+          [cli]: CLI_ID,
+        }),
       }),
     ).toEqual({ allowed: false, reason: "argv_script_mismatch" });
     expect(
       isAllowedAbraCliPeer({
         peerExeRealpath: node,
         agentExecRealpath: node,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
         peerArgv: [node, "--require", "x", cli],
         cliEntrypointRealpath: cli,
         realpathSync,
+        statSync: mapStatSync({ [cli]: CLI_ID }),
       }),
     ).toEqual({ allowed: false, reason: "node_flags_in_argv" });
+  });
+
+  it("allows same inode when path strings differ", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: "/usr/local/bin/node",
+      agentExecRealpath: "/usr/bin/node",
+      peerExeId: NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      statSync: mapStatSync({ [cli]: CLI_ID }),
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it('allows a " (deleted)" readlink target with the same inode', () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: "/usr/bin/node (deleted)",
+      agentExecRealpath: "/usr/bin/node",
+      peerExeId: NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      statSync: mapStatSync({ [cli]: CLI_ID }),
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("rejects different inode even when path strings match", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerExeId: OTHER_NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      statSync: mapStatSync({ [cli]: CLI_ID }),
+    });
+    expect(r).toEqual({ allowed: false, reason: "exe_mismatch" });
+  });
+
+  it("allows when exe stat fails but realpath strings are equal", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerExeId: null,
+      agentExeId: NODE_ID,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      statSync: mapStatSync({ [cli]: CLI_ID }),
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("rejects when exe stat fails and realpath strings differ (exe_stat_failed)", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: "/usr/local/bin/node",
+      agentExecRealpath: node,
+      peerExeId: null,
+      agentExeId: null,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      statSync: mapStatSync({ [cli]: CLI_ID }),
+    });
+    expect(r).toEqual({ allowed: false, reason: "exe_stat_failed" });
+  });
+
+  it("allows script same inode when path strings differ", () => {
+    const alias = "/usr/local/lib/abra/index.js";
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerExeId: NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, alias, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync: (p) => (p === alias ? alias : realpathSync(p)),
+      statSync: mapStatSync({ [alias]: CLI_ID, [cli]: CLI_ID }),
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("rejects script different inode even when path strings match", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerExeId: NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      statSync: mapStatSync({ [cli]: OTHER_CLI_ID }),
+      cliEntrypointId: CLI_ID,
+    });
+    expect(r).toEqual({ allowed: false, reason: "argv_script_mismatch" });
+  });
+
+  it("allows when script stat fails but realpath strings are equal", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerExeId: NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, cli, "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync,
+      // both stats fail → string fallback
+      statSync: () => {
+        throw new Error("ENOENT");
+      },
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("rejects when script stat fails and realpath strings differ (script_stat_failed)", () => {
+    const r = isAllowedAbraCliPeer({
+      peerExeRealpath: node,
+      agentExecRealpath: node,
+      peerExeId: NODE_ID,
+      agentExeId: NODE_ID,
+      peerArgv: [node, "/tmp/other.js", "ls"],
+      cliEntrypointRealpath: cli,
+      realpathSync: (p) => p,
+      statSync: () => {
+        throw new Error("ENOENT");
+      },
+    });
+    expect(r).toEqual({ allowed: false, reason: "script_stat_failed" });
+  });
+});
+
+describe("exe identity log", () => {
+  it("contains pid and both ids but no argv", () => {
+    const line = formatExeIdentityLog({
+      reason: "exe_mismatch",
+      pid: 2222,
+      peerExe: "/usr/bin/node (deleted)",
+      peerId: fileId(1, 100),
+      agentExe: "/usr/bin/node",
+      agentId: fileId(1, 200),
+    });
+    expect(line).toBe(
+      "exe_mismatch pid=2222 peer_exe=/usr/bin/node (deleted) peer_id=1:100 agent_exe=/usr/bin/node agent_id=1:200",
+    );
+    expect(line).not.toMatch(/argv|cmdline|NODE_OPTIONS|unlock/i);
+  });
+
+  it("never allows on string alone when both stats succeeded and differ", () => {
+    expect(
+      sameFileByIdentityOrPath(NODE_ID, OTHER_NODE_ID, "/usr/bin/node", "/usr/bin/node", {
+        mismatch: "exe_mismatch",
+        statFailed: "exe_stat_failed",
+      }),
+    ).toEqual({ ok: false, reason: "exe_mismatch" });
   });
 });
 
@@ -350,6 +559,7 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
       getSocketFd: () => 20,
       readlinkSync: (p) => {
         if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return node;
         throw new Error("unexpected readlink " + p);
       },
       runSs: async () => SS_FIXTURE,
@@ -358,6 +568,11 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
         if (p === node || p === cli) return p;
         return p;
       },
+      statSync: mapStatSync({
+        "/proc/2222/exe": NODE_ID,
+        "/proc/self/exe": NODE_ID,
+        [cli]: CLI_ID,
+      }),
       readFileSync: (p) => {
         if (p === "/proc/2222/cmdline") {
           return Buffer.from(`${node}\0${cli}\0ls\0`);
@@ -394,28 +609,113 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
     expect(calls).toBe(1); // missing binary is not retried
   });
 
-  it("rejects exe mismatch via injected proc", async () => {
+  it("rejects exe mismatch via injected proc and logs ids without argv", async () => {
     const node = "/usr/bin/node";
     const cli = "/opt/abra/dist/index.js";
+    const logs: string[] = [];
     const r = await authorizePeer(fakeSocket(), {
       platform: "linux",
       execPath: node,
       cliEntrypoint: cli,
       getSocketFd: () => 20,
-      readlinkSync: () => "socket:[40321]",
+      readlinkSync: (p) => {
+        if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return "/usr/bin/python3";
+        throw new Error("unexpected readlink " + p);
+      },
       runSs: async () => SS_FIXTURE,
       realpathSync: (p) => {
         if (p === `/proc/2222/exe`) return "/usr/bin/python3";
         if (p === node || p === cli) return p;
         return p;
       },
+      statSync: mapStatSync({
+        "/proc/2222/exe": OTHER_NODE_ID,
+        "/proc/self/exe": NODE_ID,
+        [cli]: CLI_ID,
+      }),
       readFileSync: (p) => {
         if (p.includes("cmdline")) return Buffer.from(`python3\0${cli}\0`);
         if (p.includes("environ")) return Buffer.from("PATH=/usr/bin\0");
         throw new Error(p);
       },
+      log: (m) => logs.push(m),
     });
     expect(r).toEqual({ ok: false, reason: "exe_mismatch" });
+    expect(logs.some((l) => l.startsWith("exe_mismatch pid=2222"))).toBe(true);
+    const line = logs.find((l) => l.startsWith("exe_mismatch pid="))!;
+    expect(line).toContain(`peer_id=${OTHER_NODE_ID.dev}:${OTHER_NODE_ID.ino}`);
+    expect(line).toContain(`agent_id=${NODE_ID.dev}:${NODE_ID.ino}`);
+    expect(line).toContain("peer_exe=/usr/bin/python3");
+    expect(line).not.toMatch(/cmdline|argv|python3\\0|NODE_OPTIONS/i);
+  });
+
+  it("allows same inode when peer exe path string differs (alias)", async () => {
+    const node = "/usr/bin/node";
+    const alias = "/nix/store/aaa/bin/node";
+    const cli = "/opt/abra/dist/index.js";
+    const r = await authorizePeer(fakeSocket(), {
+      platform: "linux",
+      execPath: node,
+      cliEntrypoint: cli,
+      getSocketFd: () => 20,
+      readlinkSync: (p) => {
+        if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return alias;
+        throw new Error("unexpected readlink " + p);
+      },
+      runSs: async () => SS_FIXTURE,
+      realpathSync: (p) => {
+        if (p === `/proc/2222/exe`) return alias;
+        if (p === node || p === cli) return p;
+        return p;
+      },
+      statSync: mapStatSync({
+        "/proc/2222/exe": NODE_ID,
+        "/proc/self/exe": NODE_ID,
+        [cli]: CLI_ID,
+      }),
+      readFileSync: (p) => {
+        if (p === "/proc/2222/cmdline") return Buffer.from(`${alias}\0${cli}\0ls\0`);
+        if (p === "/proc/2222/environ") return Buffer.from("PATH=/usr/bin\0");
+        throw new Error("unexpected read " + p);
+      },
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('allows " (deleted)" peer exe with the same inode', async () => {
+    const node = "/usr/bin/node";
+    const cli = "/opt/abra/dist/index.js";
+    const deleted = "/usr/bin/node (deleted)";
+    const r = await authorizePeer(fakeSocket(), {
+      platform: "linux",
+      execPath: node,
+      cliEntrypoint: cli,
+      getSocketFd: () => 20,
+      readlinkSync: (p) => {
+        if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return deleted;
+        throw new Error("unexpected readlink " + p);
+      },
+      runSs: async () => SS_FIXTURE,
+      realpathSync: (p) => {
+        if (p === `/proc/2222/exe`) return deleted;
+        if (p === node || p === cli) return p;
+        return p;
+      },
+      statSync: mapStatSync({
+        "/proc/2222/exe": NODE_ID,
+        "/proc/self/exe": NODE_ID,
+        [cli]: CLI_ID,
+      }),
+      readFileSync: (p) => {
+        if (p === "/proc/2222/cmdline") return Buffer.from(`${node}\0${cli}\0ls\0`);
+        if (p === "/proc/2222/environ") return Buffer.from("PATH=/usr/bin\0");
+        throw new Error("unexpected read " + p);
+      },
+    });
+    expect(r.ok).toBe(true);
   });
 
   it("rejects relative argv[1] when peer cwd is unreadable", async () => {
@@ -429,6 +729,7 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
       getSocketFd: () => 20,
       readlinkSync: (p) => {
         if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return node;
         // /proc/2222/cwd unreadable
         throw new Error("cwd unreadable");
       },
@@ -438,6 +739,10 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
         if (p === node || p === cli) return p;
         return p;
       },
+      statSync: mapStatSync({
+        "/proc/2222/exe": NODE_ID,
+        "/proc/self/exe": NODE_ID,
+      }),
       readFileSync: (p) => {
         if (p === "/proc/2222/cmdline") {
           return Buffer.from(`${node}\0${relative}\0ls\0`);
@@ -456,6 +761,7 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
     const cli = "/opt/abra/dist/index.js";
     const relative = "opt/abra/dist/index.js";
     const peerCwd = "/";
+    const scriptAbs = path.resolve(peerCwd, relative);
     const r = await authorizePeer(fakeSocket(), {
       platform: "linux",
       execPath: node,
@@ -463,16 +769,23 @@ describe("authorizePeer (injected, no real /proc or ss)", () => {
       getSocketFd: () => 20,
       readlinkSync: (p) => {
         if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return node;
         if (p === "/proc/2222/cwd") return peerCwd;
         throw new Error("unexpected readlink " + p);
       },
       runSs: async () => SS_FIXTURE,
       realpathSync: (p) => {
         if (p === `/proc/2222/exe`) return node;
-        if (p === path.resolve(peerCwd, relative)) return cli;
+        if (p === scriptAbs) return cli;
         if (p === node || p === cli) return p;
         return p;
       },
+      statSync: mapStatSync({
+        "/proc/2222/exe": NODE_ID,
+        "/proc/self/exe": NODE_ID,
+        [scriptAbs]: CLI_ID,
+        [cli]: CLI_ID,
+      }),
       readFileSync: (p) => {
         if (p === "/proc/2222/cmdline") {
           return Buffer.from(`${node}\0${relative}\0ls\0`);
@@ -546,6 +859,7 @@ describe("peerFailureHint", () => {
     expect(h).toContain(
       "/usr/bin/node /usr/lib/abracadabra/dist/index.js unlock",
     );
+    expect(peerFailureHint("exe_stat_failed", agent)).toBe(h);
   });
 
   it("no hint for policy rejections that must not be coached", () => {
@@ -607,6 +921,8 @@ describe("authorizePeer ss retry / backoff", () => {
       getSocketFd: () => 20,
       readlinkSync: (p) => {
         if (p === "/proc/self/fd/20") return "socket:[40321]";
+        if (p === "/proc/2222/exe") return node;
+        if (p === "/proc/9999/exe") return "/usr/bin/python3";
         throw new Error("unexpected readlink " + p);
       },
       runSs,
@@ -616,6 +932,12 @@ describe("authorizePeer ss retry / backoff", () => {
         if (p === "/proc/9999/exe") return "/usr/bin/python3";
         return p;
       },
+      statSync: mapStatSync({
+        "/proc/2222/exe": NODE_ID,
+        "/proc/9999/exe": OTHER_NODE_ID,
+        "/proc/self/exe": NODE_ID,
+        [cli]: CLI_ID,
+      }),
       readFileSync: (p) => {
         extra.procReads?.push(p);
         if (p.endsWith("/cmdline")) return Buffer.from(`${node}\0${cli}\0unlock\0`);
