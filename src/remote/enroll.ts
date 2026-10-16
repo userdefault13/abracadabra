@@ -122,7 +122,7 @@ export function prepareReceiverEnroll(input: ReceiverEnrollInput): ReceiverEnrol
 export function planHubEnroll(
   vault: Vault,
   offerRaw: unknown,
-  opts: { now?: number } = {},
+  opts: { now?: number; listenerCert?: string } = {},
 ): { vault: Vault; peerId: string; peerName: string; unlockWrap: UnlockWrap } {
   const identity = vault.syncIdentity;
   if (!identity) {
@@ -158,6 +158,7 @@ export function planHubEnroll(
       deviceX25519: offer.deviceX25519,
       masterKeyFingerprint: offer.masterKeyFingerprint,
       enrolledAt: opts.now ?? offer.createdAt,
+      ...(opts.listenerCert ? { listenerCert: opts.listenerCert } : {}),
     };
   } finally {
     wrapKey.fill(0);
@@ -205,6 +206,7 @@ export async function completeHubEnroll(
   offer: unknown,
   peerNameOrId: string,
   deps: EnrollHubDeps,
+  opts: { listenerCert?: string } = {},
 ): Promise<{ peerId: string; peerName: string }> {
   const before = await deps.loadVault();
   const found = findPeer(before, peerNameOrId);
@@ -227,7 +229,10 @@ export async function completeHubEnroll(
   let peerId = found.id;
   let peerName = found.peer.name;
   await deps.updateVault((fresh) => {
-    const plan = planHubEnroll(fresh, offer, { now: deps.now?.() });
+    const plan = planHubEnroll(fresh, offer, {
+      now: deps.now?.(),
+      listenerCert: opts.listenerCert,
+    });
     if (plan.peerId !== found.id) {
       throw new EnrollError("peer changed during enroll — refuse");
     }

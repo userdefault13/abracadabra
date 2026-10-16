@@ -33,7 +33,12 @@ export const CHALLENGE_NONCE_BYTES = 32;
 export const MAX_RESPONSE_TTL_MS = 30_000;
 export const UNLOCK_MAX_BODY_BYTES = 8 * 1024;
 export const UNLOCK_PATH = "/v1/remote/unlock";
+export const LOCK_PATH = "/v1/remote/lock";
+export const STATUS_PATH = "/v1/remote/status";
+export const ENROLL_PATH = "/v1/remote/enroll";
 export const REMOTE_UNLOCK_PORT = 7335;
+
+const SIG_LOCK_DOMAIN = `${UNLOCK_WIRE_DOMAIN}/lock-sig`;
 
 const GCM_TAG_BYTES = 16;
 const SEAL_NONCE_BYTES = 12;
@@ -79,6 +84,20 @@ export interface UnlockResponse {
 }
 
 export type UnlockWireMessage = UnlockChallenge | UnlockResponse;
+
+/** Hub → receiver signed lock (no Touch ID; no wrap key). */
+export interface LockRequest {
+  v: typeof UNLOCK_WIRE_VERSION;
+  op: "lock";
+  /** Hub sync / pin id. */
+  from: string;
+  /** Receiver device-key id. */
+  peerId: string;
+  /** base64 raw 32-byte nonce */
+  nonce: string;
+  expiresAt: number;
+  sig: string;
+}
 
 export class UnlockWireError extends Error {
   constructor(
@@ -559,4 +578,109 @@ export function openWrapKeyFromResponse(
     if (err instanceof UnlockWireError) throw err;
     throw new UnlockWireError("decrypt-failed", "unlock seal could not be decrypted");
   }
+}
+
+function lockSigMessage(r: Omit<LockRequest, "sig">): Buffer {
+  return lengthPrefixed([
+    Buffer.from(SIG_LOCK_DOMAIN, "utf8"),
+    Buffer.from(String(r.v), "utf8"),
+    Buffer.from(r.from, "utf8"),
+    Buffer.from(r.peerId, "utf8"),
+    Buffer.from(r.nonce, "base64"),
+    Buffer.from(String(r.expiresAt), "utf8"),
+  ]);
+}
+
+const LOCK_KEYS = new Set(["v", "op", "from", "peerId", "nonce", "expiresAt", "sig"]);
+
+/** Strict structural parse for a lock request (no crypto). */
+export function parseLockRequest(raw: unknown): LockRequest {
+  const bad = (): never => {
+    throw new UnlockWireError("malformed", "malformed lock request");
+  };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) bad();
+  const e = raw as Record<string, unknown>;
+  if (e.v !== UNLOCK_WIRE_VERSION || e.op !== "lock") bad();
+  for (const k of Object.keys(e)) {
+    if (!LOCK_KEYS.has(k)) bad();
+  }
+  if (!isUuid(e.from) || !isUuid(e.peerId)) bad();
+  if (typeof e.expiresAt !== "number" || !Number.isSafeInteger(e.expiresAt) || e.expiresAt < 0) bad();
+  if (!strictB64(e.nonce, CHALLENGE_NONCE_BYTES)) bad();
+  if (!strictB64(e.sig, 64)) bad();
+  return {
+    v: UNLOCK_WIRE_VERSION,
+    op: "lock",
+    from: e.from as string,
+    peerId: e.peerId as string,
+    nonce: e.nonce as string,
+    expiresAt: e.expiresAt as number,
+    sig: e.sig as string,
+  };
+}
+
+/** Hub: sign a lock request for a receiver device id. */
+export function buildLockRequest(opts: {
+  hubIdentity: SyncIdentity;
+  peerDeviceId: string;
+  now?: number;
+  expiresAt?: number;
+  nonce?: Buffer;
+}): LockRequest {
+  const now = opts.now ?? Date.now();
+  const expiresAt = opts.expiresAt ?? now + MAX_RESPONSE_TTL_MS;
+  if (expiresAt - now > MAX_RESPONSE_TTL_MS) {
+    throw new UnlockWireError("expired", "lock expiry exceeds 30s maximum");
+  }
+  if (expiresAt <= now) {
+    throw new UnlockWireError("expired", "lock expiry is not in the future");
+  }
+  if (!isUuid(opts.peerDeviceId)) {
+    throw new UnlockWireError("malformed", "lock peer id must be a UUID");
+  }
+  const nonceBuf = opts.nonce ?? crypto.randomBytes(CHALLENGE_NONCE_BYTES);
+  if (nonceBuf.length !== CHALLENGE_NONCE_BYTES) throw new Error("lock nonce must be 32 bytes");
+  const unsigned: Omit<LockRequest, "sig"> = {
+    v: UNLOCK_WIRE_VERSION,
+    op: "lock",
+    from: opts.hubIdentity.id,
+    peerId: opts.peerDeviceId,
+    nonce: nonceBuf.toString("base64"),
+    expiresAt,
+  };
+  const sig = crypto.sign(null, lockSigMessage(unsigned), ed25519PrivateKey(opts.hubIdentity));
+  return { ...unsigned, sig: sig.toString("base64") };
+}
+
+/** Receiver: verify hub signature + expiry against hub-pin. */
+export function verifyLockRequest(
+  request: LockRequest,
+  hubPin: HubPin,
+  opts: { now?: number; expectedPeerId?: string } = {},
+): void {
+  const now = opts.now ?? Date.now();
+  if (request.from !== hubPin.deviceId) {
+    throw new UnlockWireError("wrong-hub", "lock request is not from the pinned hub");
+  }
+  if (opts.expectedPeerId !== undefined && request.peerId !== opts.expectedPeerId) {
+    throw new UnlockWireError("wrong-device", "lock request peer id does not match this device");
+  }
+  if (request.expiresAt <= now) {
+    throw new UnlockWireError("expired", "lock request has expired");
+  }
+  if (request.expiresAt - now > MAX_RESPONSE_TTL_MS) {
+    throw new UnlockWireError("expired", "lock request expiry exceeds 30s");
+  }
+  let ok = false;
+  try {
+    ok = crypto.verify(
+      null,
+      lockSigMessage(request),
+      ed25519PublicKey(hubPin.ed25519),
+      Buffer.from(request.sig, "base64"),
+    );
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new UnlockWireError("bad-signature", "lock signature does not match hub pin");
 }

@@ -1,21 +1,23 @@
 import fs from "node:fs";
 import { decryptVault } from "../core/vault.js";
-import { detectTailscaleIPv4 } from "../sync/tailscale.js";
+import { prepareReceiverEnroll } from "../remote/enroll.js";
 import { isRemoteUnlockEnabled } from "../remote/feature.js";
 import {
   UnlockSession,
-  createUnlockRequestHandler,
+  createRemoteRequestHandler,
+  dispatchRemoteSession,
   isRemoteUnlockEnrolled,
   loadOrCreateRemoteUnlockTls,
   startUnlockListener,
   REMOTE_UNLOCK_PORT,
   type UnlockListener,
 } from "../remote/listener.js";
+import { detectTailscaleIPv4 } from "../sync/tailscale.js";
 import type { AgentState } from "./state.js";
 
 /**
- * abra-agent side of remote unlock. Listener runs only while
- * ABRA_REMOTE_UNLOCK=1 and enroll artifacts exist (device key + hub pin + blob).
+ * abra-agent side of remote unlock. Listener runs when ABRA_REMOTE_UNLOCK=1 and
+ * either enrolled (device key + hub pin + blob) or unlocked (so enroll can be served).
  * Bind mirrors the sync inbox: Tailscale IPv4 (or explicit bind for tests).
  */
 
@@ -30,7 +32,7 @@ export interface AgentRemoteUnlockStatus {
 
 export interface AgentRemoteUnlockController {
   start(): Promise<void>;
-  /** Re-check flag + enroll; start/stop listener. */
+  /** Re-check flag + enrollment; start/stop listener. */
   reconcile(): Promise<void>;
   status(): AgentRemoteUnlockStatus;
   stop(): Promise<void>;
@@ -50,11 +52,24 @@ export interface AgentRemoteUnlockDeps {
   now?: () => number;
   /** Fired after a successful remote unlock (e.g. inbox onUnlock). */
   onUnlocked?: () => void;
+  /**
+   * How this receiver names the hub when serving enroll offers.
+   * Default: look up the paired source peer name from the unlocked vault.
+   */
+  hubNameOrIdForEnroll?: (vault: ReturnType<typeof decryptVault>) => string;
+}
+
+function defaultHubNameForEnroll(vault: ReturnType<typeof decryptVault>): string {
+  const peers = vault.syncPeers ?? {};
+  const source = Object.entries(peers).find(([, p]) => p.role === "source");
+  if (source) return source[1].name;
+  throw new Error("no paired source (hub) peer — pair first");
 }
 
 export class AgentRemoteUnlock implements AgentRemoteUnlockController {
   private listener: UnlockListener | null = null;
   private session: UnlockSession | null = null;
+  private tlsCert: string | null = null;
   private error: string | null = null;
   private chain: Promise<void> = Promise.resolve();
   private stopped = false;
@@ -97,15 +112,22 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
     const l = this.listener;
     this.listener = null;
     this.session = null;
+    this.tlsCert = null;
     if (l) {
       await l.close();
       this.deps.log(`stopped ${l.bind}:${l.port}`);
     }
   }
 
+  /** Enrolled, or unlocked so we can serve first enroll. */
+  private shouldListen(): boolean {
+    if (this.stopped || !isRemoteUnlockEnabled()) return false;
+    if (isRemoteUnlockEnrolled(this.deps.base)) return true;
+    return !this.deps.state.isLocked();
+  }
+
   private async reconcileInner(): Promise<void> {
-    const wanted =
-      !this.stopped && isRemoteUnlockEnabled() && isRemoteUnlockEnrolled(this.deps.base);
+    const wanted = this.shouldListen();
     if (!wanted) {
       this.error = null;
       await this.closeListener();
@@ -132,11 +154,39 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
     try {
       const state = this.deps.state;
       const vaultPath = this.deps.vaultPath;
+      const tls = (this.deps.loadTls ?? loadOrCreateRemoteUnlockTls)(this.deps.base);
+      this.tlsCert = tls.cert;
       this.session = new UnlockSession({
         base: this.deps.base,
         now: this.deps.now,
         log: this.deps.log,
         isLocked: () => state.isLocked(),
+        lockVault: () => {
+          state.lock();
+        },
+        listenerCert: () => this.tlsCert,
+        onNotEnrolled: () => {
+          if (!isRemoteUnlockEnrolled(this.deps.base)) {
+            void this.reconcile();
+          }
+        },
+        prepareEnrollOffer: (hubNameOrId) => {
+          const key = state.requireKey();
+          const file = vaultPath();
+          const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+          const vault = decryptVault(raw, key);
+          const hub =
+            hubNameOrId ||
+            (this.deps.hubNameOrIdForEnroll ?? defaultHubNameForEnroll)(vault);
+          const prepared = prepareReceiverEnroll({
+            vault,
+            masterKey: key,
+            base: this.deps.base,
+            hubNameOrId: hub,
+            now: this.deps.now?.(),
+          });
+          return prepared.offer;
+        },
         verifyMasterKey: (masterKey) => {
           const file = vaultPath();
           if (!fs.existsSync(file)) return true;
@@ -154,12 +204,11 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
         },
       });
       const session = this.session;
-      const tls = (this.deps.loadTls ?? loadOrCreateRemoteUnlockTls)(this.deps.base);
       this.listener = await (this.deps.startListener ?? startUnlockListener)({
         bind,
         port,
         tls,
-        handler: createUnlockRequestHandler((raw) => session.handle(raw), {
+        handler: createRemoteRequestHandler((path, raw) => dispatchRemoteSession(session, path, raw), {
           log: this.deps.log,
           now: this.deps.now,
         }),
@@ -170,6 +219,7 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
       this.error = `listener failed: ${err instanceof Error ? err.message : String(err)}`;
       this.deps.log(this.error);
       this.session = null;
+      this.tlsCert = null;
     }
   }
 }

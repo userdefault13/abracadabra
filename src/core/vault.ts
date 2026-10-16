@@ -119,6 +119,11 @@ export interface UnlockWrap {
   /** Fingerprint of the receiver master key at enroll (not the key). */
   masterKeyFingerprint: string;
   enrolledAt: number;
+  /**
+   * Receiver remote-unlock listener TLS cert PEM (public). Used by the hub as
+   * `ca` for later unlock/lock/status — not a secret.
+   */
+  listenerCert?: string;
 }
 
 export interface SyncPeer {
