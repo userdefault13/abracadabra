@@ -50,8 +50,23 @@ function pairedVault(projects: Vault["projects"]): Vault {
     x25519: peer.x25519.publicKey,
     role: "receiver",
   }).vault;
+  // Hub-held remote-unlock wrap key (device-local with syncPeers).
+  const peers = { ...paired.syncPeers! };
+  peers[peer.id] = {
+    ...peers[peer.id],
+    unlockWrap: {
+      v: 1,
+      wrapKey: crypto.randomBytes(32).toString("base64"),
+      deviceId: peer.id,
+      deviceEd25519: peer.ed25519.publicKey,
+      deviceX25519: peer.x25519.publicKey,
+      masterKeyFingerprint: "abcd efgh ijkl mnop qrst uvwx yz12 3456",
+      enrolledAt: 1,
+    },
+  };
   return {
     ...paired,
+    syncPeers: peers,
     syncAccept: [{ from: "*", projects: "*", auto: true }],
     syncInbox: { enabled: true, port: 7333, bind: "100.64.0.1" },
   };
@@ -62,8 +77,11 @@ function expectNoIdentityMaterial(text: string, v: Vault) {
   expect(text).not.toContain("syncPeers");
   expect(text).not.toContain("syncAccept");
   expect(text).not.toContain("syncInbox");
+  expect(text).not.toContain("unlockWrap");
   expect(text).not.toContain(v.syncIdentity!.ed25519.privateKey);
   expect(text).not.toContain(v.syncIdentity!.x25519.privateKey);
+  const wrap = Object.values(v.syncPeers ?? {})[0]?.unlockWrap?.wrapKey;
+  if (wrap) expect(text).not.toContain(wrap);
 }
 
 const envBackup = { ...process.env };

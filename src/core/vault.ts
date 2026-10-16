@@ -102,6 +102,25 @@ export interface SyncIdentity {
 /** What THE PEER is relative to this vault: "source" pushes to me, "receiver" receives from me. */
 export type SyncPeerRole = "source" | "receiver";
 
+/**
+ * Hub-held unwrap key for remote unlock (Option A). Device-local with
+ * syncPeers — never exported. `wrapKey` is the 32-byte W (base64); alone it
+ * unwraps the receiver blob, so never log or print it.
+ */
+export interface UnlockWrap {
+  v: 1;
+  /** base64 of 32-byte wrap key W */
+  wrapKey: string;
+  /** Receiver remote device-key id (UUID). */
+  deviceId: string;
+  /** Receiver device public keys (base64 raw 32 bytes). */
+  deviceEd25519: string;
+  deviceX25519: string;
+  /** Fingerprint of the receiver master key at enroll (not the key). */
+  masterKeyFingerprint: string;
+  enrolledAt: number;
+}
+
 export interface SyncPeer {
   name: string;
   idFingerprint: string;
@@ -111,6 +130,8 @@ export interface SyncPeer {
   role: SyncPeerRole;
   pairedAt: number;
   lastAddress?: string;
+  /** Hub only: wrap key for this receiver. Stripped with syncPeers on export. */
+  unlockWrap?: UnlockWrap;
 }
 
 /** `abra sync accept` rule for inbound bundles. No matching rule → queue. */
