@@ -8,6 +8,7 @@ import {
 import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  SENSITIVE_OPS,
   type AgentRequest,
   type AgentResponse,
   type AgentStatusBody,
@@ -23,10 +24,25 @@ export class AgentClientError extends Error {
   constructor(
     message: string,
     readonly code: AgentErrorCode | "timeout" | "connect",
+    /** forbidden_peer: agent's static reason code (e.g. `exe_mismatch`). */
+    readonly reason?: string,
+    /** forbidden_peer: agent's static remediation hint. */
+    readonly hint?: string,
   ) {
     super(message);
     this.name = "AgentClientError";
   }
+}
+
+function errorFromResponse(
+  res: Extract<AgentResponse, { ok: false }>,
+): AgentClientError {
+  return new AgentClientError(
+    res.error,
+    res.code,
+    typeof res.reason === "string" ? res.reason : undefined,
+    typeof res.hint === "string" ? res.hint : undefined,
+  );
 }
 
 export function isAgentUnavailable(err: unknown): boolean {
@@ -52,10 +68,18 @@ export function clientVaultBinding(): AgentVaultBinding {
 }
 
 const DEFAULT_CONNECT_MS = 500;
+/**
+ * Read timeout for peer-checked ops: the agent may retry `ss` for up to
+ * PEER_CHECK_BUDGET_MS (12s) under load before answering.
+ */
+export const SENSITIVE_READ_TIMEOUT_MS = 15_000;
 
 export interface AgentClientOpts {
   socketPath?: string;
+  /** Time allowed to connect (and, for non-sensitive ops, to get the reply). */
   connectTimeoutMs?: number;
+  /** Time allowed after connect to get the reply. Default: 15s for peer-checked ops. */
+  readTimeoutMs?: number;
 }
 
 function nextId(): string {
@@ -97,6 +121,11 @@ export async function agentRequest(
 ): Promise<AgentResponse> {
   const socketPath = opts?.socketPath ?? resolveAgentSocketPath();
   const connectTimeoutMs = opts?.connectTimeoutMs ?? DEFAULT_CONNECT_MS;
+  const readTimeoutMs =
+    opts?.readTimeoutMs ??
+    (SENSITIVE_OPS.has(req.op)
+      ? Math.max(SENSITIVE_READ_TIMEOUT_MS, connectTimeoutMs)
+      : connectTimeoutMs);
   const id = req.id ?? nextId();
   const frame = { v: PROTOCOL_VERSION, id, ...req } as AgentRequest;
   const payload = JSON.stringify(frame) + "\n";
@@ -119,9 +148,10 @@ export async function agentRequest(
       else resolve(res!);
     };
 
-    const timer = setTimeout(() => {
+    const onTimeout = () => {
       finish(new AgentClientError("Agent connect/read timed out", "timeout"));
-    }, connectTimeoutMs);
+    };
+    let timer = setTimeout(onTimeout, connectTimeoutMs);
 
     socket.on("error", (e) => {
       const msg = e instanceof Error ? e.message : String(e);
@@ -129,6 +159,8 @@ export async function agentRequest(
     });
 
     socket.on("connect", () => {
+      clearTimeout(timer);
+      timer = setTimeout(onTimeout, readTimeoutMs);
       socket.write(payload, (writeErr) => {
         if (writeErr) {
           finish(
@@ -184,7 +216,7 @@ export async function agentStatus(opts?: AgentClientOpts): Promise<AgentStatusBo
 export async function agentUnlock(opts?: AgentClientOpts): Promise<void> {
   const res = await agentRequest({ op: "unlock" }, opts);
   if (!res.ok) {
-    throw new AgentClientError(res.error, res.code);
+    throw errorFromResponse(res);
   }
 }
 
@@ -211,14 +243,14 @@ export async function agentUnlockKey(
     opts,
   );
   if (!res.ok) {
-    throw new AgentClientError(res.error, res.code);
+    throw errorFromResponse(res);
   }
 }
 
 export async function agentLock(opts?: AgentClientOpts): Promise<void> {
   const res = await agentRequest({ op: "lock" }, opts);
   if (!res.ok) {
-    throw new AgentClientError(res.error, res.code);
+    throw errorFromResponse(res);
   }
 }
 
@@ -228,7 +260,7 @@ export async function agentVaultLoad(opts?: AgentClientOpts): Promise<VaultLoadR
   const binding = clientVaultBinding();
   const res = await agentRequest({ op: "vault.load", ...binding }, opts);
   if (!res.ok) {
-    throw new AgentClientError(res.error, res.code);
+    throw errorFromResponse(res);
   }
   if (res.op !== "vault.load") {
     throw new AgentClientError("Unexpected vault.load response", "internal");
@@ -245,7 +277,7 @@ export async function agentVaultSave(
   const binding = clientVaultBinding();
   const res = await agentRequest({ op: "vault.save", vault, ...binding }, opts);
   if (!res.ok) {
-    throw new AgentClientError(res.error, res.code);
+    throw errorFromResponse(res);
   }
 }
 

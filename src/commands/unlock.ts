@@ -18,6 +18,47 @@ import {
 import fs from "node:fs";
 
 /**
+ * `abra unlock` exit code when the passphrase was correct but abra-agent did
+ * not take the key (refused peer, timeout, mismatch, …). Distinct from 1
+ * (wrong passphrase / generic error) so scripts and units can tell them apart.
+ */
+export const EXIT_AGENT_REFUSED = 3;
+
+/**
+ * Stderr lines for a failed unlock.key push. Static agent reason + hint only —
+ * the agent never sends peer cmdline/env, and neither do we.
+ */
+export function formatAgentUnlockFailure(
+  err: unknown,
+  opts: { color?: boolean } = {},
+): string[] {
+  const red = (s: string) => (opts.color ? `\x1b[31m${s}\x1b[0m` : s);
+  const code = err instanceof AgentClientError ? err.code : "error";
+  const reason =
+    err instanceof AgentClientError && err.reason ? err.reason : code;
+  const hint = err instanceof AgentClientError ? err.hint : undefined;
+  const msg = err instanceof Error ? err.message : String(err);
+
+  const head =
+    code === "forbidden_peer"
+      ? `✗ abra-agent REFUSED unlock (reason: ${reason})`
+      : `✗ abra-agent unlock FAILED (reason: ${reason}: ${msg})`;
+  const lines = [
+    red(
+      `${head} — vault NOT shared with the agent; other processes/units will still see it locked.`,
+    ),
+  ];
+  if (hint) lines.push(red(`  hint: ${hint}`));
+  if (!hint || !/Rerun:|retry:/i.test(hint)) {
+    lines.push(red("  Rerun: abra unlock   (after fixing the cause above)"));
+  }
+  lines.push(
+    "  Passphrase was correct: this abra process alone was unlocked, and that ends when it exits.",
+  );
+  return lines;
+}
+
+/**
  * Unlock the passphrase-file vault for this process, and push the master key
  * into abra-agent when reachable.
  *
@@ -64,6 +105,7 @@ export async function cmdUnlock(): Promise<void> {
   unlockSession(key);
 
   let agentHoldsKey = false;
+  let agentError: unknown = null;
   if (shouldTryAgent()) {
     let socketPath: string | undefined;
     try {
@@ -76,17 +118,22 @@ export async function cmdUnlock(): Promise<void> {
         await agentUnlockKey(key, { socketPath });
         agentHoldsKey = true;
       } catch (e) {
-        const code = e instanceof AgentClientError ? e.code : "error";
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`⚠ abra-agent unlock.key failed (${code}): ${msg}`);
-        console.error(
-          "  Local session is unlocked for this process; start/fix abra-agent and retry unlock to share the key.",
-        );
+        agentError = e;
       }
     }
   }
 
   key.fill(0);
+
+  if (agentError !== null) {
+    // Never a ✓ here: the user would believe other processes/units are unlocked.
+    const color = Boolean(process.stderr.isTTY) && !process.env.NO_COLOR;
+    for (const line of formatAgentUnlockFailure(agentError, { color })) {
+      console.error(line);
+    }
+    process.exitCode = EXIT_AGENT_REFUSED;
+    return;
+  }
 
   if (agentHoldsKey) {
     console.log(

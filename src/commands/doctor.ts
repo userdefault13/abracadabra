@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { vaultFile } from "../core/paths.js";
 import { platformHealth, platformInfo } from "../platform/index.js";
 import { getLicenseStatus, licenseContractAddress } from "../license/index.js";
+import { checkUnitNetlink, readInstalledAgentUnit } from "../agent/unit-check.js";
 
 const ok = (msg: string) => console.log(`ok    ${msg}`);
 const warn = (msg: string) => console.log(`warn  ${msg}`);
@@ -50,6 +51,23 @@ export async function cmdDoctor(): Promise<void> {
       warn("passphrase vault locked — run: abra unlock");
     } else {
       ok("passphrase vault session unlocked");
+    }
+  }
+
+  if (info.platform === "linux") {
+    const unit = readInstalledAgentUnit();
+    if (unit) {
+      const net = checkUnitNetlink(unit.texts);
+      if (net.status === "missing_netlink") {
+        warn(
+          `abra-agent unit lacks AF_NETLINK (RestrictAddressFamilies=${net.families.join(" ")}) — peer checks fail, abra unlock cannot share the key (${unit.path})`,
+        );
+        warn(
+          "fix: RestrictAddressFamilies=AF_UNIX AF_NETLINK, then: systemctl --user daemon-reload && systemctl --user restart abra-agent",
+        );
+      } else {
+        ok(`abra-agent unit allows AF_NETLINK for ss (${unit.path})`);
+      }
     }
   }
 

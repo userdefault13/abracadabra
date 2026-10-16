@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { cmdDoctor } from "./doctor.js";
 import { resetPlatformForTests } from "../platform/index.js";
@@ -52,5 +55,35 @@ describe("cmdDoctor headless / passphrase", () => {
     ).toBe(true);
     expect(lines.some((l) => l.includes("auth backend passphrase"))).toBe(true);
     expect(lines.some((l) => l.includes("polkit not required"))).toBe(true);
+  });
+
+  it("warns when the installed abra-agent unit lacks AF_NETLINK", async () => {
+    const cfg = fs.mkdtempSync(path.join(os.tmpdir(), "abra-doctor-unit-"));
+    try {
+      const unitDir = path.join(cfg, "systemd", "user");
+      fs.mkdirSync(unitDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(unitDir, "abra-agent.service"),
+        "[Service]\nExecStart=/usr/bin/node /x/dist/agent/server.js\nRestrictAddressFamilies=AF_UNIX\n",
+      );
+      process.env.XDG_CONFIG_HOME = cfg;
+      await cmdDoctor();
+      expect(
+        lines.some((l) => l.startsWith("warn") && l.includes("abra-agent unit lacks AF_NETLINK")),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes("systemctl --user daemon-reload"))).toBe(true);
+
+      // A drop-in that adds AF_NETLINK fixes it.
+      lines = [];
+      fs.mkdirSync(path.join(unitDir, "abra-agent.service.d"));
+      fs.writeFileSync(
+        path.join(unitDir, "abra-agent.service.d", "netlink.conf"),
+        "[Service]\nRestrictAddressFamilies=AF_NETLINK\n",
+      );
+      await cmdDoctor();
+      expect(lines.some((l) => l.startsWith("ok") && l.includes("allows AF_NETLINK"))).toBe(true);
+    } finally {
+      fs.rmSync(cfg, { recursive: true, force: true });
+    }
   });
 });

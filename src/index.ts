@@ -243,8 +243,10 @@ program
 
 program
   .command("unlock")
-  .description("Unlock passphrase-file keystore (ABRA_KEYSTORE=passphrase-file)")
-  .action(cmdUnlock);
+  .description(
+    "Unlock passphrase-file keystore and share the key with abra-agent (exit 3 if the agent refuses it)",
+  )
+  .action(() => cmdUnlock());
 
 program
   .command("lock")

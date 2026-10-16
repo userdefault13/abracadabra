@@ -38,7 +38,7 @@ import { resetSessionForTests, unlockSession } from "../platform/session.js";
 import { resetUnlockAttempts, loadUnlockAttempts } from "../platform/unlock-attempts.js";
 import { resetPlatformForTests } from "../platform/index.js";
 import { setOpenTtyForTests, type TtyHandles } from "../core/prompt.js";
-import { cmdUnlock } from "../commands/unlock.js";
+import { cmdUnlock, EXIT_AGENT_REFUSED } from "../commands/unlock.js";
 import { PassphraseAuth } from "../platform/auth-passphrase.js";
 
 function makeKey(): Buffer {
@@ -445,7 +445,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
     expect(logs.some((l) => l.includes("this process only"))).toBe(true);
   });
 
-  it("cmdUnlock agent forbidden_peer → warning, exit ok", async () => {
+  it("cmdUnlock agent forbidden_peer → loud refusal, exit 3, no ✓", async () => {
     writeMasterKeyFile(masterKey, PASS);
     writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     await startAgent({
@@ -464,9 +464,56 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
     vi.spyOn(console, "log").mockImplementation((m: unknown) => {
       logs.push(String(m));
     });
-    await cmdUnlock();
-    expect(errs.some((e) => e.includes("forbidden_peer"))).toBe(true);
-    expect(logs.some((l) => l.includes("this process only"))).toBe(true);
+    try {
+      await cmdUnlock();
+      expect(process.exitCode).toBe(EXIT_AGENT_REFUSED);
+    } finally {
+      process.exitCode = undefined;
+    }
+    expect(errs[0]).toContain("✗ abra-agent REFUSED unlock (reason: test_deny)");
+    expect(errs[0]).toContain("vault NOT shared with the agent");
+    expect(errs.some((e) => e.includes("Passphrase was correct"))).toBe(true);
+    expect([...logs, ...errs].some((l) => l.includes("✓"))).toBe(false);
+  });
+
+  it("cmdUnlock exe_mismatch → hint names the agent's node + rerun form, never peer data", async () => {
+    writeMasterKeyFile(masterKey, PASS);
+    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    const agentNode = "/opt/agent-node/bin/node";
+    const agentCli = "/usr/lib/abracadabra/dist/index.js";
+    await startAgent({
+      socketPath,
+      vaultPath: () => path.resolve(vaultPath),
+      keystoreBackend: () => "passphrase-file",
+      authorizePeer: async () => ({ ok: false, reason: "exe_mismatch" }),
+      peerCheckDeps: { execPath: agentNode, cliEntrypoint: agentCli },
+      sleepWatch: false,
+    });
+    setOpenTtyForTests(fakeTty(PASS));
+    const errs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((m: unknown) => {
+      errs.push(String(m));
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation(((s: unknown) => {
+      stderrWrites.push(String(s));
+      return true;
+    }) as never);
+    try {
+      await cmdUnlock();
+      expect(process.exitCode).toBe(EXIT_AGENT_REFUSED);
+    } finally {
+      process.exitCode = undefined;
+    }
+    const out = errs.join("\n");
+    expect(out).toContain("REFUSED unlock (reason: exe_mismatch)");
+    expect(out).toContain(`Rerun: ${agentNode} ${agentCli} unlock`);
+    // The test runner's own argv/env (the "peer") never leaks into output.
+    expect(out).not.toContain(process.argv[1]);
+    const agentLog = stderrWrites.join("");
+    expect(agentLog).toContain("unlock.key forbidden_peer reason=exe_mismatch");
+    expect(agentLog).not.toContain(process.argv[1]);
   });
 
   it("cmdUnlock non-passphrase auth → authenticate before prompt", async () => {
