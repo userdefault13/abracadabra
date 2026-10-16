@@ -213,7 +213,7 @@ describe("remote enroll", () => {
         stored = next;
         return stored;
       },
-      fetchOffer: async () => prepared.offer,
+      fetchOffer: async () => ({ offer: prepared.offer }),
       log: (l: string) => logs.push(l),
     };
 

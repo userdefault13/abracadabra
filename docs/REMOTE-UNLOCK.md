@@ -1,13 +1,13 @@
 # Remote unlock (hub-held unwrap key)
 
-Status: **PR 3/7 in progress** — wire protocol (challenge/response + tailnet listener).
+Status: **PR 4/7 in progress** — CLI (`unlock|lock|status|revoke|disable`) + audit log.
 Feature flag: off by default (`ABRA_REMOTE_UNLOCK=1` to enable enroll / unlock listener).
 Nothing new runs unless you invoke it. Julius approved both phases; bot lease
 default TTL is **7 days**.
 
 Design source: [REMOTE-UNLOCK-DESIGN.md](./REMOTE-UNLOCK-DESIGN.md).
 
-## What PR 1–3 ship
+## What PR 1–4 ship
 
 | Piece | Path | Notes |
 |-------|------|--------|
@@ -15,14 +15,14 @@ Design source: [REMOTE-UNLOCK-DESIGN.md](./REMOTE-UNLOCK-DESIGN.md).
 | Hub pin | `<abraDir>/remote/hub-pin.json` | Hub `deviceId` + public keys only |
 | Unlock blob | `<abraDir>/remote/remote-unlock.blob` | AES-256-GCM_W(masterKey); AAD = deviceId + master-key fingerprint |
 | Hub wrap | `syncPeers[id].unlockWrap` | Device-local with peers; stripped on export; cleared on unpair |
-| Wire crypto | `src/remote/wire.ts` | Challenge + seal(W) + Ed25519; 30s expiry; domains separated |
+| Wire crypto | `src/remote/wire.ts` | Challenge + seal(W) + lock + Ed25519; 30s expiry |
 | Nonce cache | `src/remote/nonce-cache.ts` | Single-use pending + used (in-memory) |
-| Listener | `src/remote/listener.ts` | HTTPS `:7335`, Tailscale bind (inbox-style); rate-limited |
-| Hub client | `src/remote/hub-client.ts` | `remoteUnlockViaHttp` / loopback harness (CLI → PR 4) |
-| Agent | `src/agent/remote-unlock.ts` | Starts only when flag + enrolled |
-| Feature flag | `ABRA_REMOTE_UNLOCK` | Must be `1` for enroll / unlock listener |
-| Hidden CLI | `abra remote whoami` | Prints **public fingerprint only** |
-| Hidden CLI | `abra remote enroll <peer>` | Hub stores W (network transport → PR 3; loopback harness in tests) |
+| Listener | `src/remote/listener.ts` | HTTPS `:7335` unlock/lock/status/enroll; Tailscale bind |
+| Hub client | `src/remote/hub-client.ts` | unlock / lock / status / enroll HTTP clients |
+| Audit log | `<abraDir>/remote/audit.log` | JSON lines: `ts`, `op`, `peer`, `result` (never values) |
+| Agent | `src/agent/remote-unlock.ts` | Flag + (enrolled **or** unlocked for first enroll) |
+| Feature flag | `ABRA_REMOTE_UNLOCK` | Must be `1` for enroll / unlock / lock / disable |
+| CLI | `abra remote …` | `whoami`, `enroll`, `unlock`, `lock`, `status`, `revoke`, `disable` |
 
 ## Wire protocol (PR 3)
 
@@ -69,12 +69,27 @@ same trust as today's sync push. Hub offline → local unlock unchanged.
 POSIX load is fail-closed: group/world-readable files or wrong owner uid refuse
 to load. win32 skips mode checks (existing platform pattern).
 
+## CLI (PR 4)
+
+| Command | Side | Auth | Notes |
+|---------|------|------|--------|
+| `abra remote enroll <peer>` | hub | Touch ID | Fetches offer over `:7335` `/v1/remote/enroll`; stores `W` + listener cert |
+| `abra remote unlock --all\|--peers a,b` | hub | Touch ID once | Parallel per-peer unlock via PR 3 client |
+| `abra remote lock --all\|--peers` | hub | none | Signed lock request (30s expiry) |
+| `abra remote status` | hub | none | Enrolled / reachable / locked — no secrets |
+| `abra remote revoke <peer>` | hub | Touch ID | Deletes `unlockWrap` via `updateVault` |
+| `abra remote disable` | receiver | none | Deletes blob + hub pin; listener stops on reconcile |
+| `abra remote whoami` | either | none | Public device fingerprint only |
+
+Audit: both sides append JSON lines to `<abraDir>/remote/audit.log`
+(`ts`, `op`, `peer`, `result`). Hub offline never breaks local unlock.
+
 ## PR plan (1–7)
 
 1. **Device key + pinned hub key** — agent dir, 0600, fail-closed perms; tests
-2. **Enroll** — `abra remote enroll <peer>`: create `W`, blob, seal `W` to hub; Touch ID on hub
-3. **Wire protocol** (this PR) — challenge/response, signatures, nonce cache, 30s expiry, tailnet listener
-4. **CLI** — `unlock|lock|status --all|--peers`, `revoke`, `disable`; audit log both sides
+2. **Enroll** — create `W`, blob, seal `W` to hub; Touch ID on hub
+3. **Wire protocol** — challenge/response, signatures, nonce cache, 30s expiry, tailnet listener
+4. **CLI** (this PR) — `unlock|lock|status --all|--peers`, `revoke`, `disable`; audit log both sides
 5. **Relock policy** — signed policy field, local caps
 6. **(Phase 2) Lease store** — survives lock; serve path bound to `GrantCaller`
 7. **(Phase 2) Hub renewer + revoke** — `abra lease grant … --ttl` (default 7d)
@@ -82,13 +97,19 @@ to load. win32 skips mode checks (existing platform pattern).
 ## Ops notes
 
 ```sh
-# Optional: create/show device fingerprint (hidden; does not enable unlock)
+export ABRA_REMOTE_UNLOCK=1
+
+# Optional: create/show device fingerprint (does not enable unlock alone)
 abra remote whoami
 
-# Enroll a paired receiver (requires ABRA_REMOTE_UNLOCK=1)
+# Receiver must be unlocked + abra-agent listening (enroll serve) the first time
 abra remote enroll mini
 
-# Unlock CLI arrives in PR 4; listener is already in abra-agent when enrolled + flag
+abra remote unlock --all
+abra remote lock --peers mini
+abra remote status
+abra remote revoke mini          # hub
+abra remote disable              # on the receiver
 ```
 
 Private keys and wrap keys are never printed, logged, or returned in errors. Prefer

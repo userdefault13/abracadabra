@@ -279,6 +279,7 @@ async function handleRequest(
         logOp("unlock");
         await state.unlock();
         void running?.inbox?.onUnlock();
+        void running?.remoteUnlock?.reconcile();
         return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock" };
       }
       case "unlock.key": {
@@ -320,6 +321,7 @@ async function handleRequest(
           state.unlockWithKey(decoded);
           logOp("unlock.key", "ok");
           void running?.inbox?.onUnlock();
+          void running?.remoteUnlock?.reconcile();
           return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock.key" };
         } finally {
           decoded.fill(0);
@@ -329,6 +331,7 @@ async function handleRequest(
         // Same-uid lock only reduces access (zeroes the in-memory key + grants).
         logOp("lock");
         state.lock();
+        void running?.remoteUnlock?.reconcile();
         return { v: PROTOCOL_VERSION, id, ok: true, op: "lock" };
       }
       case "vault.load": {
