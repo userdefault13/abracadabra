@@ -7,10 +7,14 @@ import { setHubPin } from "./hub-pin.js";
 import {
   LEASE_DEFAULT_TTL_SECONDS,
   LEASE_PATH,
+  LEASE_REVOKE_PATH,
   LeaseError,
+  buildLeaseRevokeRequest,
   openSealedLease,
+  parseLeaseTtl,
   parseSealedLease,
   sealLease,
+  verifyLeaseRevokeRequest,
   verifySealedLease,
 } from "./lease.js";
 import { UnlockSession } from "./listener.js";
@@ -177,5 +181,48 @@ describe("listener lease ingest", () => {
     const outcome = session.acceptLease(bad);
     expect(outcome.response.status).toBe("rejected");
     expect(outcome.reason).toBe("bad-signature");
+  });
+
+  it(`POST ${LEASE_REVOKE_PATH} removes ingested lease`, () => {
+    const hub = generateSyncIdentity();
+    const { key: device } = getOrCreateDeviceKey({ base });
+    const pin = setHubPin(
+      { deviceId: hub.id, ed25519: hub.ed25519.publicKey, x25519: hub.x25519.publicKey },
+      { base },
+    );
+    const leaseStore = new LeaseStore({ base });
+    const session = new UnlockSession({
+      base,
+      leaseStore,
+      unlockWithKey: () => undefined,
+      isLocked: () => true,
+    });
+    const lease = sealLease({
+      hub,
+      peer: { id: device.id, x25519: device.x25519.publicKey },
+      project: "demo",
+      binding: { exe: "/bin/x", dev: 1, ino: 1 },
+      vars: { K: { value: SECRET, secret: true, updatedAt: 1 } },
+      issuedAt: Date.now(),
+    });
+    expect(session.acceptLease(lease).response.status).toBe("leased");
+    const revoke = buildLeaseRevokeRequest({
+      hub,
+      peerDeviceId: device.id,
+      leaseId: lease.leaseId,
+    });
+    verifyLeaseRevokeRequest(revoke, pin, { expectedPeerId: device.id });
+    const outcome = session.acceptLeaseRevoke(revoke);
+    expect(outcome.response.status).toBe("revoked");
+    expect(outcome.response.removed).toBe(1);
+    expect(leaseStore.listPublic()).toHaveLength(0);
+    expect(JSON.stringify(outcome)).not.toContain(SECRET);
+  });
+});
+
+describe("parseLeaseTtl", () => {
+  it("refuses above 7d", () => {
+    expect(parseLeaseTtl("7d")).toBe(LEASE_DEFAULT_TTL_SECONDS);
+    expect(() => parseLeaseTtl("604801")).toThrow(/at most 7d/);
   });
 });

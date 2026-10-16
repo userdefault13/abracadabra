@@ -10,7 +10,9 @@ import {
   leasePublicView,
   localLeaseMaxTtlSeconds,
   openSealedLease,
+  parseLeaseRevokeRequest,
   parseSealedLease,
+  verifyLeaseRevokeRequest,
   verifySealedLease,
   LeaseError,
   type SealedLease,
@@ -334,5 +336,58 @@ export class LeaseStore {
       out.push(leasePublicView(lease));
     }
     return out;
+  }
+
+  /**
+   * Apply a verified hub revoke: delete one leaseId or all leases from that hub.
+   * Requires ABRA_REMOTE_UNLOCK=1 + hub pin + device key.
+   */
+  applyRevoke(raw: unknown): { removed: number; leaseIds: string[] } {
+    if (!this.enabled()) {
+      throw new LeaseError("disabled", "remote unlock disabled");
+    }
+    const hubPin = this.loadPin(this.base);
+    if (!hubPin) throw new LeaseError("not-enrolled", "hub pin missing");
+
+    let device: DeviceKey;
+    try {
+      device = this.loadKey(this.base);
+    } catch {
+      throw new LeaseError("not-enrolled", "device key missing");
+    }
+
+    const parsed = parseLeaseRevokeRequest(raw);
+    verifyLeaseRevokeRequest(parsed, hubPin, {
+      now: this.now(),
+      expectedPeerId: device.id,
+    });
+
+    const removedIds: string[] = [];
+    if (parsed.all) {
+      for (const id of this.listIds()) {
+        const lease = this.readFile(id);
+        if (!lease) {
+          this.delete(id);
+          continue;
+        }
+        if (lease.from !== parsed.from) continue;
+        if (this.delete(id)) removedIds.push(id);
+      }
+    } else if (parsed.leaseId) {
+      const lease = this.readFile(parsed.leaseId);
+      if (lease) {
+        if (lease.from !== parsed.from) {
+          throw new LeaseError("wrong-hub", "lease revoke from mismatch");
+        }
+        if (this.delete(parsed.leaseId)) removedIds.push(parsed.leaseId);
+      }
+    }
+
+    this.log(
+      "revoke",
+      `result=ok removed=${removedIds.length}` +
+        (parsed.leaseId ? ` leaseId=${parsed.leaseId}` : " all=1"),
+    );
+    return { removed: removedIds.length, leaseIds: removedIds };
   }
 }

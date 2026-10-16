@@ -18,7 +18,12 @@ import {
   type UnlockPolicyCaps,
 } from "./policy.js";
 import type { LeaseStore } from "../agent/lease-store.js";
-import { LEASE_MAX_BODY_BYTES, LEASE_PATH, LeaseError } from "./lease.js";
+import {
+  LEASE_MAX_BODY_BYTES,
+  LEASE_PATH,
+  LEASE_REVOKE_PATH,
+  LeaseError,
+} from "./lease.js";
 import { ensureRemoteDir, remoteDir, writePrivateFile, assertPrivatePath } from "./private-fs.js";
 import { readUnlockBlob, unwrapMasterKey } from "./unlock-blob.js";
 import {
@@ -106,7 +111,15 @@ const PUBLIC_REJECT: Record<UnlockRejectReason, [number, string]> = {
 };
 
 export interface UnlockHttpResponse {
-  status: "challenge" | "unlocked" | "locked" | "offer" | "ok" | "leased" | "rejected";
+  status:
+    | "challenge"
+    | "unlocked"
+    | "locked"
+    | "offer"
+    | "ok"
+    | "leased"
+    | "revoked"
+    | "rejected";
   reason?: string;
   challenge?: UnlockChallenge;
   offer?: EnrollOffer;
@@ -121,6 +134,8 @@ export interface UnlockHttpResponse {
   leaseId?: string;
   project?: string;
   replaced?: number;
+  /** Lease revoke ack. */
+  removed?: number;
 }
 
 export interface UnlockOutcome {
@@ -508,26 +523,58 @@ export class UnlockSession {
         op: "response",
       };
     } catch (err) {
-      let reason: UnlockRejectReason = "lease-failed";
-      if (err instanceof LeaseError) {
-        const map: Partial<Record<string, UnlockRejectReason>> = {
-          disabled: "disabled",
-          "not-enrolled": "not-enrolled",
-          malformed: "malformed",
-          "bad-signature": "bad-signature",
-          expired: "expired",
-          "wrong-hub": "wrong-hub",
-          "wrong-device": "wrong-device",
-          "decrypt-failed": "decrypt-failed",
-          "ttl-exceeded": "ttl-exceeded",
-          "wrong-project": "wrong-project",
-          "wrong-binding": "wrong-binding",
-        };
-        reason = map[err.reason] ?? "lease-failed";
-      }
-      this.log("lease", undefined, reason);
-      return rejectOutcome(reason);
+      return this.mapLeaseError(err, "lease");
     }
+  }
+
+  /**
+   * Hub signed lease revoke. Works while vault locked. Never logs secrets.
+   */
+  acceptLeaseRevoke(raw: unknown): UnlockOutcome {
+    if (!isRemoteUnlockEnabled()) {
+      this.log("lease-revoke", undefined, "disabled");
+      return rejectOutcome("disabled");
+    }
+    if (!this.deps.leaseStore) {
+      this.log("lease-revoke", undefined, "lease-failed");
+      return rejectOutcome("lease-failed");
+    }
+    try {
+      const result = this.deps.leaseStore.applyRevoke(raw);
+      this.log("lease-revoke", undefined, "ok");
+      return {
+        response: {
+          status: "revoked",
+          removed: result.removed,
+        },
+        httpStatus: 200,
+        op: "response",
+      };
+    } catch (err) {
+      return this.mapLeaseError(err, "lease-revoke");
+    }
+  }
+
+  private mapLeaseError(err: unknown, op: string): UnlockOutcome {
+    let reason: UnlockRejectReason = "lease-failed";
+    if (err instanceof LeaseError) {
+      const map: Partial<Record<string, UnlockRejectReason>> = {
+        disabled: "disabled",
+        "not-enrolled": "not-enrolled",
+        malformed: "malformed",
+        "bad-signature": "bad-signature",
+        expired: "expired",
+        "wrong-hub": "wrong-hub",
+        "wrong-device": "wrong-device",
+        "decrypt-failed": "decrypt-failed",
+        "ttl-exceeded": "ttl-exceeded",
+        "wrong-project": "wrong-project",
+        "wrong-binding": "wrong-binding",
+      };
+      reason = map[err.reason] ?? "lease-failed";
+    }
+    this.log(op, undefined, reason);
+    return rejectOutcome(reason);
   }
 
   /**
@@ -597,7 +644,8 @@ export type RemotePath =
   | typeof LOCK_PATH
   | typeof STATUS_PATH
   | typeof ENROLL_PATH
-  | typeof LEASE_PATH;
+  | typeof LEASE_PATH
+  | typeof LEASE_REVOKE_PATH;
 
 export type RemoteReceiveFn = (
   path: RemotePath,
@@ -618,9 +666,10 @@ const REMOTE_PATHS = new Set<string>([
   STATUS_PATH,
   ENROLL_PATH,
   LEASE_PATH,
+  LEASE_REVOKE_PATH,
 ]);
 
-/** Route POST /v1/remote/{unlock,lock,status,enroll,lease} — JSON, size-capped, rate-limited. */
+/** Route POST /v1/remote/{unlock,lock,status,enroll,lease,lease-revoke} — JSON, size-capped, rate-limited. */
 export function createRemoteRequestHandler(
   receive: RemoteReceiveFn,
   opts: UnlockHttpOptions = {},
@@ -740,6 +789,8 @@ export function dispatchRemoteSession(
       return session.acceptEnrollRequest(raw);
     case LEASE_PATH:
       return Promise.resolve(session.acceptLease(raw));
+    case LEASE_REVOKE_PATH:
+      return Promise.resolve(session.acceptLeaseRevoke(raw));
     default:
       return Promise.resolve(rejectOutcome("not-found"));
   }
