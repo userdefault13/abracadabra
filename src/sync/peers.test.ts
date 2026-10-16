@@ -156,4 +156,28 @@ describe("peers table re-pair rules", () => {
     expect(vault.syncPeers).toEqual({});
     expect(() => removePeer(vault, "mini")).toThrow(/no paired peer/);
   });
+
+  it("unpair deletes unlockWrap with the peer record", () => {
+    const c = candidate();
+    const wrapKey = "dGVzdC13cmFwLWtleS0zMi1ieXRlcyEhISE="; // test fixture only
+    const withWrap = planPeerUpsert(myVault(), c).vault;
+    const peers = { ...withWrap.syncPeers! };
+    peers[c.id] = {
+      ...peers[c.id],
+      unlockWrap: {
+        v: 1,
+        wrapKey,
+        deviceId: c.id,
+        deviceEd25519: c.ed25519,
+        deviceX25519: c.x25519,
+        masterKeyFingerprint: "aaaa bbbb cccc dddd eeee ffff 0000 1111",
+        enrolledAt: 1,
+      },
+    };
+    const vault = { ...withWrap, syncPeers: peers };
+    expect(vault.syncPeers![c.id].unlockWrap?.wrapKey).toBe(wrapKey);
+    const { vault: after } = removePeer(vault, "mini");
+    expect(after.syncPeers).toEqual({});
+    expect(JSON.stringify(after)).not.toContain(wrapKey);
+  });
 });

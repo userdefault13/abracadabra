@@ -178,6 +178,10 @@ export function findPeer(vault: Vault, nameOrId: string): { id: string; peer: Sy
   return hit ? { id: hit[0], peer: hit[1] } : null;
 }
 
+/**
+ * Remove a paired peer (and its unlockWrap, if any — remote unlock is revoked
+ * by deleting the hub-held wrap key with the peer record).
+ */
 export function removePeer(vault: Vault, nameOrId: string): { vault: Vault; removed: { id: string; peer: SyncPeer } } {
   const found = findPeer(vault, nameOrId);
   if (!found) throw new Error(`no paired peer named "${nameOrId}" — see: abra sync peers`);
