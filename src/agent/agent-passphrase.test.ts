@@ -478,7 +478,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
 
   it("cmdUnlock exe_mismatch → hint names the agent's node + rerun form, never peer data", async () => {
     writeMasterKeyFile(masterKey, PASS);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    await seedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     const agentNode = "/opt/agent-node/bin/node";
     const agentCli = "/usr/lib/abracadabra/dist/index.js";
     await startAgent({
