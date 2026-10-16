@@ -281,6 +281,104 @@ describe("isAllowedAbraCliPeer", () => {
     expect(r).toEqual({ allowed: true });
   });
 
+  it("allows launcher / npm-bin / direct node argv shapes", () => {
+    const miseNode = "/home/u/.local/share/mise/installs/node/26.8.2/bin/node";
+    const pkgCli =
+      "/home/u/.local/lib/node_modules/@userdefault/abracadabra/dist/index.js";
+    const npmBin =
+      "/home/u/.local/share/mise/installs/node/26.8.2/bin/abra";
+    const rp = (p: string) => {
+      if (p === npmBin) return pkgCli;
+      if (p === pkgCli || p === miseNode) return p;
+      return p;
+    };
+    const ids = mapStatSync({
+      [pkgCli]: CLI_ID,
+      [npmBin]: CLI_ID,
+    });
+    // launcher script: exec node dist/index.js → argv = [node, abs index, …]
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: miseNode,
+        agentExecRealpath: miseNode,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
+        peerArgv: [miseNode, pkgCli, "unlock"],
+        cliEntrypointRealpath: pkgCli,
+        realpathSync: rp,
+        statSync: ids,
+      }),
+    ).toEqual({ allowed: true });
+    // npm bin symlink …/bin/abra → …/dist/index.js
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: miseNode,
+        agentExecRealpath: miseNode,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
+        peerArgv: [miseNode, npmBin, "unlock"],
+        cliEntrypointRealpath: pkgCli,
+        realpathSync: rp,
+        statSync: ids,
+      }),
+    ).toEqual({ allowed: true });
+    // direct node dist/index.js
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: miseNode,
+        agentExecRealpath: miseNode,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
+        peerArgv: [miseNode, pkgCli, "ls"],
+        cliEntrypointRealpath: pkgCli,
+        realpathSync: rp,
+        statSync: ids,
+      }),
+    ).toEqual({ allowed: true });
+  });
+
+  it("still rejects wrong node, copied script, or --require before script", () => {
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: "/other/node",
+        agentExecRealpath: node,
+        peerExeId: OTHER_NODE_ID,
+        agentExeId: NODE_ID,
+        peerArgv: [node, cli],
+        cliEntrypointRealpath: cli,
+        realpathSync,
+        statSync: mapStatSync({ [cli]: CLI_ID }),
+      }).allowed,
+    ).toBe(false);
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: node,
+        agentExecRealpath: node,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
+        peerArgv: [node, "/tmp/copy-of-index.js"],
+        cliEntrypointRealpath: cli,
+        realpathSync,
+        statSync: mapStatSync({
+          "/tmp/copy-of-index.js": OTHER_CLI_ID,
+          [cli]: CLI_ID,
+        }),
+      }),
+    ).toEqual({ allowed: false, reason: "argv_script_mismatch" });
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: node,
+        agentExecRealpath: node,
+        peerExeId: NODE_ID,
+        agentExeId: NODE_ID,
+        peerArgv: [node, "--require", "x", cli],
+        cliEntrypointRealpath: cli,
+        realpathSync,
+        statSync: mapStatSync({ [cli]: CLI_ID }),
+      }),
+    ).toEqual({ allowed: false, reason: "node_flags_in_argv" });
+  });
+
   it("allows same inode when path strings differ", () => {
     const r = isAllowedAbraCliPeer({
       peerExeRealpath: "/usr/local/bin/node",
@@ -754,11 +852,12 @@ describe("peerFailureHint", () => {
     expect(peerFailureHint("ss_failed:maxbuffer", agent)).toMatch(/retry/);
   });
 
-  it("exe_mismatch names the agent's node and the exact rerun form", () => {
+  it("exe_mismatch names the agent's node and setup launcher / rerun form", () => {
     const h = peerFailureHint("exe_mismatch", agent)!;
     expect(h).toContain("/usr/bin/node");
+    expect(h).toContain("abra setup launcher");
     expect(h).toContain(
-      "Rerun: /usr/bin/node /usr/lib/abracadabra/dist/index.js unlock",
+      "/usr/bin/node /usr/lib/abracadabra/dist/index.js unlock",
     );
     expect(peerFailureHint("exe_stat_failed", agent)).toBe(h);
   });

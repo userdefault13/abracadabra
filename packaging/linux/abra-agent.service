@@ -9,6 +9,7 @@
 #   # Edit ExecStart to absolute paths for node + dist/agent/server.js
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now abra-agent
+#   abra setup launcher   # pin CLI node to match ExecStart (mise / PATH)
 #
 # ExecStart MUST use absolute paths. Do not rely on mise/nvm/fnm PATH in the
 # user manager environment. Examples:

@@ -37,6 +37,16 @@ export interface AgentStatusBody {
   idleRemainingMs: number | null;
   /** Milliseconds until absolute max-age lock; null when locked. */
   maxAgeRemainingMs: number | null;
+  /**
+   * Absolute realpath of the node binary this agent runs under (non-secret).
+   * Clients may re-exec under this path so peer exe checks pass.
+   */
+  nodePath?: string;
+  /**
+   * Absolute realpath of this package's CLI entry (`dist/index.js`).
+   * Non-secret; used with nodePath for safe re-exec.
+   */
+  entryPath?: string;
 }
 
 export type AgentErrorCode =

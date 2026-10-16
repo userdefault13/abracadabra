@@ -25,6 +25,7 @@ import {
 import { cmdLock, cmdUnlock, cmdUnlockStatus } from "./commands/unlock.js";
 import { cmdKeystoreMigrate } from "./commands/keystore-migrate.js";
 import { registerGrantCommand } from "./commands/grant.js";
+import { registerSetupCommands } from "./commands/setup.js";
 import { startAgent, lockAgent, installSignalHandlers } from "./agent/index.js";
 import { maybePromptForUpdate } from "./core/update.js";
 import { createRequire } from "node:module";
@@ -51,6 +52,7 @@ registerTreasuryCommands(program);
 registerSafeCommands(program);
 registerRotateWalletCommands(program);
 registerGrantCommand(program);
+registerSetupCommands(program);
 
 program
   .command("ls [project]")

@@ -83,3 +83,81 @@ export function readInstalledAgentUnit(
   }
   return { path: unitPath, texts };
 }
+
+/**
+ * Collect Environment= assignments from unit + drop-in texts (later wins).
+ * Supports `Environment=KEY=VAL` and `Environment="KEY=VAL" KEY2=VAL2`.
+ */
+export function parseUnitEnvironment(unitTexts: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const text of unitTexts) {
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line.startsWith("#") || line.startsWith(";")) continue;
+      const m = /^Environment\s*=\s*(.*)$/.exec(line);
+      if (!m) continue;
+      for (const pair of splitEnvironmentAssignments(m[1].trim())) {
+        const eq = pair.indexOf("=");
+        if (eq <= 0) continue;
+        out.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+    }
+  }
+  return out;
+}
+
+/** Split systemd Environment= value into KEY=VAL tokens (quoted-aware, simple). */
+function splitEnvironmentAssignments(value: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else cur += c;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (cur) {
+        out.push(cur);
+        cur = "";
+      }
+      continue;
+    }
+    cur += c;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/**
+ * Last ExecStart= from unit texts: `ExecStart=/path/node /path/server.js …`
+ * Returns absolute node + first script arg when both look absolute.
+ */
+export function parseUnitExecStart(
+  unitTexts: string[],
+): { node: string; script: string } | null {
+  let last: string | null = null;
+  for (const text of unitTexts) {
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line.startsWith("#") || line.startsWith(";")) continue;
+      const m = /^ExecStart\s*=\s*(.*)$/.exec(line);
+      if (m) last = m[1].trim();
+    }
+  }
+  if (!last) return null;
+  // Drop optional argv0 prefix `ExecStart=-/path` or `!/path`
+  const cleaned = last.replace(/^[@:+-]+/, "");
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  const node = parts[0];
+  const script = parts[1];
+  if (!path.isAbsolute(node) || !path.isAbsolute(script)) return null;
+  return { node, script };
+}

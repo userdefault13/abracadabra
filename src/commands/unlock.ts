@@ -15,6 +15,7 @@ import {
   AgentClientError,
   resolveAgentSocketPath,
 } from "../agent/index.js";
+import { maybeReexecForAgentNode } from "./unlock-reexec.js";
 import fs from "node:fs";
 
 /**
@@ -49,7 +50,7 @@ export function formatAgentUnlockFailure(
     ),
   ];
   if (hint) lines.push(red(`  hint: ${hint}`));
-  if (!hint || !/Rerun:|retry:/i.test(hint)) {
+  if (!hint || !/Rerun:|retry:|abra setup launcher/i.test(hint)) {
     lines.push(red("  Rerun: abra unlock   (after fixing the cause above)"));
   }
   lines.push(
@@ -77,6 +78,10 @@ export async function cmdUnlock(): Promise<void> {
     if (isSessionUnlocked()) lockSession();
     return;
   }
+
+  // Linux: re-exec under the agent's node before any passphrase prompt so the
+  // user is not asked twice when the shebang picked a different node on PATH.
+  await maybeReexecForAgentNode();
 
   const authBackend = resolveAuthBackend();
   if (authBackend !== "passphrase") {

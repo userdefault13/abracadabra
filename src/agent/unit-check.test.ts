@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
-import { checkUnitNetlink } from "./unit-check.js";
+import {
+  checkUnitNetlink,
+  parseUnitEnvironment,
+  parseUnitExecStart,
+} from "./unit-check.js";
 
 const SHIPPED_UNIT = fileURLToPath(
   new URL("../../packaging/linux/abra-agent.service", import.meta.url),
@@ -58,5 +62,29 @@ describe("checkUnitNetlink", () => {
     expect(checkUnitNetlink(["RestrictAddressFamilies=none"])).toMatchObject({
       status: "missing_netlink",
     });
+  });
+});
+
+describe("parseUnitEnvironment / parseUnitExecStart", () => {
+  it("parses Environment= from unit + drop-ins (later wins)", () => {
+    const env = parseUnitEnvironment([
+      "[Service]\nEnvironment=ABRA_KEYSTORE=keytar\nEnvironment=FOO=1\n",
+      "Environment=ABRA_KEYSTORE=passphrase-file\n",
+    ]);
+    expect(env.get("ABRA_KEYSTORE")).toBe("passphrase-file");
+    expect(env.get("FOO")).toBe("1");
+  });
+
+  it("parses ExecStart node + script", () => {
+    expect(
+      parseUnitExecStart([
+        "ExecStart=/home/u/.local/share/mise/installs/node/26.8.2/bin/node /home/u/.npm/lib/node_modules/@userdefault/abracadabra/dist/agent/server.js\n",
+      ]),
+    ).toEqual({
+      node: "/home/u/.local/share/mise/installs/node/26.8.2/bin/node",
+      script:
+        "/home/u/.npm/lib/node_modules/@userdefault/abracadabra/dist/agent/server.js",
+    });
+    expect(parseUnitExecStart(["ExecStart=node ./server.js\n"])).toBeNull();
   });
 });
