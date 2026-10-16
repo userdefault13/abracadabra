@@ -11,8 +11,9 @@ import {
 } from "../remote/enroll.js";
 
 /**
- * Hidden preview commands for remote unlock (PR 1–2/7).
- * Feature is off by default — nothing listens until later PRs + ABRA_REMOTE_UNLOCK=1.
+ * Hidden preview commands for remote unlock (PR 1–3/7).
+ * Feature is off by default — unlock listener runs in abra-agent only when
+ * ABRA_REMOTE_UNLOCK=1 and enrolled. Unlock CLI is PR 4.
  */
 
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;

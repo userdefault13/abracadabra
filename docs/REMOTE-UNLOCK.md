@@ -1,13 +1,13 @@
 # Remote unlock (hub-held unwrap key)
 
-Status: **PR 2/7 in progress** — enroll (wrap blob + hub-held `unlockWrap`).
-Feature flag: off by default (`ABRA_REMOTE_UNLOCK=1` to enable enroll / later listeners).
+Status: **PR 3/7 in progress** — wire protocol (challenge/response + tailnet listener).
+Feature flag: off by default (`ABRA_REMOTE_UNLOCK=1` to enable enroll / unlock listener).
 Nothing new runs unless you invoke it. Julius approved both phases; bot lease
 default TTL is **7 days**.
 
 Design source: [REMOTE-UNLOCK-DESIGN.md](./REMOTE-UNLOCK-DESIGN.md).
 
-## What PR 1–2 ship
+## What PR 1–3 ship
 
 | Piece | Path | Notes |
 |-------|------|--------|
@@ -15,9 +15,31 @@ Design source: [REMOTE-UNLOCK-DESIGN.md](./REMOTE-UNLOCK-DESIGN.md).
 | Hub pin | `<abraDir>/remote/hub-pin.json` | Hub `deviceId` + public keys only |
 | Unlock blob | `<abraDir>/remote/remote-unlock.blob` | AES-256-GCM_W(masterKey); AAD = deviceId + master-key fingerprint |
 | Hub wrap | `syncPeers[id].unlockWrap` | Device-local with peers; stripped on export; cleared on unpair |
-| Feature flag | `ABRA_REMOTE_UNLOCK` | Must be `1` for enroll / future unlock listener |
+| Wire crypto | `src/remote/wire.ts` | Challenge + seal(W) + Ed25519; 30s expiry; domains separated |
+| Nonce cache | `src/remote/nonce-cache.ts` | Single-use pending + used (in-memory) |
+| Listener | `src/remote/listener.ts` | HTTPS `:7335`, Tailscale bind (inbox-style); rate-limited |
+| Hub client | `src/remote/hub-client.ts` | `remoteUnlockViaHttp` / loopback harness (CLI → PR 4) |
+| Agent | `src/agent/remote-unlock.ts` | Starts only when flag + enrolled |
+| Feature flag | `ABRA_REMOTE_UNLOCK` | Must be `1` for enroll / unlock listener |
 | Hidden CLI | `abra remote whoami` | Prints **public fingerprint only** |
 | Hidden CLI | `abra remote enroll <peer>` | Hub stores W (network transport → PR 3; loopback harness in tests) |
+
+## Wire protocol (PR 3)
+
+Port **7335**, bind **Tailscale IPv4 only** (same detect/bind pattern as the sync
+inbox). Off unless `ABRA_REMOTE_UNLOCK=1` **and** enrolled (device key + hub pin +
+blob).
+
+1. Hub `POST /v1/remote/unlock` `{op:"challenge"}` → receiver returns a fresh
+   32-byte nonce + ephemeral X25519 pub, signed with the **device key**.
+2. Hub verifies against the enrolled device pub, returns `seal(ephemeral_pub, W)`
+   plus an Ed25519 signature over `(from, peerId, nonce, expiresAt ≤ 30s, policy, seal)`.
+3. Receiver verifies against `hub-pin.json` (works while locked), checks expiry +
+   single-use nonce cache, unwraps the blob, hands the master key to the in-process
+   unlock path. **W** and the master key buffers are zeroed after use.
+
+Strict message size limits, schema validation, per-source-IP rate limit.
+Logs: `op` / `peer` / `result` only — no wrap keys, master keys, or ciphertext.
 
 ## Enroll (PR 2)
 
@@ -29,9 +51,6 @@ may enroll; store `W` under `syncPeers[id].unlockWrap`.
 
 Re-enroll: if the receiver master key changes, the blob fingerprint check fails
 → clear error **"re-enroll needed"**.
-
-Transport: pure `prepareReceiverEnroll` / `planHubEnroll` + in-process
-`enrollLoopback`. Wire protocol / tailnet listener is PR 3.
 
 ## Threat model (device key alone)
 
@@ -53,8 +72,8 @@ to load. win32 skips mode checks (existing platform pattern).
 ## PR plan (1–7)
 
 1. **Device key + pinned hub key** — agent dir, 0600, fail-closed perms; tests
-2. **Enroll** (this PR) — `abra remote enroll <peer>`: create `W`, blob, seal `W` to hub; Touch ID on hub
-3. **Wire protocol** — challenge/response, signatures, nonce cache, 30s expiry, tailnet listener
+2. **Enroll** — `abra remote enroll <peer>`: create `W`, blob, seal `W` to hub; Touch ID on hub
+3. **Wire protocol** (this PR) — challenge/response, signatures, nonce cache, 30s expiry, tailnet listener
 4. **CLI** — `unlock|lock|status --all|--peers`, `revoke`, `disable`; audit log both sides
 5. **Relock policy** — signed policy field, local caps
 6. **(Phase 2) Lease store** — survives lock; serve path bound to `GrantCaller`
@@ -66,8 +85,10 @@ to load. win32 skips mode checks (existing platform pattern).
 # Optional: create/show device fingerprint (hidden; does not enable unlock)
 abra remote whoami
 
-# Enroll a paired receiver (requires ABRA_REMOTE_UNLOCK=1; network in PR 3)
+# Enroll a paired receiver (requires ABRA_REMOTE_UNLOCK=1)
 abra remote enroll mini
+
+# Unlock CLI arrives in PR 4; listener is already in abra-agent when enrolled + flag
 ```
 
 Private keys and wrap keys are never printed, logged, or returned in errors. Prefer
