@@ -3,6 +3,13 @@ import type { SyncIdentity, UnlockWrap } from "../core/vault.js";
 import type { EnrollOffer } from "./enroll-seal.js";
 import type { UnlockHttpResponse } from "./listener.js";
 import {
+  LEASE_PATH,
+  LEASE_REVOKE_PATH,
+  buildLeaseRevokeRequest,
+  type LeaseRevokeRequest,
+  type SealedLease,
+} from "./lease.js";
+import {
   ENROLL_PATH,
   LOCK_PATH,
   STATUS_PATH,
@@ -305,6 +312,98 @@ export async function remoteStatusViaHttp(opts: {
 export type RemoteEnrollFetchResult =
   | { ok: true; offer: EnrollOffer; listenerCert?: string }
   | { ok: false; reason: string };
+
+export type RemoteLeasePushResult =
+  | { ok: true; leaseId: string; project: string; replaced?: number }
+  | { ok: false; reason: string };
+
+/** Hub pushes a sealed bot lease to the receiver (PR 6 ingest / PR 7 grant). */
+export async function remoteLeasePushViaHttp(opts: {
+  host: string;
+  port: number;
+  ca: string;
+  lease: SealedLease;
+  request?: RemoteHttpsJsonFn;
+}): Promise<RemoteLeasePushResult> {
+  const post = opts.request ?? unlockHttpsJson;
+  let res: { status: number; json: UnlockHttpResponse };
+  try {
+    res = await post({
+      host: opts.host,
+      port: opts.port,
+      ca: opts.ca,
+      path: LEASE_PATH,
+      body: opts.lease,
+    });
+  } catch {
+    return { ok: false, reason: "unreachable" };
+  }
+  if (res.json.status === "leased" && typeof res.json.leaseId === "string") {
+    return {
+      ok: true,
+      leaseId: res.json.leaseId,
+      project: typeof res.json.project === "string" ? res.json.project : "",
+      replaced: typeof res.json.replaced === "number" ? res.json.replaced : undefined,
+    };
+  }
+  return { ok: false, reason: res.json.reason ?? `lease-failed:${res.status}` };
+}
+
+export type RemoteLeaseRevokeResult =
+  | { ok: true; removed: number }
+  | { ok: false; reason: string };
+
+/** Hub sends a signed lease revoke (one leaseId or all for the device). */
+export async function remoteLeaseRevokeViaHttp(opts: {
+  host: string;
+  port: number;
+  ca: string;
+  hubIdentity: SyncIdentity;
+  peerDeviceId: string;
+  leaseId?: string;
+  all?: boolean;
+  now?: () => number;
+  request?: RemoteHttpsJsonFn;
+}): Promise<RemoteLeaseRevokeResult> {
+  const post = opts.request ?? unlockHttpsJson;
+  const now = opts.now ?? (() => Date.now());
+  let body: LeaseRevokeRequest;
+  try {
+    body = buildLeaseRevokeRequest({
+      hub: opts.hubIdentity,
+      peerDeviceId: opts.peerDeviceId,
+      leaseId: opts.leaseId,
+      all: opts.all,
+      now: now(),
+    });
+  } catch (err) {
+    const reason =
+      err && typeof err === "object" && "reason" in err
+        ? String((err as { reason: string }).reason)
+        : "build-failed";
+    return { ok: false, reason };
+  }
+
+  let res: { status: number; json: UnlockHttpResponse };
+  try {
+    res = await post({
+      host: opts.host,
+      port: opts.port,
+      ca: opts.ca,
+      path: LEASE_REVOKE_PATH,
+      body,
+    });
+  } catch {
+    return { ok: false, reason: "unreachable" };
+  }
+  if (res.json.status === "revoked") {
+    return {
+      ok: true,
+      removed: typeof res.json.removed === "number" ? res.json.removed : 0,
+    };
+  }
+  return { ok: false, reason: res.json.reason ?? `revoke-failed:${res.status}` };
+}
 
 /**
  * Fetch a sealed enroll offer from an unlocked receiver (PR 2 over PR 3 transport).

@@ -20,6 +20,7 @@ import {
   remoteUnlockViaHttp,
   type RemoteHttpsJsonFn,
 } from "../remote/hub-client.js";
+import { revokePeerLeasesBestEffort } from "../remote/lease-revoke-peer.js";
 import { clearUnlockBlob } from "../remote/unlock-blob.js";
 import { listEnrolledPeers, selectEnrolledPeers, type EnrolledPeer } from "../remote/peers.js";
 import {
@@ -381,7 +382,7 @@ export async function cmdRemoteStatus(
   return rows;
 }
 
-/** Hub: delete unlockWrap via updateVault (instant revoke). */
+/** Hub: delete unlockWrap via updateVault (instant revoke); also revoke bot leases. */
 export async function cmdRemoteRevoke(
   peerNameOrId: string,
   deps: RemoteCliDeps = defaultRemoteCliDeps(),
@@ -393,13 +394,36 @@ export async function cmdRemoteRevoke(
 
   await deps.authenticate(`abracadabra: revoke remote unlock for ${found.peer.name}`);
 
+  // Capture wrap + address before clearing (needed for lease revoke push).
+  const wrapBefore = found.peer.unlockWrap;
+  const hostBefore = found.peer.lastAddress;
+  const peerSyncId = found.id;
+  const peerNameBefore = found.peer.name;
+
   let cleared = false;
   let peerName = found.peer.name;
+  let vaultAfter = before;
   await deps.updateVault((fresh) => {
     const out = clearPeerUnlockWrap(fresh, peerNameOrId);
     cleared = out.cleared;
     peerName = out.peerName ?? peerName;
+    vaultAfter = out.vault;
     return out.vault;
+  });
+
+  // Network after vault write — never hold the vault lock across HTTPS.
+  await revokePeerLeasesBestEffort({
+    vault: vaultAfter.syncIdentity ? vaultAfter : before,
+    peerName: peerNameBefore,
+    peerSyncId,
+    unlockWrap: wrapBefore,
+    host: hostBefore,
+    base: deps.base?.() ?? abraDir(),
+    now: deps.now,
+    request: deps.request,
+    audit: deps.audit,
+    log: deps.log,
+    error: deps.error,
   });
 
   (deps.audit ?? appendAuditLog)(

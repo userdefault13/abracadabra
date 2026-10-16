@@ -25,10 +25,17 @@ export const LEASE_DOMAIN = "abra-remote-lease-v1";
 const SIG_DOMAIN = `${LEASE_DOMAIN}/sig`;
 export const LEASE_VERSION = 1;
 export const LEASE_PATH = "/v1/remote/lease";
+export const LEASE_REVOKE_PATH = "/v1/remote/lease-revoke";
 /** Default / hard max TTL unless ABRA_LEASE_MAX_TTL_SECONDS raises or lowers the cap. */
 export const LEASE_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 export const LEASE_MAX_TTL_SECONDS = LEASE_DEFAULT_TTL_SECONDS;
+/** Hub grant/renew hard ceiling — refuse above 7d (no silent clamp). */
+export const LEASE_HUB_HARD_MAX_TTL_SECONDS = LEASE_DEFAULT_TTL_SECONDS;
 export const LEASE_MAX_BODY_BYTES = 1 * 1024 * 1024;
+/** Signed revoke message expiry (same window as unlock/lock responses). */
+export const LEASE_REVOKE_TTL_MS = 30_000;
+const REVOKE_NONCE_BYTES = 32;
+const SIG_REVOKE_DOMAIN = `${LEASE_DOMAIN}/revoke-sig`;
 
 const GCM_TAG_BYTES = 16;
 const NONCE_BYTES = 12;
@@ -468,4 +475,215 @@ export function leasePublicView(lease: SealedLease): {
     issuedAt: lease.issuedAt,
     expiresAt: lease.expiresAt,
   };
+}
+
+/**
+ * Parse hub lease TTL: `90s`, `30m`, `2h`, `7d`, or plain seconds.
+ * Hard-refuses anything above LEASE_HUB_HARD_MAX_TTL_SECONDS (7d) — no clamp.
+ */
+export function parseLeaseTtl(raw: string): number {
+  const s = raw.trim().toLowerCase();
+  if (!s) throw new LeaseError("malformed", "ttl is required");
+
+  const m = s.match(/^(\d+(?:\.\d+)?)(s|m|h|d)?$/);
+  if (!m) {
+    throw new LeaseError(
+      "malformed",
+      `invalid ttl "${raw}" — use e.g. 90s, 30m, 2h, 7d, or plain seconds`,
+    );
+  }
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new LeaseError("malformed", `invalid ttl "${raw}"`);
+  }
+  const unit = m[2] ?? "s";
+  let seconds: number;
+  switch (unit) {
+    case "s":
+      seconds = Math.floor(n);
+      break;
+    case "m":
+      seconds = Math.floor(n * 60);
+      break;
+    case "h":
+      seconds = Math.floor(n * 3600);
+      break;
+    case "d":
+      seconds = Math.floor(n * 86400);
+      break;
+    default:
+      throw new LeaseError("malformed", `invalid ttl unit in "${raw}"`);
+  }
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    throw new LeaseError("malformed", `invalid ttl "${raw}"`);
+  }
+  if (seconds > LEASE_HUB_HARD_MAX_TTL_SECONDS) {
+    throw new LeaseError(
+      "ttl-exceeded",
+      `lease ttl must be at most ${LEASE_HUB_HARD_MAX_TTL_SECONDS / 86400}d (${LEASE_HUB_HARD_MAX_TTL_SECONDS}s); got ${seconds}s`,
+    );
+  }
+  return seconds;
+}
+
+/** Hub → receiver signed lease revoke (no secret material). */
+export interface LeaseRevokeRequest {
+  v: typeof LEASE_VERSION;
+  op: "lease-revoke";
+  from: string;
+  peerId: string;
+  /** Specific lease id, or omit when `all` is true. */
+  leaseId?: string;
+  /** Revoke every lease on this device from this hub. */
+  all?: boolean;
+  nonce: string;
+  expiresAt: number;
+  sig: string;
+}
+
+function revokeSigMessage(r: Omit<LeaseRevokeRequest, "sig">): Buffer {
+  return lengthPrefixed([
+    Buffer.from(SIG_REVOKE_DOMAIN, "utf8"),
+    Buffer.from(String(r.v), "utf8"),
+    Buffer.from(r.op, "utf8"),
+    Buffer.from(r.from, "utf8"),
+    Buffer.from(r.peerId, "utf8"),
+    Buffer.from(r.leaseId ?? "", "utf8"),
+    Buffer.from(r.all ? "1" : "0", "utf8"),
+    Buffer.from(r.nonce, "base64"),
+    Buffer.from(String(r.expiresAt), "utf8"),
+  ]);
+}
+
+const REVOKE_KEYS = new Set([
+  "v",
+  "op",
+  "from",
+  "peerId",
+  "leaseId",
+  "all",
+  "nonce",
+  "expiresAt",
+  "sig",
+]);
+
+/** Strict structural parse for a lease revoke (no crypto). */
+export function parseLeaseRevokeRequest(raw: unknown): LeaseRevokeRequest {
+  const bad = (what: string): never => {
+    throw new LeaseError("malformed", `malformed lease revoke: ${what}`);
+  };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) bad("not an object");
+  const e = raw as Record<string, unknown>;
+  for (const k of Object.keys(e)) {
+    if (!REVOKE_KEYS.has(k)) bad("unexpected field");
+  }
+  if (e.v !== LEASE_VERSION) bad("version");
+  if (e.op !== "lease-revoke") bad("op");
+  if (!isUuid(e.from) || !isUuid(e.peerId)) bad("ids");
+  if (typeof e.expiresAt !== "number" || !Number.isSafeInteger(e.expiresAt) || e.expiresAt < 0) {
+    bad("expiresAt");
+  }
+  if (!strictB64(e.nonce, REVOKE_NONCE_BYTES)) bad("nonce");
+  if (!strictB64(e.sig, 64)) bad("sig");
+
+  const hasLeaseId = e.leaseId !== undefined;
+  const all = e.all === true;
+  if (hasLeaseId && all) bad("leaseId+all");
+  if (!hasLeaseId && !all) bad("target");
+  if (hasLeaseId) {
+    if (!isUuid(e.leaseId)) bad("leaseId");
+  } else if (e.all !== true) {
+    bad("all");
+  }
+
+  return {
+    v: LEASE_VERSION,
+    op: "lease-revoke",
+    from: e.from as string,
+    peerId: e.peerId as string,
+    ...(hasLeaseId ? { leaseId: e.leaseId as string } : {}),
+    ...(all ? { all: true } : {}),
+    nonce: e.nonce as string,
+    expiresAt: e.expiresAt as number,
+    sig: e.sig as string,
+  };
+}
+
+/** Hub: sign a lease revoke for one leaseId or all leases on a device. */
+export function buildLeaseRevokeRequest(opts: {
+  hub: SyncIdentity;
+  peerDeviceId: string;
+  leaseId?: string;
+  all?: boolean;
+  now?: number;
+  expiresAt?: number;
+  nonce?: Buffer;
+}): LeaseRevokeRequest {
+  if (!isUuid(opts.peerDeviceId)) {
+    throw new LeaseError("malformed", "revoke peer id must be a UUID");
+  }
+  const all = opts.all === true;
+  const leaseId = opts.leaseId;
+  if (all === Boolean(leaseId)) {
+    throw new LeaseError("malformed", "revoke requires exactly one of leaseId or all");
+  }
+  if (leaseId !== undefined && !isUuid(leaseId)) {
+    throw new LeaseError("malformed", "revoke leaseId must be a UUID");
+  }
+
+  const now = opts.now ?? Date.now();
+  const expiresAt = opts.expiresAt ?? now + LEASE_REVOKE_TTL_MS;
+  if (expiresAt - now > LEASE_REVOKE_TTL_MS) {
+    throw new LeaseError("expired", "revoke expiry exceeds 30s maximum");
+  }
+  if (expiresAt <= now) {
+    throw new LeaseError("expired", "revoke expiry is not in the future");
+  }
+
+  const nonceBuf = opts.nonce ?? crypto.randomBytes(REVOKE_NONCE_BYTES);
+  if (nonceBuf.length !== REVOKE_NONCE_BYTES) {
+    throw new LeaseError("malformed", "revoke nonce must be 32 bytes");
+  }
+  const unsigned: Omit<LeaseRevokeRequest, "sig"> = {
+    v: LEASE_VERSION,
+    op: "lease-revoke",
+    from: opts.hub.id,
+    peerId: opts.peerDeviceId,
+    ...(leaseId ? { leaseId } : {}),
+    ...(all ? { all: true } : {}),
+    nonce: nonceBuf.toString("base64"),
+    expiresAt,
+  };
+  const sig = crypto.sign(null, revokeSigMessage(unsigned), ed25519PrivateKey(opts.hub));
+  return { ...unsigned, sig: sig.toString("base64") };
+}
+
+/** Receiver: verify hub signature + expiry against hub-pin. */
+export function verifyLeaseRevokeRequest(
+  request: LeaseRevokeRequest,
+  hubPin: HubPin,
+  opts: { now?: number; expectedPeerId?: string } = {},
+): void {
+  const now = opts.now ?? Date.now();
+  if (request.from !== hubPin.deviceId) {
+    throw new LeaseError("wrong-hub", "lease revoke is not from the pinned hub");
+  }
+  if (opts.expectedPeerId !== undefined && request.peerId !== opts.expectedPeerId) {
+    throw new LeaseError("wrong-device", "lease revoke peerId does not match this device");
+  }
+  if (request.expiresAt <= now) {
+    throw new LeaseError("expired", "lease revoke expired");
+  }
+  let ok = false;
+  try {
+    ok = crypto.verify(
+      null,
+      revokeSigMessage(request),
+      ed25519PublicKey(hubPin.ed25519),
+      Buffer.from(request.sig, "base64"),
+    );
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new LeaseError("bad-signature", "lease revoke signature invalid");
 }

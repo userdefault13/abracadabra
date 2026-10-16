@@ -37,6 +37,9 @@ import {
   type PairListenInfo,
   type PairResult,
 } from "../sync/pair.js";
+import { isRemoteUnlockEnabled } from "../remote/feature.js";
+import { revokePeerLeasesBestEffort } from "../remote/lease-revoke-peer.js";
+import type { RemoteHttpsJsonFn } from "../remote/hub-client.js";
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -50,6 +53,9 @@ export interface SyncDeps extends PairDeps {
   detectTailscale: () => Promise<string | null>;
   /** Live listener state from a running abra-agent; null when no agent answers. */
   agentInboxStatus: () => Promise<AgentInboxStatusBody | null>;
+  /** Override remote-unlock HTTPS (tests / lease revoke on unpair). */
+  remoteRequest?: RemoteHttpsJsonFn;
+  error?: (line: string) => void;
 }
 
 export async function ttyConfirm(question: string): Promise<boolean> {
@@ -161,6 +167,14 @@ export async function cmdSyncUnpair(
     }
   }
   await deps.authenticate(`abracadabra: remove sync peer ${found.peer.name}`);
+
+  // Capture before delete — unlockWrap + address needed for lease revoke push.
+  const wrapBefore = found.peer.unlockWrap;
+  const hostBefore = found.peer.lastAddress;
+  const peerSyncId = found.id;
+  const peerNameBefore = found.peer.name;
+  const hubIdentity = before.syncIdentity;
+
   let removed!: ReturnType<typeof removePeer>["removed"];
   const vault = await deps.updateVault((fresh) => {
     const r = removePeer(fresh, found.id);
@@ -168,6 +182,23 @@ export async function cmdSyncUnpair(
     return r.vault;
   });
   refreshInboxAnchors(vault, deps);
+
+  // Bot leases for this peer: best-effort revoke after vault write (no lock held).
+  if (isRemoteUnlockEnabled() && (wrapBefore || hubIdentity)) {
+    await revokePeerLeasesBestEffort({
+      vault: { ...vault, syncIdentity: vault.syncIdentity ?? hubIdentity },
+      peerName: peerNameBefore,
+      peerSyncId,
+      unlockWrap: wrapBefore,
+      host: hostBefore,
+      base: deps.abraDir(),
+      now: deps.now,
+      request: deps.remoteRequest,
+      log: (line) => deps.log(green(`✓ ${line}`)),
+      error: deps.error ?? ((line) => deps.log(yellow(`⚠ ${line}`))),
+    });
+  }
+
   deps.log(green(`✓ unpaired "${removed.peer.name}" (${removed.peer.idFingerprint})`));
 }
 
