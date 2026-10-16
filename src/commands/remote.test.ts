@@ -369,4 +369,12 @@ describe("remote CLI (loopback hub+receiver)", () => {
     await expect(cmdRemoteRevoke("mini", deps)).rejects.toThrow(/ABRA_REMOTE_UNLOCK=1/);
     await expect(cmdRemoteDisable(deps)).rejects.toThrow(/ABRA_REMOTE_UNLOCK=1/);
   });
+
+  it("refuses --keep-alive (no silent re-unlock loop)", async () => {
+    const { hub } = pairedFleet();
+    const deps = hubDeps(hub, async () => ({ status: 0, json: { status: "rejected" } }));
+    await expect(cmdRemoteUnlock({ all: true, keepAlive: true }, deps)).rejects.toThrow(
+      /--keep-alive is not supported/,
+    );
+  });
 });

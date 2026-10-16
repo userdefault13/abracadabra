@@ -137,7 +137,13 @@ describe("remote unlock wire", () => {
       unlockWrap: h.unlockWrap,
       now: () => FIXED_NOW,
     });
-    expect(result).toEqual({ ok: true, policy: {} });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    // Empty hub policy → receiver applies local agent caps (default 15m / 8h).
+    expect(result.policy).toEqual({
+      idleSeconds: 15 * 60,
+      maxAgeSeconds: 8 * 60 * 60,
+    });
     expect(unlocked!.equals(masterKey)).toBe(true);
     expect(isRemoteUnlockEnrolled(base)).toBe(true);
   });
@@ -453,7 +459,13 @@ describe("remote unlock HTTP handler (loopback)", () => {
       now: Date.now(),
     });
     const un = await post(port, response);
-    expect(un).toEqual({ status: 200, json: { status: "unlocked" } });
+    expect(un).toEqual({
+      status: 200,
+      json: {
+        status: "unlocked",
+        policy: { idleSeconds: 15 * 60, maxAgeSeconds: 8 * 60 * 60 },
+      },
+    });
     expect(unlocked!.equals(masterKey)).toBe(true);
     unlocked!.fill(0);
   });

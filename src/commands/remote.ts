@@ -22,7 +22,11 @@ import {
 } from "../remote/hub-client.js";
 import { clearUnlockBlob } from "../remote/unlock-blob.js";
 import { listEnrolledPeers, selectEnrolledPeers, type EnrolledPeer } from "../remote/peers.js";
-import { REMOTE_UNLOCK_PORT } from "../remote/wire.js";
+import {
+  buildRequestedPolicy,
+  parsePolicyDuration,
+} from "../remote/policy.js";
+import { REMOTE_UNLOCK_PORT, type UnlockPolicy } from "../remote/wire.js";
 
 /**
  * Remote fleet unlock CLI (PR 4/7).
@@ -173,12 +177,38 @@ export interface PeerBatchResult {
   reason?: string;
 }
 
+export interface RemoteUnlockCliOpts {
+  all?: boolean;
+  peers?: string;
+  /** Requested idle lock duration (e.g. `5m`); receiver clamps to local cap. */
+  idle?: string;
+  /** Requested max unlock age (e.g. `1h`); receiver clamps to local cap. */
+  maxAge?: string;
+  /**
+   * Keep-alive is not implemented: re-unlock always needs a fresh Touch ID.
+   * Flag is refused so operators do not assume a silent loop.
+   */
+  keepAlive?: boolean;
+}
+
 /** One Touch ID for the batch, then parallel unlock per peer. */
 export async function cmdRemoteUnlock(
-  opts: { all?: boolean; peers?: string },
+  opts: RemoteUnlockCliOpts,
   deps: RemoteCliDeps = defaultRemoteCliDeps(),
 ): Promise<PeerBatchResult[]> {
   requireFlag();
+  if (opts.keepAlive) {
+    throw new Error(
+      "--keep-alive is not supported — re-unlock always requires a fresh Touch ID (no silent loop)",
+    );
+  }
+
+  const policy: UnlockPolicy = buildRequestedPolicy({
+    idleSeconds: opts.idle !== undefined ? parsePolicyDuration(opts.idle, "idle") : undefined,
+    maxAgeSeconds:
+      opts.maxAge !== undefined ? parsePolicyDuration(opts.maxAge, "max-age") : undefined,
+  });
+
   const before = await deps.loadVault();
   const selected = selectEnrolledPeers(before, opts);
   const names = selected.map((p) => p.name);
@@ -201,6 +231,7 @@ export async function cmdRemoteUnlock(
           ca: peerCa(p),
           hubIdentity: identity,
           unlockWrap: p.unlockWrap,
+          policy,
           now: deps.now,
           request: deps.request,
         });
@@ -210,7 +241,13 @@ export async function cmdRemoteUnlock(
           { base: deps.base?.(), now: deps.now },
         );
         if (out.ok) {
-          deps.log?.(`unlocked ${p.name}`);
+          const idle = out.policy.idleSeconds;
+          const maxAge = out.policy.maxAgeSeconds;
+          const policyNote =
+            typeof idle === "number" && typeof maxAge === "number"
+              ? ` (idle ${idle}s, max-age ${maxAge}s)`
+              : "";
+          deps.log?.(`unlocked ${p.name}${policyNote}`);
           return { peer: p.name, ok: true };
         }
         deps.error?.(`${p.name}: ${out.reason}`);
@@ -437,14 +474,34 @@ export function registerRemoteCommands(program: Command): void {
     .description("Unlock enrolled peers (one Touch ID for the batch)")
     .option("--all", "unlock every enrolled receiver peer")
     .option("--peers <list>", "comma-separated peer names or ids")
-    .action(async (opts: { all?: boolean; peers?: string }) => {
-      try {
-        const results = await cmdRemoteUnlock(opts);
-        exitFromBatch(results);
-      } catch (err) {
-        fail(err);
-      }
-    });
+    .option(
+      "--idle <dur>",
+      "request shorter idle lock (e.g. 5m); receiver clamps to local cap (default 15m)",
+    )
+    .option(
+      "--max-age <dur>",
+      "request shorter max unlock age (e.g. 1h); receiver clamps to local cap (default 8h)",
+    )
+    .option(
+      "--keep-alive",
+      "not supported — re-unlock always requires a fresh Touch ID (no silent loop)",
+    )
+    .action(
+      async (opts: {
+        all?: boolean;
+        peers?: string;
+        idle?: string;
+        maxAge?: string;
+        keepAlive?: boolean;
+      }) => {
+        try {
+          const results = await cmdRemoteUnlock(opts);
+          exitFromBatch(results);
+        } catch (err) {
+          fail(err);
+        }
+      },
+    );
 
   remote
     .command("lock")
