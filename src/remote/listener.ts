@@ -17,6 +17,8 @@ import {
   type AppliedUnlockPolicy,
   type UnlockPolicyCaps,
 } from "./policy.js";
+import type { LeaseStore } from "../agent/lease-store.js";
+import { LEASE_MAX_BODY_BYTES, LEASE_PATH, LeaseError } from "./lease.js";
 import { ensureRemoteDir, remoteDir, writePrivateFile, assertPrivatePath } from "./private-fs.js";
 import { readUnlockBlob, unwrapMasterKey } from "./unlock-blob.js";
 import {
@@ -68,6 +70,10 @@ export type UnlockRejectReason =
   | "unlock-failed"
   | "lock-failed"
   | "enroll-failed"
+  | "lease-failed"
+  | "ttl-exceeded"
+  | "wrong-project"
+  | "wrong-binding"
   | "internal";
 
 const PUBLIC_REJECT: Record<UnlockRejectReason, [number, string]> = {
@@ -92,11 +98,15 @@ const PUBLIC_REJECT: Record<UnlockRejectReason, [number, string]> = {
   "unlock-failed": [500, "unlock-failed"],
   "lock-failed": [500, "lock-failed"],
   "enroll-failed": [500, "enroll-failed"],
+  "lease-failed": [500, "lease-failed"],
+  "ttl-exceeded": [403, "ttl-exceeded"],
+  "wrong-project": [403, "unauthorized"],
+  "wrong-binding": [403, "unauthorized"],
   internal: [500, "internal"],
 };
 
 export interface UnlockHttpResponse {
-  status: "challenge" | "unlocked" | "locked" | "offer" | "ok" | "rejected";
+  status: "challenge" | "unlocked" | "locked" | "offer" | "ok" | "leased" | "rejected";
   reason?: string;
   challenge?: UnlockChallenge;
   offer?: EnrollOffer;
@@ -107,6 +117,10 @@ export interface UnlockHttpResponse {
   deviceId?: string;
   /** Applied idle/max-age after local clamp (unlocked only). */
   policy?: AppliedUnlockPolicy;
+  /** Lease ingest ack (ids only — never secrets). */
+  leaseId?: string;
+  project?: string;
+  replaced?: number;
 }
 
 export interface UnlockOutcome {
@@ -197,6 +211,8 @@ export interface UnlockSessionDeps {
   onNotEnrolled?: () => void;
   /** Override local idle/max-age caps (tests). Default: agent env caps. */
   localCaps?: () => UnlockPolicyCaps;
+  /** Phase 2 bot lease store (survives vault lock). */
+  leaseStore?: LeaseStore;
 }
 
 /**
@@ -465,6 +481,56 @@ export class UnlockSession {
   }
 
   /**
+   * Hub pushes a sealed bot lease. Works while vault locked (device key + hub pin).
+   * Feature flag required. Never logs secret values.
+   */
+  acceptLease(raw: unknown): UnlockOutcome {
+    if (!isRemoteUnlockEnabled()) {
+      this.log("lease", undefined, "disabled");
+      return rejectOutcome("disabled");
+    }
+    if (!this.deps.leaseStore) {
+      this.log("lease", undefined, "lease-failed");
+      return rejectOutcome("lease-failed");
+    }
+    try {
+      const result = this.deps.leaseStore.ingest(raw);
+      this.log("lease", result.leaseId, "ok");
+      return {
+        response: {
+          status: "leased",
+          leaseId: result.leaseId,
+          project: result.project,
+          replaced: result.replaced,
+        },
+        httpStatus: 200,
+        peer: result.leaseId,
+        op: "response",
+      };
+    } catch (err) {
+      let reason: UnlockRejectReason = "lease-failed";
+      if (err instanceof LeaseError) {
+        const map: Partial<Record<string, UnlockRejectReason>> = {
+          disabled: "disabled",
+          "not-enrolled": "not-enrolled",
+          malformed: "malformed",
+          "bad-signature": "bad-signature",
+          expired: "expired",
+          "wrong-hub": "wrong-hub",
+          "wrong-device": "wrong-device",
+          "decrypt-failed": "decrypt-failed",
+          "ttl-exceeded": "ttl-exceeded",
+          "wrong-project": "wrong-project",
+          "wrong-binding": "wrong-binding",
+        };
+        reason = map[err.reason] ?? "lease-failed";
+      }
+      this.log("lease", undefined, reason);
+      return rejectOutcome(reason);
+    }
+  }
+
+  /**
    * Hub asks for a sealed enroll offer. Requires an unlocked vault (and the
    * feature flag). Works before the blob exists (first enroll).
    */
@@ -530,7 +596,8 @@ export type RemotePath =
   | typeof UNLOCK_PATH
   | typeof LOCK_PATH
   | typeof STATUS_PATH
-  | typeof ENROLL_PATH;
+  | typeof ENROLL_PATH
+  | typeof LEASE_PATH;
 
 export type RemoteReceiveFn = (
   path: RemotePath,
@@ -545,14 +612,21 @@ export interface UnlockHttpOptions {
   log?: (line: string) => void;
 }
 
-const REMOTE_PATHS = new Set<string>([UNLOCK_PATH, LOCK_PATH, STATUS_PATH, ENROLL_PATH]);
+const REMOTE_PATHS = new Set<string>([
+  UNLOCK_PATH,
+  LOCK_PATH,
+  STATUS_PATH,
+  ENROLL_PATH,
+  LEASE_PATH,
+]);
 
-/** Route POST /v1/remote/{unlock,lock,status,enroll} — JSON, size-capped, rate-limited. */
+/** Route POST /v1/remote/{unlock,lock,status,enroll,lease} — JSON, size-capped, rate-limited. */
 export function createRemoteRequestHandler(
   receive: RemoteReceiveFn,
   opts: UnlockHttpOptions = {},
 ): (req: IncomingMessage, res: ServerResponse) => void {
-  const maxBody = opts.maxBodyBytes ?? UNLOCK_MAX_BODY_BYTES;
+  // Lease bodies carry sealed project ciphertext; unlock/lock stay small.
+  const maxBody = opts.maxBodyBytes ?? Math.max(UNLOCK_MAX_BODY_BYTES, LEASE_MAX_BODY_BYTES);
   const rl = opts.rateLimit ?? UNLOCK_RATE_LIMIT;
   const limiter = new RateLimiter(rl.max, rl.windowMs);
   const now = opts.now ?? Date.now;
@@ -664,6 +738,8 @@ export function dispatchRemoteSession(
       return Promise.resolve(session.status());
     case ENROLL_PATH:
       return session.acceptEnrollRequest(raw);
+    case LEASE_PATH:
+      return Promise.resolve(session.acceptLease(raw));
     default:
       return Promise.resolve(rejectOutcome("not-found"));
   }

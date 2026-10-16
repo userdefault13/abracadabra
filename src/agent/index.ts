@@ -37,6 +37,7 @@ export {
   agentGrantList,
   agentGrantRevoke,
   agentGrantCheck,
+  agentLeaseReveal,
   agentInboxStatus,
   loadVaultViaAgent,
   saveVaultViaAgent,
@@ -55,6 +56,7 @@ export {
   type GrantCaller,
   type GrantListItem,
 } from "./grants.js";
+export { LeaseStore, type LeaseCheckResult, type LeaseRevealResult } from "./lease-store.js";
 export {
   startSleepWatch,
   type SleepWatchFactory,

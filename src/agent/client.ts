@@ -118,6 +118,12 @@ export async function agentRequest(
     | { op: "grant.list" }
     | { op: "grant.revoke"; grantId?: string; all?: boolean }
     | { op: "grant.check"; project: string; caller: GrantCaller }
+    | {
+        op: "lease.reveal";
+        project: string;
+        caller: GrantCaller;
+        keys?: string[];
+      }
     | { op: "inbox.status" }
   ),
   opts?: AgentClientOpts,
@@ -381,6 +387,38 @@ export async function agentGrantCheck(
     granted: res.granted,
     ...(res.grantId ? { grantId: res.grantId } : {}),
     ...(res.remainingMs !== undefined ? { remainingMs: res.remainingMs } : {}),
+  };
+}
+
+/** Reveal leased project secrets (works while vault locked). */
+export async function agentLeaseReveal(
+  opts: {
+    project: string;
+    caller: GrantCaller;
+    keys?: string[];
+  } & AgentClientOpts,
+): Promise<{
+  leaseId: string;
+  project: string;
+  vars: Record<string, string>;
+  remainingMs: number;
+}> {
+  const { project, caller, keys, ...clientOpts } = opts;
+  const res = await agentRequest(
+    { op: "lease.reveal", project, caller, ...(keys ? { keys } : {}) },
+    clientOpts,
+  );
+  if (!res.ok || res.op !== "lease.reveal") {
+    throw new AgentClientError(
+      !res.ok ? res.error : "Unexpected lease.reveal response",
+      !res.ok ? res.code : "internal",
+    );
+  }
+  return {
+    leaseId: res.leaseId,
+    project: res.project,
+    vars: res.vars,
+    remainingMs: res.remainingMs,
   };
 }
 
