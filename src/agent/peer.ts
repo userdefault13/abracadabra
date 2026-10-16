@@ -3,7 +3,9 @@
  *
  * Linux: resolve the connecting peer via the accepted socket inode + `ss -xpn`
  * (iproute2 sock_diag / UNIX_DIAG_PEER), then allow only the abra CLI running
- * under the same node binary with a clean argv / NODE_OPTIONS.
+ * under the same node binary (dev+ino via `stat(/proc/<pid>/exe)` vs
+ * `/proc/self/exe`; realpath string equality only if a stat fails) and the
+ * same dist/index.js inode, with a clean argv / NODE_OPTIONS.
  *
  * Non-Linux: reject unless a test-only `authorizePeer` override is supplied
  * (no /proc, no reliable equivalent without native addons).
@@ -66,6 +68,14 @@ export interface SsUnixEntry {
   pid: number | null;
 }
 
+/** File identity from `statSync(path, { bigint: true })` — compare `dev` + `ino`. */
+export type FileIdentity = { dev: bigint; ino: bigint };
+
+export type StatSyncFn = (
+  p: string,
+  opts: { bigint: true },
+) => { dev: bigint; ino: bigint };
+
 export interface PeerCheckDeps {
   platform?: NodeJS.Platform;
   /** Absolute path to the node binary this agent runs under. */
@@ -76,6 +86,8 @@ export interface PeerCheckDeps {
   readlinkSync?: (p: string) => string;
   readFileSync?: (p: string) => Buffer;
   realpathSync?: (p: string) => string;
+  /** `fs.statSync` with `{ bigint: true }` (injected in tests). */
+  statSync?: StatSyncFn;
   /** Return stdout of `ss -xpn` (injected in tests). Throw SsRunError to classify. */
   runSs?: (opts: { timeoutMs: number }) => Promise<string>;
   existsSync?: (p: string) => boolean;
@@ -151,7 +163,7 @@ export function peerFailureHint(
   reason: string,
   agent: { execPath: string; cliEntrypoint: string },
 ): string | undefined {
-  if (reason === "exe_mismatch") {
+  if (reason === "exe_mismatch" || reason === "exe_stat_failed") {
     return (
       `abra-agent runs under node ${agent.execPath}; the CLI must use the same node binary ` +
       `(a #!/usr/bin/env node shebang picks the first node on PATH). ` +
@@ -394,14 +406,76 @@ export function nodeOptionsAreDangerous(nodeOptions: string | undefined): boolea
   return DANGEROUS_NODE_OPTIONS.test(nodeOptions);
 }
 
+export function fileIdentitiesEqual(a: FileIdentity, b: FileIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+export function formatFileId(id: FileIdentity | null): string {
+  return id ? `${id.dev}:${id.ino}` : "-:-";
+}
+
+/**
+ * Same file when both stats succeeded and (dev,ino) match.
+ * If either stat failed: allow only when the realpath strings are equal;
+ * otherwise fail closed with `statFailedReason`. Never allow on string alone
+ * when both stats succeeded and differ.
+ */
+export function sameFileByIdentityOrPath(
+  peerId: FileIdentity | null,
+  otherId: FileIdentity | null,
+  peerPath: string,
+  otherPath: string,
+  reasons: { mismatch: string; statFailed: string },
+): { ok: true } | { ok: false; reason: string } {
+  if (peerId !== null && otherId !== null) {
+    if (fileIdentitiesEqual(peerId, otherId)) return { ok: true };
+    return { ok: false, reason: reasons.mismatch };
+  }
+  if (peerPath === otherPath) return { ok: true };
+  return { ok: false, reason: reasons.statFailed };
+}
+
+export function tryFileIdentity(statSync: StatSyncFn, p: string): FileIdentity | null {
+  try {
+    const s = statSync(p, { bigint: true });
+    return { dev: s.dev, ino: s.ino };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Diagnostic line for exe identity failures (agent stderr only — never argv/env).
+ * Form: `exe_mismatch pid=… peer_exe=… peer_id=… agent_exe=… agent_id=…`
+ * (same fields for `exe_stat_failed`).
+ */
+export function formatExeIdentityLog(opts: {
+  reason: "exe_mismatch" | "exe_stat_failed";
+  pid: number;
+  peerExe: string;
+  peerId: FileIdentity | null;
+  agentExe: string;
+  agentId: FileIdentity | null;
+}): string {
+  return (
+    `${opts.reason} pid=${opts.pid}` +
+    ` peer_exe=${opts.peerExe} peer_id=${formatFileId(opts.peerId)}` +
+    ` agent_exe=${opts.agentExe} agent_id=${formatFileId(opts.agentId)}`
+  );
+}
+
 /**
  * Allow when:
- * - peer exe realpath == agent execPath realpath (same node binary)
- * - peer argv[1] realpath == this package's dist/index.js (Node puts the script
- *   at argv[1] for both `node dist/index.js` and shebang `abra`; an installed
- *   `abra` bin that realpaths to the same file is therefore allowed)
- * - relative argv[1] is resolved against the peer's cwd (not the agent's) before
- *   realpath; missing peer cwd with a relative script → `peer_cwd_unreadable`
+ * - peer exe and agent share the same file identity (dev+ino via
+ *   `/proc/<pid>/exe` and `/proc/self/exe`); realpath string equality is only
+ *   a fallback when a stat fails
+ * - peer argv[1] and this package's dist/index.js share the same identity
+ *   (same fail-closed / realpath-fallback rule). Node puts the script at
+ *   argv[1] for both `node dist/index.js` and shebang `abra`; an installed
+ *   `abra` bin that stats to the same inode is therefore allowed
+ * - relative argv[1] is resolved against the peer's cwd (not the agent's)
+ *   before identity/realpath; missing peer cwd with a relative script →
+ *   `peer_cwd_unreadable`
  * - no node flags before the script (argv[1] must not start with `-`)
  * - NODE_OPTIONS contains none of the dangerous inject/debug flags
  */
@@ -409,19 +483,41 @@ export function isAllowedAbraCliPeer(
   opts: {
     peerExeRealpath: string;
     agentExecRealpath: string;
+    /** From `stat(/proc/<pid>/exe)`; null = stat failed. */
+    peerExeId?: FileIdentity | null;
+    /** From `stat(/proc/self/exe)`; null = stat failed. */
+    agentExeId?: FileIdentity | null;
     peerArgv: string[];
     cliEntrypointRealpath: string;
+    /** Precomputed CLI entry identity; if omitted, derived via `statSync`. */
+    cliEntrypointId?: FileIdentity | null;
     nodeOptions?: string;
     /** Peer process cwd from `/proc/<pid>/cwd`; required when argv[1] is relative. */
     peerCwd?: string;
     realpathSync?: (p: string) => string;
+    statSync?: StatSyncFn;
   },
 ): { allowed: true } | { allowed: false; reason: string } {
   const realpath = opts.realpathSync ?? ((p: string) => fs.realpathSync(p));
+  const statSync: StatSyncFn =
+    opts.statSync ??
+    ((p, o) => fs.statSync(p, o) as { dev: bigint; ino: bigint });
 
-  if (opts.peerExeRealpath !== opts.agentExecRealpath) {
+  // When ids are omitted (path-only unit tests), compare realpath strings as
+  // before. When provided (including null = stat failed), use identity rules.
+  if (opts.peerExeId !== undefined || opts.agentExeId !== undefined) {
+    const exeCheck = sameFileByIdentityOrPath(
+      opts.peerExeId ?? null,
+      opts.agentExeId ?? null,
+      opts.peerExeRealpath,
+      opts.agentExecRealpath,
+      { mismatch: "exe_mismatch", statFailed: "exe_stat_failed" },
+    );
+    if (!exeCheck.ok) return { allowed: false, reason: exeCheck.reason };
+  } else if (opts.peerExeRealpath !== opts.agentExecRealpath) {
     return { allowed: false, reason: "exe_mismatch" };
   }
+
   if (nodeOptionsAreDangerous(opts.nodeOptions)) {
     return { allowed: false, reason: "dangerous_node_options" };
   }
@@ -447,16 +543,37 @@ export function isAllowedAbraCliPeer(
     scriptAbs = path.resolve(opts.peerCwd, scriptArg);
   }
 
-  let scriptReal: string;
+  const scriptId = tryFileIdentity(statSync, scriptAbs);
+  const cliId =
+    opts.cliEntrypointId !== undefined
+      ? opts.cliEntrypointId
+      : tryFileIdentity(statSync, opts.cliEntrypointRealpath);
+
+  let scriptReal: string | null = null;
   try {
     scriptReal = realpath(scriptAbs);
   } catch {
+    scriptReal = null;
+  }
+
+  // Identity match does not need realpath; only the string fallback does.
+  if (scriptId !== null && cliId !== null) {
+    if (fileIdentitiesEqual(scriptId, cliId)) return { allowed: true };
+    return { allowed: false, reason: "argv_script_mismatch" };
+  }
+
+  if (scriptReal === null) {
     return { allowed: false, reason: "script_realpath_failed" };
   }
 
-  if (scriptReal !== opts.cliEntrypointRealpath) {
-    return { allowed: false, reason: "argv_script_mismatch" };
-  }
+  const scriptCheck = sameFileByIdentityOrPath(
+    scriptId,
+    cliId,
+    scriptReal,
+    opts.cliEntrypointRealpath,
+    { mismatch: "argv_script_mismatch", statFailed: "script_stat_failed" },
+  );
+  if (!scriptCheck.ok) return { allowed: false, reason: scriptCheck.reason };
 
   return { allowed: true };
 }
@@ -562,6 +679,9 @@ export async function authorizePeer(
   const readlinkSync = deps.readlinkSync ?? ((p: string) => fs.readlinkSync(p));
   const readFileSync = deps.readFileSync ?? ((p: string) => fs.readFileSync(p));
   const realpathSync = deps.realpathSync ?? ((p: string) => fs.realpathSync(p));
+  const statSync: StatSyncFn =
+    deps.statSync ??
+    ((p, o) => fs.statSync(p, o) as { dev: bigint; ino: bigint });
   const existsSync = deps.existsSync ?? ((p: string) => fs.existsSync(p));
   const getFd = deps.getSocketFd ?? getSocketFd;
   const runSs =
@@ -599,11 +719,21 @@ export async function authorizePeer(
   }
   const pid = resolved.pid;
 
-  let peerExe: string;
+  // readlink target for diagnostics (may end with " (deleted)"); identity
+  // comes from stat on the magic link, which still resolves the inode.
+  let peerExeLink: string;
   try {
-    peerExe = realpathSync(`/proc/${pid}/exe`);
+    peerExeLink = readlinkSync(`/proc/${pid}/exe`);
   } catch {
     return { ok: false, reason: "exe_read_failed" };
+  }
+
+  let peerExeReal: string;
+  try {
+    peerExeReal = realpathSync(`/proc/${pid}/exe`);
+  } catch {
+    // Fall back to the readlink target for string comparison / return value.
+    peerExeReal = peerExeLink;
   }
 
   let agentExec: string;
@@ -612,6 +742,9 @@ export async function authorizePeer(
   } catch {
     return { ok: false, reason: "agent_exec_realpath_failed" };
   }
+
+  const peerExeId = tryFileIdentity(statSync, `/proc/${pid}/exe`);
+  const agentExeId = tryFileIdentity(statSync, "/proc/self/exe");
 
   let cliEntrypoint: string;
   try {
@@ -652,18 +785,36 @@ export async function authorizePeer(
   }
 
   const verdict = isAllowedAbraCliPeer({
-    peerExeRealpath: peerExe,
+    peerExeRealpath: peerExeReal,
     agentExecRealpath: agentExec,
+    peerExeId,
+    agentExeId,
     peerArgv: argv,
     cliEntrypointRealpath: cliEntrypoint,
     nodeOptions,
     peerCwd,
     realpathSync,
+    statSync,
   });
 
   if (!verdict.allowed) {
+    if (
+      verdict.reason === "exe_mismatch" ||
+      verdict.reason === "exe_stat_failed"
+    ) {
+      log(
+        formatExeIdentityLog({
+          reason: verdict.reason,
+          pid,
+          peerExe: peerExeLink,
+          peerId: peerExeId,
+          agentExe: agentExec,
+          agentId: agentExeId,
+        }),
+      );
+    }
     return { ok: false, reason: verdict.reason };
   }
 
-  return { ok: true, pid, exe: peerExe };
+  return { ok: true, pid, exe: peerExeReal };
 }
