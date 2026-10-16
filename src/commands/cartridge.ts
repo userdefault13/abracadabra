@@ -16,7 +16,7 @@ import {
   saveCheckpoint,
 } from "../cartridge/client.js";
 import { openBundle } from "../core/backup.js";
-import { decryptEnvelope, writeRestoredVault } from "../core/vault.js";
+import { decryptEnvelope, withVaultLock, writeRestoredVault } from "../core/vault.js";
 import { runCastWithKeystore } from "../core/castWithKeystore.js";
 import { restoreMasterKey, authenticate } from "../platform/index.js";
 import { syncStateFile } from "../core/paths.js";
@@ -221,9 +221,13 @@ export async function cmdCartridgeRestore(opts: { wallet?: string }): Promise<vo
   }
   await authenticate("abracadabra: restore vault from cartridge checkpoint");
   const masterKey = Buffer.from(payload.masterKey, "base64");
-  await restoreMasterKey(masterKey);
-  const { droppedSyncPairing } = writeRestoredVault(vault, masterKey);
-  fs.rmSync(syncStateFile(), { force: true });
+  // Hold the lock across the key swap so no writer re-encrypts under the old key mid-restore.
+  const { droppedSyncPairing } = await withVaultLock(async () => {
+    await restoreMasterKey(masterKey);
+    const restored = writeRestoredVault(vault, masterKey);
+    fs.rmSync(syncStateFile(), { force: true });
+    return restored;
+  });
   console.log(green("✓ Restored vault and master key from cartridge"));
   if (droppedSyncPairing) {
     console.log(dim("  sync identity/peers are not restored — re-pair with: abra sync pair"));

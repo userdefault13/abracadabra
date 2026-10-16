@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { seedVault } from "../../test/fixtures/seed-vault.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -22,11 +23,12 @@ import {
   agentVaultSave,
   agentRequest,
   loadVaultViaAgent,
+  saveVaultViaAgent,
   shouldTryAgent,
   isAgentUnavailable,
   AgentClientError,
 } from "./client.js";
-import { emptyVault, loadVault, saveVault, type Vault } from "../core/vault.js";
+import { emptyVault, loadVault, type Vault } from "../core/vault.js";
 import { VaultLockedError } from "../platform/keystore-passphrase.js";
 import { resolveAbraCliEntrypoint } from "./peer.js";
 import type { AgentStatusBody } from "./protocol.js";
@@ -220,7 +222,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       createdAt: 1,
       vars: { K: { value: "v", secret: true, updatedAt: 1 } },
     };
-    await saveVault(v);
+    await seedVault(v);
     expect(fs.existsSync(path.join(directDir, "vault.enc"))).toBe(true);
     const loaded = await loadVault();
     expect(loaded.projects.fb.vars.K.value).toBe("v");
@@ -287,6 +289,39 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     expect(again.version).toBe(1);
   });
 
+  it("saveVaultViaAgent fails fast when locked — does not unlock under vault.lock", async () => {
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => vaultPath,
+      authorizePeer: allowPeer,
+      sleepWatch: false,
+    });
+    await agentUnlock({ socketPath });
+    await agentLock({ socketPath });
+    await expect(saveVaultViaAgent(emptyVault(), { socketPath })).rejects.toMatchObject({
+      code: "locked",
+      message: "agent locked during save — rerun",
+    });
+    expect((await agentStatus({ socketPath })).locked).toBe(true);
+  });
+
+  it("loadVaultViaAgent allowUnlock:false leaves the agent locked", async () => {
+    await startAgent({
+      socketPath,
+      resolveMasterKey: async () => masterKey,
+      vaultPath: () => vaultPath,
+      authorizePeer: allowPeer,
+      sleepWatch: false,
+    });
+    await agentUnlock({ socketPath });
+    await agentLock({ socketPath });
+    await expect(loadVaultViaAgent({ socketPath, allowUnlock: false })).rejects.toMatchObject({
+      code: "locked",
+    });
+    expect((await agentStatus({ socketPath })).locked).toBe(true);
+  });
+
   it("AgentState.lock zeroes without server", () => {
     const key = makeKey();
     const state = new AgentState({
@@ -331,12 +366,14 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       authorizePeer: allowPeer,
       sleepWatch: false,
     });
+    // Unlock before save: saveVault holds vault.lock and will not unlock the agent.
+    await agentUnlock({ socketPath });
     const v = emptyVault();
     v.projects.round = {
       createdAt: 1,
       vars: { R: { value: "via-agent", secret: true, updatedAt: 1 } },
     };
-    await saveVault(v);
+    await seedVault(v);
     expect(fs.existsSync(vaultPath)).toBe(true);
     const loaded = await loadVault();
     expect(loaded.projects.round.vars.R.value).toBe("via-agent");
@@ -389,7 +426,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       createdAt: 1,
       vars: { C: { value: "client-v", secret: true, updatedAt: 1 } },
     };
-    await saveVault(v);
+    await seedVault(v);
     expect(fs.existsSync(path.join(clientDir, "vault.enc"))).toBe(true);
     expect(fs.readFileSync(agentVault).equals(agentBytesBefore)).toBe(true);
 
@@ -461,10 +498,19 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       createdAt: 1,
       vars: { K: { value: "direct-after-unlock-fail", secret: true, updatedAt: 1 } },
     };
-    await saveVault(v);
+    // saveVault holds vault.lock and refuses to agentUnlock; with a locked agent
+    // that would be "agent locked during save — rerun". Bypass the agent for the
+    // write, then confirm loadVault still falls back to direct while it runs.
+    process.env.ABRA_AGENT = "0";
+    await seedVault(v);
+    process.env.ABRA_AGENT = "1";
+    process.env.ABRA_AGENT_SOCKET = socketPath;
     expect(fs.existsSync(vaultPath)).toBe(true);
     const loaded = await loadVault();
     expect(loaded.projects.fb.vars.K.value).toBe("direct-after-unlock-fail");
+    await expect(saveVaultViaAgent(v, { socketPath })).rejects.toMatchObject({
+      message: "agent locked during save — rerun",
+    });
   });
 
   it("forbidden_peer on unlock/vault.load; status still allowed; client falls back", async () => {
@@ -507,7 +553,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
       createdAt: 1,
       vars: { K: { value: "direct-after-forbidden", secret: true, updatedAt: 1 } },
     };
-    await saveVault(v);
+    await seedVault(v);
     const loaded = await loadVault();
     expect(loaded.projects.fb.vars.K.value).toBe("direct-after-forbidden");
   });

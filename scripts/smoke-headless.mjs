@@ -3,6 +3,7 @@
  * F3 — headless CLI smoke: set → run → env (passphrase-file, isolated ABRA_DIR)
  * G2 — USB bundle restore on a fresh ABRA_DIR (Linux passphrase-file path)
  * S1 — abra sync whoami/peers; restore drops the origin sync identity
+ * S2 — abra sync inbox/accept; restore drops inbox settings + accept policy
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -115,6 +116,14 @@ async function g2Smoke(originEnv, bundlePath, originIdentityId) {
     assertOk(whoR, "abra sync whoami (restored)");
     const who = JSON.parse(whoR.stdout);
     if (!who.created || who.id === originIdentityId) die("restored vault reused the origin sync identity");
+
+    log("S2", "restore drops the origin's sync inbox settings + accept policy");
+    const statusR = runAbra(["sync", "inbox", "--status", "--json"], envB);
+    assertOk(statusR, "abra sync inbox --status (restored)");
+    if (JSON.parse(statusR.stdout).enabled !== false) die("restored vault kept the sync inbox setting");
+    const rulesR = runAbra(["sync", "accept", "--list", "--json"], envB);
+    assertOk(rulesR, "abra sync accept --list (restored)");
+    if (JSON.parse(rulesR.stdout).length !== 0) die("restored vault kept sync accept rules");
   } finally {
     rmSync(homeB, { recursive: true, force: true });
   }
@@ -130,6 +139,19 @@ function syncIdentitySmoke(env) {
   const b = JSON.parse(second.stdout);
   if (!a.created || b.created || a.id !== b.id) die("sync whoami did not persist a stable identity");
   if (/privateKey/.test(first.stdout + second.stdout)) die("sync whoami printed private key material");
+
+  log("S2", "abra sync inbox / accept (headless, no peers)");
+  const emptyR = runAbra(["sync", "inbox", "--json"], env);
+  assertOk(emptyR, "abra sync inbox --json");
+  if (JSON.parse(emptyR.stdout).length !== 0) die("fresh inbox is not empty");
+  assertOk(runAbra(["sync", "inbox", "--enable", "--bind", "127.0.0.1", "--port", "7444"], env), "abra sync inbox --enable");
+  assertOk(runAbra(["sync", "accept", "-p", PROJECT, "--auto"], env), "abra sync accept --auto");
+  const statusR = runAbra(["sync", "inbox", "--status", "--json"], env);
+  assertOk(statusR, "abra sync inbox --status");
+  const status = JSON.parse(statusR.stdout);
+  if (status.enabled !== true || status.bind !== "127.0.0.1" || status.port !== 7444 || status.listening !== false) {
+    die(`unexpected inbox status ${statusR.stdout}`);
+  }
   return a.id;
 }
 
@@ -174,7 +196,7 @@ async function main() {
     rmSync(homeA, { recursive: true, force: true });
   }
 
-  console.log("[smoke] OK — F3 + G2 + S1 passed");
+  console.log("[smoke] OK — F3 + G2 + S1 + S2 passed");
 }
 
 main().catch((e) => die(e?.message || String(e)));

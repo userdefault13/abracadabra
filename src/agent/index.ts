@@ -37,6 +37,7 @@ export {
   agentGrantList,
   agentGrantRevoke,
   agentGrantCheck,
+  agentInboxStatus,
   loadVaultViaAgent,
   saveVaultViaAgent,
   shouldTryAgent,

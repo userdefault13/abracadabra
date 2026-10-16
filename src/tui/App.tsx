@@ -2,7 +2,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useEffect, useState } from "react";
 import {
   loadVault,
-  saveVault,
+  updateVault,
   type Vault,
 } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
@@ -38,9 +38,9 @@ export function App() {
   const mutate = useCallback(
     async (fn: (v: Vault) => void | Promise<void>, note?: string) => {
       if (!vault) return;
-      const next: Vault = JSON.parse(JSON.stringify(vault));
-      await fn(next);
-      await saveVault(next);
+      const next = await updateVault(async (fresh) => {
+        await fn(fresh);
+      });
       setVault(next);
       setStatus(note ?? null);
     },

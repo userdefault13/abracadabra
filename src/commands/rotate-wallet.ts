@@ -7,7 +7,7 @@
  * Never prints private keys. Touch ID gates mutate steps.
  */
 import { Command } from "commander";
-import { loadVault, saveVault, assertProject, type Project, type Vault } from "../core/vault.js";
+import { loadVault, updateVault, assertProject, type Project, type Vault } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
 import { prompt } from "../core/prompt.js";
 import { castNewWallet } from "./keygen.js";
@@ -172,50 +172,55 @@ export async function rotateWalletIntoProject(
   );
 
   const wallet = await castNewWallet();
-  const now = Date.now();
 
-  if (oldPk) {
-    project.vars[pair.legacyPrivateKeyVar] = {
-      value: oldPk,
+  await updateVault((fresh) => {
+    const project = assertProject(fresh, projectName);
+    if (project.vars[pair.privateKeyVar]?.value !== oldPk) {
+      throw new Error(`${pair.privateKeyVar} changed while rotating — nothing written; re-run abra rotate-wallet`);
+    }
+    const now = Date.now();
+
+    if (oldPk) {
+      project.vars[pair.legacyPrivateKeyVar] = {
+        value: oldPk,
+        secret: true,
+        updatedAt: now,
+      };
+    }
+    if (oldAddress) {
+      project.vars[pair.legacyAddressVar] = {
+        value: oldAddress,
+        secret: false,
+        updatedAt: now,
+      };
+    }
+
+    project.vars[pair.privateKeyVar] = {
+      value: wallet.private_key,
       secret: true,
       updatedAt: now,
     };
-  }
-  if (oldAddress) {
-    project.vars[pair.legacyAddressVar] = {
-      value: oldAddress,
-      secret: false,
-      updatedAt: now,
-    };
-  }
-
-  project.vars[pair.privateKeyVar] = {
-    value: wallet.private_key,
-    secret: true,
-    updatedAt: now,
-  };
-  project.vars[pair.addressVar] = {
-    value: wallet.address,
-    secret: false,
-    updatedAt: now,
-  };
-
-  for (const alias of pair.aliasAddressVars) {
-    const cur = String(project.vars[alias]?.value || "").trim();
-    if (cur && oldAddress && cur.toLowerCase() === oldAddress.toLowerCase()) {
-      project.vars[alias] = { value: wallet.address, secret: false, updatedAt: now };
-    }
-  }
-  const payTo = String(project.vars.PAY_TO_ADDRESS?.value || "").trim();
-  if (payTo && oldAddress && payTo.toLowerCase() === oldAddress.toLowerCase()) {
-    project.vars.PAY_TO_ADDRESS = {
+    project.vars[pair.addressVar] = {
       value: wallet.address,
       secret: false,
       updatedAt: now,
     };
-  }
 
-  await saveVault(vault);
+    for (const alias of pair.aliasAddressVars) {
+      const cur = String(project.vars[alias]?.value || "").trim();
+      if (cur && oldAddress && cur.toLowerCase() === oldAddress.toLowerCase()) {
+        project.vars[alias] = { value: wallet.address, secret: false, updatedAt: now };
+      }
+    }
+    const payTo = String(project.vars.PAY_TO_ADDRESS?.value || "").trim();
+    if (payTo && oldAddress && payTo.toLowerCase() === oldAddress.toLowerCase()) {
+      project.vars.PAY_TO_ADDRESS = {
+        value: wallet.address,
+        secret: false,
+        updatedAt: now,
+      };
+    }
+  });
 
   let ethMovedWei = 0n;
   if (opts.transferEth !== false && oldAddress && oldPk) {
@@ -250,13 +255,15 @@ export async function purgeLegacyPair(
   projectName: string,
   pair: WalletPair,
 ): Promise<void> {
-  const project = assertProject(vault, projectName);
+  assertProject(vault, projectName);
   await authenticate(
     `abracadabra: purge legacy wallet keys ${projectName} ${pair.legacyPrivateKeyVar}`,
   );
-  delete project.vars[pair.legacyPrivateKeyVar];
-  delete project.vars[pair.legacyAddressVar];
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    const project = assertProject(fresh, projectName);
+    delete project.vars[pair.legacyPrivateKeyVar];
+    delete project.vars[pair.legacyAddressVar];
+  });
 }
 
 async function rotateWalletCli(

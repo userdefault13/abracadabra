@@ -3,10 +3,12 @@ import path from "node:path";
 import { Command } from "commander";
 import {
   loadVault,
-  saveVault,
+  updateVault,
+  withVaultLock,
   encryptVaultForExport,
   decryptEnvelope,
   writeRestoredVault,
+  VAULT_UNCHANGED,
 } from "../core/vault.js";
 import type { Vault, VarEntry } from "../core/vault.js";
 import { getMasterKey, restoreMasterKey, authenticate } from "../platform/index.js";
@@ -25,6 +27,7 @@ import {
   saveSyncState,
   usbPeerId,
   formatProjectDeletionLines,
+  remergeUnderLock,
   type Resolutions,
   type Conflict,
   type ProjectDeletion,
@@ -348,6 +351,10 @@ interface PreparedSync {
   peerId: string | null;
   lineageId: string;
   remotePayload: BundlePayload;
+  remoteVault: Vault;
+  /** Unresolved conflicts of the preview merge — re-checked under the vault lock. */
+  previewConflicts: Conflict[];
+  resolutions: Resolutions;
 }
 
 async function prepareSync(
@@ -386,20 +393,16 @@ async function prepareSync(
   const peerId = usbPeerId(remotePayload.meta.lineageId);
   const base = (await loadSyncState(peerId))?.base ?? null;
 
+  const probe = threeWayMerge(localVault, remoteVault, base, new Map(), "USB");
   const resolutions: Resolutions = new Map();
   if (force) {
-    const probe = threeWayMerge(localVault, remoteVault, base, new Map(), "USB");
     for (const c of probe.conflicts) {
       resolutions.set(`${c.scope}/${c.key}`, force === "theirs" ? c.theirs : c.ours);
     }
   }
-  const { merged, conflicts, report, projectDeletions } = threeWayMerge(
-    localVault,
-    remoteVault,
-    base,
-    resolutions,
-    "USB",
-  );
+  const { merged, conflicts, report, projectDeletions } = force
+    ? threeWayMerge(localVault, remoteVault, base, resolutions, "USB")
+    : probe;
   return {
     latestFile,
     merged,
@@ -410,6 +413,9 @@ async function prepareSync(
     peerId,
     lineageId,
     remotePayload,
+    remoteVault,
+    previewConflicts: probe.conflicts,
+    resolutions,
   };
 }
 
@@ -425,6 +431,21 @@ export async function previewSync(
     needsResolution: p.hasConflicts,
     projectDeletions: p.projectDeletions,
   };
+}
+
+/**
+ * Apply a previewed full-vault merge: base, local and the merge are re-read and
+ * redone under the vault lock (the remote vault was fetched before).
+ */
+async function mergeIntoVaultLocked(
+  peerId: string | null,
+  remoteVault: Vault,
+  preview: { conflicts: Conflict[]; projectDeletions: ProjectDeletion[]; resolutions: Resolutions },
+): Promise<Vault> {
+  return updateVault(async (fresh) => {
+    const base = (await loadSyncState(peerId))?.base ?? null;
+    return remergeUnderLock(fresh, remoteVault, base, preview, preview.resolutions, "USB").merged;
+  });
 }
 
 export async function applySync(
@@ -445,19 +466,23 @@ export async function applySync(
     return { changed: false, file: path.basename(p.latestFile), report: [] };
   }
 
-  await saveVault(p.merged);
+  const merged = await mergeIntoVaultLocked(p.peerId, p.remoteVault, {
+    conflicts: p.previewConflicts,
+    projectDeletions: p.projectDeletions,
+    resolutions: p.resolutions,
+  });
   const masterKey = await getMasterKey();
   // Prefer existing lineage; mint only when refreshing a legacy bundle without one.
   const lineageId = p.remotePayload.meta.lineageId ?? p.lineageId;
   const peerId = usbPeerId(lineageId);
   const file = writeBundleToDir(
     path.dirname(p.latestFile),
-    encryptVaultForExport(p.merged, masterKey),
+    encryptVaultForExport(merged, masterKey),
     masterKey,
     passphrase,
     { lineageId },
   );
-  await saveSyncState(peerId, p.merged);
+  await saveSyncState(peerId, merged);
   console.log(`✓ dash/usb: synced — refreshed ${path.basename(file)}`);
   return { changed: true, file: path.basename(file), report: p.report };
 }
@@ -489,7 +514,7 @@ async function applyScopedFileMerge(
   assertScopeNamesAllowed(Object.keys(incoming));
 
   const local = await loadVault();
-  const { merged, report, changed } = mergeScopedProjects(local, incoming, {
+  const { report, changed } = mergeScopedProjects(local, incoming, {
     theirs: opts.theirs === true,
   });
   const lines = formatScopedReport(report);
@@ -500,8 +525,13 @@ async function applyScopedFileMerge(
   await authenticate(
     `abracadabra: merge scoped project(s) ${scope.join(", ")} into this vault`,
   );
-  await saveVault(merged);
-  return { changed: true, report: lines };
+  let applied: { changed: boolean; lines: string[] } = { changed, lines };
+  await updateVault((fresh) => {
+    const r = mergeScopedProjects(fresh, incoming, { theirs: opts.theirs === true });
+    applied = { changed: r.changed, lines: formatScopedReport(r.report) };
+    return r.changed ? r.merged : VAULT_UNCHANGED;
+  });
+  return { changed: applied.changed, report: applied.lines };
 }
 
 /**
@@ -802,9 +832,13 @@ export function registerUsbCommands(program: Command): void {
         }
         await authenticate("abracadabra: restore vault from USB backup");
         const masterKeyBuf = Buffer.from(payload.masterKey, "base64");
-        await restoreMasterKey(masterKeyBuf, activePassphrase ?? undefined);
-        const { droppedSyncPairing } = writeRestoredVault(vault, masterKeyBuf);
-        fs.rmSync(syncStateFile(), { force: true });
+        // Hold the lock across the key swap so no writer re-encrypts under the old key mid-restore.
+        const { droppedSyncPairing } = await withVaultLock(async () => {
+          await restoreMasterKey(masterKeyBuf, activePassphrase ?? undefined);
+          const restored = writeRestoredVault(vault, masterKeyBuf);
+          fs.rmSync(syncStateFile(), { force: true });
+          return restored;
+        });
         console.log(green("✓ Restored vault and master key"));
         if (droppedSyncPairing) {
           console.log(dim("  sync identity/peers are not restored — re-pair with: abra sync pair"));
@@ -1038,7 +1072,7 @@ export function registerUsbCommands(program: Command): void {
             }
 
             const resolutions = await collectResolutions(first.conflicts, forceMode);
-            const { merged, report, projectDeletions } = threeWayMerge(
+            const { report, projectDeletions } = threeWayMerge(
               localVault,
               remoteVault,
               base,
@@ -1057,17 +1091,21 @@ export function registerUsbCommands(program: Command): void {
             for (const line of report) console.log(`  ${line}`);
 
             await authenticate("abracadabra: update USB backup");
-            await saveVault(merged);
+            const saved = await mergeIntoVaultLocked(peerId, remoteVault, {
+              conflicts: first.conflicts,
+              projectDeletions,
+              resolutions,
+            });
             const masterKey = await getMasterKey();
             const lineageId = payload.meta.lineageId ?? crypto.randomUUID();
             const file = writeBundleToDir(
               path.dirname(latest),
-              encryptVaultForExport(merged, masterKey),
+              encryptVaultForExport(saved, masterKey),
               masterKey,
               pass,
               { lineageId },
             );
-            await saveSyncState(usbPeerId(lineageId), merged);
+            await saveSyncState(usbPeerId(lineageId), saved);
             console.log(green(`✓ Sync complete — USB refreshed (${path.basename(file)})`));
             return;
           }

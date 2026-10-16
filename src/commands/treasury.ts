@@ -3,8 +3,9 @@ import { promisify } from "node:util";
 import { Command } from "commander";
 import {
   loadVault,
-  saveVault,
+  updateVault,
   TREASURY_PROJECT,
+  VAULT_UNCHANGED,
   type Vault,
 } from "../core/vault.js";
 import { runCastWithKeystore, type CastExecFn } from "../core/castWithKeystore.js";
@@ -151,14 +152,19 @@ export async function initTreasury(opts: { force?: boolean } = {}): Promise<{
   }
 
   const wallet = await castNewWallet();
-  const now = Date.now();
-  if (!vault.projects[TREASURY_PROJECT]) {
-    vault.projects[TREASURY_PROJECT] = { createdAt: now, vars: {} };
-  }
-  const project = vault.projects[TREASURY_PROJECT];
-  project.vars[ADDRESS_VAR] = { value: wallet.address, secret: false, updatedAt: now };
-  project.vars[PRIVATE_KEY_VAR] = { value: wallet.private_key, secret: true, updatedAt: now };
-  await saveVault(vault);
+  let raced: string | null = null;
+  await updateVault((fresh) => {
+    if (!opts.force && treasuryExists(fresh)) {
+      raced = readTreasuryAddress(fresh);
+      return VAULT_UNCHANGED;
+    }
+    const now = Date.now();
+    fresh.projects[TREASURY_PROJECT] ??= { createdAt: now, vars: {} };
+    const project = fresh.projects[TREASURY_PROJECT];
+    project.vars[ADDRESS_VAR] = { value: wallet.address, secret: false, updatedAt: now };
+    project.vars[PRIVATE_KEY_VAR] = { value: wallet.private_key, secret: true, updatedAt: now };
+  });
+  if (raced !== null) return { address: raced, created: false };
   return { address: wallet.address, created: true };
 }
 

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { loadVault, saveVault } from "../core/vault.js";
+import { loadVault, updateVault } from "../core/vault.js";
 import type { ApiKey } from "../core/vault.js";
 import { generateApiKey } from "../core/apikeys.js";
 import { prompt } from "../core/prompt.js";
@@ -56,8 +56,10 @@ export function registerKeyCommands(program: Command): void {
         const { record, fullKey } = generateApiKey(name, projects, {
           expiresInDays: days > 0 ? days : undefined,
         });
-        vault.apiKeys![record.id] = record;
-        await saveVault(vault);
+        await updateVault((fresh) => {
+          fresh.apiKeys ??= {};
+          fresh.apiKeys[record.id] = record;
+        });
         console.log(green(`✓ API key "${name}" created (${record.id})`));
         console.log();
         console.log(`  ${fullKey}`);
@@ -105,12 +107,14 @@ export function registerKeyCommands(program: Command): void {
             ? parseGrant(opts.repos, opts.perms)
             : fail("Pass --repos and --perms, or --clear");
         await authenticate("abracadabra: change an API key's GitHub grant");
-        const vault = await loadVault();
-        const match = findKey(Object.values(vault.apiKeys ?? {}), idOrPrefix);
-        if (!match) fail(`No API key matching "${idOrPrefix}" (see: abra keys ls)`);
-        if (grant) match.github = grant;
-        else delete match.github;
-        await saveVault(vault);
+        let match!: ApiKey;
+        const vault = await updateVault((fresh) => {
+          const found = findKey(Object.values(fresh.apiKeys ?? {}), idOrPrefix);
+          if (!found) throw new Error(`No API key matching "${idOrPrefix}" (see: abra keys ls)`);
+          if (grant) found.github = grant;
+          else delete found.github;
+          match = found;
+        });
         console.log(
           green(
             grant
@@ -143,8 +147,10 @@ export function registerKeyCommands(program: Command): void {
           console.log(dim("Aborted"));
           return;
         }
-        delete vault.apiKeys![match.id];
-        await saveVault(vault);
+        await updateVault((fresh) => {
+          if (!fresh.apiKeys?.[match.id]) throw new Error(`API key ${match.id} was already removed`);
+          delete fresh.apiKeys[match.id];
+        });
         console.log(green(`✓ Revoked API key "${match.name}"`));
       } catch (err) {
         fail(err);

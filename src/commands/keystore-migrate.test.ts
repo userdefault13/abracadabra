@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { seedVaultFile } from "../../test/fixtures/seed-vault.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,7 +14,7 @@ import {
   writeMasterKeyFile,
 } from "../platform/master-key-file.js";
 import { masterKeyFile, vaultFile } from "../core/paths.js";
-import { emptyVault, encryptVault, writeEncryptedVaultFile } from "../core/vault.js";
+import { emptyVault, encryptVault } from "../core/vault.js";
 import { NoTerminalError } from "../core/prompt.js";
 
 const PASS = "migrate-test-passphrase-ok";
@@ -86,7 +87,7 @@ describe("cmdKeystoreMigrate", () => {
   it("round trip: keytar → master.key.enc v2; vault decrypts; keytar untouched without --remove-old", async () => {
     const key = crypto.randomBytes(32);
     const source = makeSource(key);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), key));
+    await seedVaultFile(encryptVault(emptyVault(), key));
 
     const prompts: string[] = [];
     await cmdKeystoreMigrate(
@@ -136,7 +137,7 @@ describe("cmdKeystoreMigrate", () => {
         opened.fill(0);
       },
     };
-    writeEncryptedVaultFile(encryptVault(emptyVault(), key));
+    await seedVaultFile(encryptVault(emptyVault(), key));
 
     let promptCount = 0;
     await cmdKeystoreMigrate(
@@ -168,7 +169,7 @@ describe("cmdKeystoreMigrate", () => {
     const otherKey = crypto.randomBytes(32);
     const source = makeSource(keytarKey);
     // vault.enc encrypted with a DIFFERENT key → verify decrypt fails
-    writeEncryptedVaultFile(encryptVault(emptyVault(), otherKey));
+    await seedVaultFile(encryptVault(emptyVault(), otherKey));
 
     await expect(
       cmdKeystoreMigrate(
@@ -240,7 +241,7 @@ describe("cmdKeystoreMigrate", () => {
     const key = crypto.randomBytes(32);
     const source = makeSource(key);
     writeMasterKeyFile(key, PASS);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), key));
+    await seedVaultFile(encryptVault(emptyVault(), key));
     const before = fs.readFileSync(masterKeyFile());
     const mtimeBefore = fs.statSync(masterKeyFile()).mtimeMs;
 
@@ -337,7 +338,7 @@ describe("cmdKeystoreMigrate", () => {
   it("--remove-old but confirmation not delete → keytar kept", async () => {
     const key = crypto.randomBytes(32);
     const source = makeSource(key);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), key));
+    await seedVaultFile(encryptVault(emptyVault(), key));
 
     await cmdKeystoreMigrate(
       { to: "passphrase-file", removeOld: true },
@@ -388,7 +389,7 @@ describe("cmdKeystoreMigrate", () => {
   it("--remove-old with no TTY refuses deletion", async () => {
     const key = crypto.randomBytes(32);
     const source = makeSource(key);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), key));
+    await seedVaultFile(encryptVault(emptyVault(), key));
 
     await cmdKeystoreMigrate(
       { to: "passphrase-file", removeOld: true },

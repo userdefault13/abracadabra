@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { seedVault } from "../../test/fixtures/seed-vault.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { Vault, VarEntry } from "./vault.js";
-import { saveVault, loadVault, encryptVault } from "./vault.js";
+import { loadVault, encryptVault } from "./vault.js";
 import { sealBundle, openBundle, readBundleFile } from "./backup.js";
 import {
   threeWayMerge,
@@ -51,7 +52,7 @@ async function setupTempVault(v: Vault): Promise<{ tmp: string; masterKey: Buffe
   const masterKey = crypto.randomBytes(32);
   await platform.restoreMasterKey(masterKey, "harden-test-passphrase-ok");
   await platform.getMasterKey();
-  await saveVault(v);
+  await seedVault(v);
   return { tmp, masterKey };
 }
 

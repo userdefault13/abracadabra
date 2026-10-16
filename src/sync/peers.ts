@@ -183,5 +183,7 @@ export function removePeer(vault: Vault, nameOrId: string): { vault: Vault; remo
   if (!found) throw new Error(`no paired peer named "${nameOrId}" — see: abra sync peers`);
   const peers = { ...(vault.syncPeers ?? {}) };
   delete peers[found.id];
-  return { vault: { ...vault, syncPeers: peers }, removed: found };
+  const out: Vault = { ...vault, syncPeers: peers };
+  if (vault.syncAccept) out.syncAccept = vault.syncAccept.filter((r) => r.from !== found.id);
+  return { vault: out, removed: found };
 }

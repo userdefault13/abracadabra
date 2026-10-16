@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadVault, saveVault, assertProject } from "../core/vault.js";
+import { loadVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { authenticate, resolveAuthBackend } from "../platform/index.js";
 import { authorizeReveal } from "../platform/reveal-gate.js";

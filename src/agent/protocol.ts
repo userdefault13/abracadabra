@@ -17,7 +17,20 @@ export type AgentOp =
   | "grant.add"
   | "grant.list"
   | "grant.revoke"
-  | "grant.check";
+  | "grant.check"
+  | "inbox.status";
+
+/** Sync inbox listener state — settings and counts only, no vault data. */
+export interface AgentInboxStatusBody {
+  configured: boolean;
+  enabled: boolean;
+  listening: boolean;
+  bind: string | null;
+  port: number | null;
+  sources: number;
+  queued: number;
+  error: string | null;
+}
 
 /** Ops that unlock the in-memory master key, return vault plaintext, or manage grants. */
 export const SENSITIVE_OPS: ReadonlySet<AgentOp> = new Set<AgentOp>([
@@ -94,6 +107,8 @@ export type AgentRequest =
       vault: Vault;
       vaultPath?: string;
       keystoreBackend?: string;
+      /** Token of the vault.lock the client holds; absent from pre-lock clients. */
+      lockToken?: string;
     }
   | {
       v: typeof PROTOCOL_VERSION;
@@ -118,7 +133,8 @@ export type AgentRequest =
       op: "grant.check";
       project: string;
       caller: GrantCaller;
-    };
+    }
+  | { v: typeof PROTOCOL_VERSION; id: string; op: "inbox.status" };
 
 export type AgentResponse =
   | {
@@ -190,6 +206,13 @@ export type AgentResponse =
   | {
       v: typeof PROTOCOL_VERSION;
       id: string;
+      ok: true;
+      op: "inbox.status";
+      inbox: AgentInboxStatusBody;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
       ok: false;
       error: string;
       code: AgentErrorCode;
@@ -222,11 +245,16 @@ export function isAgentRequest(raw: unknown): raw is AgentRequest {
     case "lock":
     case "vault.load":
     case "grant.list":
+    case "inbox.status":
       return true;
     case "unlock.key":
       return typeof r.key === "string";
     case "vault.save":
-      return r.vault !== undefined && typeof r.vault === "object";
+      return (
+        r.vault !== undefined &&
+        typeof r.vault === "object" &&
+        (r.lockToken === undefined || typeof r.lockToken === "string")
+      );
     case "grant.add":
       return (
         typeof r.project === "string" &&

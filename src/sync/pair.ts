@@ -1,7 +1,7 @@
 import net from "node:net";
 import os from "node:os";
 import tls from "node:tls";
-import type { SyncIdentity, SyncPeer, SyncPeerRole, Vault } from "../core/vault.js";
+import type { SyncIdentity, SyncPeer, SyncPeerRole, Vault, VaultMutator } from "../core/vault.js";
 import type { EphemeralTls } from "../core/tls-ephemeral.js";
 import { connectPinnedTls } from "../core/tls-ephemeral.js";
 import { PIN_MAX_FAILURES, timingSafePin } from "../core/pin.js";
@@ -72,7 +72,8 @@ export const DEFAULT_PAIR_TIMEOUTS: PairTimeouts = {
 export interface PairDeps {
   authenticate: (reason: string) => Promise<void>;
   loadVault: () => Promise<Vault>;
-  saveVault: (vault: Vault) => Promise<void>;
+  /** Locked read-modify-write (see core/vault updateVault). */
+  updateVault: (mutator: VaultMutator) => Promise<Vault>;
   /** Local TTY yes/no; must throw when there is no terminal. */
   confirm: (question: string) => Promise<boolean>;
   /** Hidden PIN entry (connector only). */
@@ -341,26 +342,27 @@ async function confirmAndSave(s: Session, deps: PairDeps): Promise<PairResult> {
     throw new PairAbortedError("peer declined the safety code — nothing saved");
   }
 
-  let plan: PeerPlan;
+  let plan!: PeerPlan;
   try {
-    // Re-read so a long pairing session does not clobber concurrent vault edits.
-    const fresh = await deps.loadVault();
-    let base: Vault;
-    if (s.identityCreated) {
-      if (fresh.syncIdentity) throw new Error("this vault's sync identity changed during pairing");
-      base = { ...fresh, syncIdentity: s.identity };
-    } else {
-      if (fresh.syncIdentity?.id !== s.identity.id) {
-        throw new Error("this vault's sync identity changed during pairing");
+    // Plan against the vault re-read under the lock so a long pairing session never clobbers concurrent edits.
+    await deps.updateVault((fresh) => {
+      let base: Vault;
+      if (s.identityCreated) {
+        if (fresh.syncIdentity) throw new Error("this vault's sync identity changed during pairing");
+        base = { ...fresh, syncIdentity: s.identity };
+      } else {
+        if (fresh.syncIdentity?.id !== s.identity.id) {
+          throw new Error("this vault's sync identity changed during pairing");
+        }
+        base = fresh;
       }
-      base = fresh;
-    }
-    plan = planPeerUpsert(base, s.candidate, {
-      replace: s.replace,
-      explicitName: s.explicitName,
-      now: deps.now(),
+      plan = planPeerUpsert(base, s.candidate, {
+        replace: s.replace,
+        explicitName: s.explicitName,
+        now: deps.now(),
+      });
+      return plan.vault;
     });
-    await deps.saveVault(plan.vault);
   } catch (err) {
     s.ch.send({ t: "saved", ok: false });
     s.ch.close();

@@ -6,13 +6,15 @@ import { sealBundle, sealScopedBundle, openBundle } from "../core/backup.js";
 import type { BackupBundle } from "../core/backup.js";
 import {
   loadVault,
-  saveVault,
+  updateVault,
   encryptVaultForExport,
   decryptEnvelope,
   keepDeviceLocal,
+  withoutDeviceLocal,
+  type Vault,
 } from "../core/vault.js";
 import { getMasterKey, authenticate } from "../platform/index.js";
-import { saveSyncState, lanPeerId } from "../core/sync.js";
+import { saveSyncState, lanPeerId, threeWayMerge } from "../core/sync.js";
 import { createEphemeralTls } from "../core/tls-ephemeral.js";
 import { generatePin, timingSafePin, PIN_MAX_FAILURES } from "../core/pin.js";
 import {
@@ -51,6 +53,8 @@ interface ActiveHost {
   failCount: number;
   locked: boolean;
   pulled: boolean;
+  /** This vault (device-local stripped) as served by the last full pull — the push's merge base. */
+  served?: Vault;
   /** Accept pushes that remove whole projects from this host (--allow-deletes). */
   allowDeletes: boolean;
   /** When set, host is scoped (read-only; no push-back). */
@@ -115,10 +119,63 @@ function extractPin(req: http.IncomingMessage): string {
   return "";
 }
 
-async function buildFullSealedBundle(pin: string): Promise<BackupBundle> {
+async function buildFullSealedBundle(pin: string): Promise<{ bundle: BackupBundle; served: Vault }> {
   const vault = await loadVault();
   const masterKey = await getMasterKey();
-  return sealBundle(encryptVaultForExport(vault, masterKey), masterKey, pin);
+  return {
+    bundle: sealBundle(encryptVaultForExport(vault, masterKey), masterKey, pin),
+    served: withoutDeviceLocal(vault),
+  };
+}
+
+class LanPushRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly projectDeletions?: string[],
+  ) {
+    super(message);
+    this.name = "LanPushRefusedError";
+  }
+}
+
+function deletedProjects(current: Vault, next: Vault): string[] {
+  return Object.keys(current.projects).filter((n) => !next.projects[n]);
+}
+
+/**
+ * What a peer push turns this vault into. The peer merged against `served`
+ * (our vault at pull time); if this vault is unchanged since then the push
+ * replaces it, otherwise local edits made meanwhile are 3-way merged on top
+ * (base = `served`) and a conflict refuses the push.
+ */
+export function planLanPush(
+  fresh: Vault,
+  pushed: Vault,
+  served: Vault | undefined,
+  allowDeletes: boolean,
+): Vault {
+  const incoming = keepDeviceLocal(pushed, fresh);
+  let next = incoming;
+  if (served && JSON.stringify(withoutDeviceLocal(fresh)) !== JSON.stringify(served)) {
+    const r = threeWayMerge(fresh, incoming, served, new Map(), "LAN peer");
+    if (r.conflicts.length > 0) {
+      throw new LanPushRefusedError(
+        `this host's vault changed since the peer pulled it and conflicts with the push (${r.conflicts
+          .map((c) => `${c.scope}/${c.key}`)
+          .join(", ")}) — re-run the sync`,
+      );
+    }
+    next = r.merged;
+  }
+  // The push REPLACES this vault, so any project present here but missing from the result is a whole-project deletion.
+  const removed = deletedProjects(fresh, next);
+  if (removed.length > 0 && !allowDeletes) {
+    throw new LanPushRefusedError(
+      `push would delete project(s) on this host: ${removed.join(", ")} — restart the host with --allow-deletes to accept`,
+      removed,
+    );
+  }
+  return next;
 }
 
 async function buildScopedSealedBundle(
@@ -333,7 +390,8 @@ export async function startLanHost(opts: {
           }
 
           // Exact today's behavior: full vault bundle.
-          const bundle = await buildFullSealedBundle(pin);
+          const { bundle, served } = await buildFullSealedBundle(pin);
+          state.served = served;
           state.pulled = true;
           sendJson(res, 200, { bundle });
           return;
@@ -368,24 +426,22 @@ export async function startLanHost(opts: {
             return;
           }
           const peerMaster = Buffer.from(payload.masterKey, "base64");
-          const current = await loadVault();
-          // The push replaces this vault, but sync identity/peers stay this machine's own.
-          const vault = keepDeviceLocal(decryptEnvelope(payload.vaultEnc, peerMaster), current);
-          // Host-side delete gate: the push REPLACES this vault, so any project present
-          // here but missing from the pushed vault is a whole-project deletion.
-          if (!state.allowDeletes) {
-            const removed = Object.keys(current.projects).filter((n) => !vault.projects[n]);
-            if (removed.length > 0) {
-              sendJson(res, 409, {
-                error: `push would delete project(s) on this host: ${removed.join(", ")} — restart the host with --allow-deletes to accept`,
-                projectDeletions: removed,
-              });
-              return;
-            }
+          const pushed = decryptEnvelope(payload.vaultEnc, peerMaster);
+          let vault: Vault;
+          try {
+            // Refuse before prompting; the same plan is redone on the vault re-loaded under the lock.
+            planLanPush(await loadVault(), pushed, state.served, state.allowDeletes);
+            await authenticate("abracadabra: apply LAN sync from peer");
+            // Re-encrypt under this machine's master key (same as USB sync apply).
+            vault = await updateVault((fresh) => planLanPush(fresh, pushed, state.served, state.allowDeletes));
+          } catch (err) {
+            if (!(err instanceof LanPushRefusedError)) throw err;
+            sendJson(res, 409, {
+              error: err.message,
+              ...(err.projectDeletions ? { projectDeletions: err.projectDeletions } : {}),
+            });
+            return;
           }
-          await authenticate("abracadabra: apply LAN sync from peer");
-          // Re-encrypt under this machine's master key (same as USB sync apply).
-          await saveVault(vault);
           await saveSyncState(lanPeerId(payload.meta.deviceId), vault);
           sendJson(res, 200, { ok: true });
           void stopLanHost();

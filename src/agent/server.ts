@@ -24,12 +24,14 @@ import {
   type AgentRequest,
   type AgentResponse,
   type AgentStatusBody,
+  type AgentInboxStatusBody,
   type AgentErrorCode,
 } from "./protocol.js";
 import {
   decryptVault,
-  encryptVault,
-  writeEncryptedVaultFile,
+  readVaultFile,
+  saveVaultFileForClient,
+  updateVaultFile,
   type Vault,
 } from "../core/vault.js";
 import { vaultFile } from "../core/paths.js";
@@ -50,6 +52,7 @@ import {
   type SleepWatchFactory,
   type SleepWatchHandle,
 } from "./sleep-watch.js";
+import { AgentInbox, type AgentInboxController, type AgentInboxDeps } from "./inbox.js";
 
 export type { AgentStatusBody };
 
@@ -81,6 +84,13 @@ export interface StartAgentOpts {
    * - factory → inject for tests
    */
   sleepWatch?: false | SleepWatchFactory;
+  /**
+   * `abra sync` receiver inbox (listener runs only when enabled + a source is paired).
+   * - omit → default controller
+   * - `false` → disable
+   * - factory → wrap/replace the default deps (tests)
+   */
+  syncInbox?: false | ((defaults: AgentInboxDeps) => AgentInboxController);
 }
 
 let running: {
@@ -92,7 +102,19 @@ let running: {
   keystoreBackend: () => string;
   authorizePeer: AuthorizePeerFn;
   sleepWatch: SleepWatchHandle | null;
+  inbox: AgentInboxController | null;
 } | null = null;
+
+const INBOX_OFF: AgentInboxStatusBody = {
+  configured: false,
+  enabled: false,
+  listening: false,
+  bind: null,
+  port: null,
+  sources: 0,
+  queued: 0,
+  error: null,
+};
 
 function logOp(op: string, detail?: string): void {
   const extra = detail ? ` ${detail}` : "";
@@ -245,6 +267,7 @@ async function handleRequest(
         }
         logOp("unlock");
         await state.unlock();
+        void running?.inbox?.onUnlock();
         return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock" };
       }
       case "unlock.key": {
@@ -285,6 +308,7 @@ async function handleRequest(
           }
           state.unlockWithKey(decoded);
           logOp("unlock.key", "ok");
+          void running?.inbox?.onUnlock();
           return { v: PROTOCOL_VERSION, id, ok: true, op: "unlock.key" };
         } finally {
           decoded.fill(0);
@@ -333,8 +357,8 @@ async function handleRequest(
         state.touch();
         logOp("vault.save");
         const vault = req.vault as Vault;
-        const enc = encryptVault(vault, state.requireKey());
-        writeEncryptedVaultFile(enc, vaultPath());
+        await saveVaultFileForClient(vault, state.requireKey(), vaultPath(), req.lockToken);
+        void running?.inbox?.onVaultSaved(vault);
         return { v: PROTOCOL_VERSION, id, ok: true, op: "vault.save" };
       }
       case "grant.add": {
@@ -417,6 +441,16 @@ async function handleRequest(
           ...(result.remainingMs !== undefined
             ? { remainingMs: result.remainingMs }
             : {}),
+        };
+      }
+      case "inbox.status": {
+        // Settings + counts only (no vault data) — same-uid like status.
+        return {
+          v: PROTOCOL_VERSION,
+          id,
+          ok: true,
+          op: "inbox.status",
+          inbox: running?.inbox?.status() ?? INBOX_OFF,
         };
       }
       default:
@@ -534,6 +568,10 @@ async function probeExistingAgent(socketPath: string): Promise<boolean> {
  *
  * A fresh process always starts locked (no key persistence across reboot).
  * Grants live only in agent memory and are cleared on every lock.
+ *
+ * If `abra sync inbox --enable` was run and a source peer is paired, the agent
+ * also runs the HTTPS sync inbox (see src/agent/inbox.ts); it keeps queueing
+ * while locked and applies auto-accepted bundles after unlock.
  */
 export async function startAgent(opts?: StartAgentOpts): Promise<{
   socketPath: string;
@@ -617,6 +655,20 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     });
   }
 
+  let inbox: AgentInboxController | null = null;
+  if (opts?.syncInbox !== false) {
+    const defaults: AgentInboxDeps = {
+      base: path.dirname(vaultPath()),
+      loadUnlockedVault: async () => {
+        if (state.isLocked()) return null;
+        return readVaultFile(vaultPath(), state.requireKey());
+      },
+      updateVault: (mutator) => updateVaultFile(vaultPath(), () => state.requireKey(), mutator),
+      log: (detail) => logOp("sync-inbox", detail),
+    };
+    inbox = typeof opts?.syncInbox === "function" ? opts.syncInbox(defaults) : new AgentInbox(defaults);
+  }
+
   running = {
     server,
     state,
@@ -626,17 +678,24 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     keystoreBackend,
     authorizePeer: authorize,
     sleepWatch: sleep,
+    inbox,
   };
+  await inbox?.start();
   logOp("listen", socketPath);
   return { socketPath, state };
 }
 
 export async function stopAgent(): Promise<void> {
   if (!running) return;
-  const { server, state, socketPath, sleepWatch } = running;
+  const { server, state, socketPath, sleepWatch, inbox } = running;
   running = null;
   try {
     sleepWatch?.stop();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await inbox?.stop();
   } catch {
     /* ignore */
   }

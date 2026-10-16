@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { seedVault } from "../../test/fixtures/seed-vault.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +7,7 @@ import crypto from "node:crypto";
 import https from "node:https";
 import { Command } from "commander";
 import type { Vault, Project } from "../core/vault.js";
-import { saveVault, loadVault, TREASURY_PROJECT, encryptVault } from "../core/vault.js";
+import { loadVault, TREASURY_PROJECT, encryptVault } from "../core/vault.js";
 import {
   sealScopedBundle,
   sealBundle,
@@ -57,7 +58,7 @@ async function setupTempVault(vault: Vault): Promise<{ tmp: string; masterKey: B
   const masterKey = crypto.randomBytes(32);
   await platform.restoreMasterKey(masterKey, "scoped-test-passphrase-ok");
   await platform.getMasterKey();
-  await saveVault(vault);
+  await seedVault(vault);
   return { tmp, masterKey };
 }
 
@@ -413,7 +414,7 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     expect(merged.connections?.x).toBeDefined();
     expect(fs.existsSync(syncStateFile())).toBe(false);
 
-    await saveVault({
+    await seedVault({
       version: 1,
       projects: {
         keepme: { createdAt: 1, vars: { LOCAL: entry("stay") } },
@@ -556,7 +557,7 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     expect(fs.existsSync(file)).toBe(true);
     expect(fs.readFileSync(path.join(abraDir, "latest.json"), "utf8")).toBe(priorLatest);
 
-    await saveVault({
+    await seedVault({
       version: 1,
       projects: {
         gotchibot: {
@@ -591,7 +592,7 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     expect(fs.existsSync(syncStateFile())).toBe(false);
     expect((await platform.getMasterKey()).toString("base64")).toBe(masterBefore);
 
-    await saveVault({
+    await seedVault({
       version: 1,
       projects: {
         gotchibot: {
@@ -638,7 +639,7 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     const dir = path.join(tmp, "usbout");
     const file = await createScopedBackup(dir, ["gotchibot"], FILE_PASS);
 
-    await saveVault({
+    await seedVault({
       version: 1,
       projects: {
         gotchibot: { createdAt: 1, vars: { A: entry("local-a"), LOCAL: entry("stay") } },
@@ -684,7 +685,7 @@ describe.runIf(!skipWin)("LAN scoped sync", () => {
     const dir = path.join(tmp, "usbout");
     const file = await createScopedBackup(dir, ["gotchibot"], FILE_PASS);
 
-    await saveVault({
+    await seedVault({
       version: 1,
       projects: {
         gotchibot: { createdAt: 1, vars: { A: entry("local-a") } },
