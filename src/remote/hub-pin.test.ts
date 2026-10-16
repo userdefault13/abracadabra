@@ -111,7 +111,7 @@ describe("hub pin", () => {
   });
 
   it("fails closed on world-readable pin file (POSIX)", function () {
-    if (!posix) this.skip();
+    if (!posix) return; // POSIX-only (no file modes on win32)
     setHubPin(fakeHub(), { base });
     fs.chmodSync(hubPinFile(base), 0o644);
     expect(() => getHubPin(base)).toThrow(/group\/world-readable/);

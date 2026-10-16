@@ -79,7 +79,7 @@ describe("device key", () => {
   });
 
   it("fails closed on group/world-readable file (POSIX)", function () {
-    if (!posix) this.skip();
+    if (!posix) return; // POSIX-only (no file modes on win32)
     const { key } = getOrCreateDeviceKey({ base });
     fs.chmodSync(deviceKeyFile(base), 0o644);
     expect(() => loadDeviceKey(base)).toThrow(/group\/world-readable/);
@@ -94,14 +94,14 @@ describe("device key", () => {
   });
 
   it("fails closed on group/world-readable dir (POSIX)", function () {
-    if (!posix) this.skip();
+    if (!posix) return; // POSIX-only (no file modes on win32)
     getOrCreateDeviceKey({ base });
     fs.chmodSync(remoteDir(base), 0o755);
     expect(() => loadDeviceKey(base)).toThrow(/group\/world-readable/);
   });
 
   it("fails closed on owner uid mismatch (POSIX)", function () {
-    if (!posix || typeof process.getuid !== "function") this.skip();
+    if (!posix || typeof process.getuid !== "function") return; // POSIX-only (no file modes on win32)
     getOrCreateDeviceKey({ base });
     expect(() =>
       assertPrivatePath(deviceKeyFile(base), { expectDir: false, uid: process.getuid!() + 1 }),
