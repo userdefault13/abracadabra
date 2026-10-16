@@ -13,6 +13,7 @@ import {
   type UnlockListener,
 } from "../remote/listener.js";
 import { detectTailscaleIPv4 } from "../sync/tailscale.js";
+import { LeaseStore } from "./lease-store.js";
 import type { AgentState } from "./state.js";
 
 /**
@@ -36,6 +37,8 @@ export interface AgentRemoteUnlockController {
   reconcile(): Promise<void>;
   status(): AgentRemoteUnlockStatus;
   stop(): Promise<void>;
+  /** Phase 2 bot lease store (survives vault lock). */
+  leases(): LeaseStore;
 }
 
 export interface AgentRemoteUnlockDeps {
@@ -57,6 +60,8 @@ export interface AgentRemoteUnlockDeps {
    * Default: look up the paired source peer name from the unlocked vault.
    */
   hubNameOrIdForEnroll?: (vault: ReturnType<typeof decryptVault>) => string;
+  /** Inject lease store (tests). Default: new LeaseStore({ base }). */
+  leaseStore?: LeaseStore;
 }
 
 function defaultHubNameForEnroll(vault: ReturnType<typeof decryptVault>): string {
@@ -73,8 +78,21 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
   private error: string | null = null;
   private chain: Promise<void> = Promise.resolve();
   private stopped = false;
+  private readonly leaseStore: LeaseStore;
 
-  constructor(private readonly deps: AgentRemoteUnlockDeps) {}
+  constructor(private readonly deps: AgentRemoteUnlockDeps) {
+    this.leaseStore =
+      deps.leaseStore ??
+      new LeaseStore({
+        base: deps.base,
+        now: deps.now,
+        log: (line) => deps.log(line),
+      });
+  }
+
+  leases(): LeaseStore {
+    return this.leaseStore;
+  }
 
   private serial(fn: () => Promise<void>): Promise<void> {
     const run = this.chain.then(fn, fn).catch((err: unknown) => {
@@ -160,6 +178,7 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
         base: this.deps.base,
         now: this.deps.now,
         log: this.deps.log,
+        leaseStore: this.leaseStore,
         isLocked: () => state.isLocked(),
         lockVault: () => {
           state.lock();

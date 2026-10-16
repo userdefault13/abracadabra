@@ -1,13 +1,13 @@
 # Remote unlock (hub-held unwrap key)
 
-Status: **PR 5/7** — Relock policy (signed idle/max-age, local caps, CLI flags).
-Feature flag: off by default (`ABRA_REMOTE_UNLOCK=1` to enable enroll / unlock listener).
+Status: **PR 6/7** — Lease store (Phase 2): sealed bot leases survive vault lock.
+Feature flag: off by default (`ABRA_REMOTE_UNLOCK=1` to enable enroll / unlock / lease ingest).
 Nothing new runs unless you invoke it. Julius approved both phases; bot lease
 default TTL is **7 days**.
 
 Design source: [REMOTE-UNLOCK-DESIGN.md](./REMOTE-UNLOCK-DESIGN.md).
 
-## What PR 1–5 ship
+## What PR 1–6 ship
 
 | Piece | Path | Notes |
 |-------|------|--------|
@@ -18,12 +18,27 @@ Design source: [REMOTE-UNLOCK-DESIGN.md](./REMOTE-UNLOCK-DESIGN.md).
 | Wire crypto | `src/remote/wire.ts` | Challenge + seal(W) + lock + Ed25519; 30s expiry |
 | Relock policy | `src/remote/policy.ts` | Hub may shorten idle/max-age; receiver clamps to local caps |
 | Nonce cache | `src/remote/nonce-cache.ts` | Single-use pending + used (in-memory) |
-| Listener | `src/remote/listener.ts` | HTTPS `:7335` unlock/lock/status/enroll; Tailscale bind |
+| Listener | `src/remote/listener.ts` | HTTPS `:7335` unlock/lock/status/enroll/**lease**; Tailscale bind |
 | Hub client | `src/remote/hub-client.ts` | unlock / lock / status / enroll HTTP clients |
 | Audit log | `<abraDir>/remote/audit.log` | JSON lines: `ts`, `op`, `peer`, `result` (never values) |
 | Agent | `src/agent/remote-unlock.ts` | Flag + (enrolled **or** unlocked for first enroll) |
-| Feature flag | `ABRA_REMOTE_UNLOCK` | Must be `1` for enroll / unlock / lock / disable |
+| Lease store | `src/agent/lease-store.ts` | Survives lock; `<abraDir>/remote/leases/<id>.json` (0600) |
+| Lease format | `src/remote/lease.ts` | Hub Ed25519 + seal to device X25519; default TTL **7d** |
+| Feature flag | `ABRA_REMOTE_UNLOCK` | Must be `1` for enroll / unlock / lock / disable / leases |
 | CLI | `abra remote …` | `whoami`, `enroll`, `unlock`, `lock`, `status`, `revoke`, `disable` |
+
+## Bot leases (PR 6)
+
+Hub-signed, project-scoped leases bound to a caller binary (`exe` + `dev` + `ino`,
+same identity as `GrantCaller`). Secrets are sealed to the receiver **device**
+X25519 key (not the vault sync key), so the agent can serve them while locked.
+
+- **TTL:** default **7 days**; max **7 days** unless `ABRA_LEASE_MAX_TTL_SECONDS` sets a different local cap.
+- **Storage:** sealed JSON at `<abraDir>/remote/leases/<leaseId>.json` (0600). No plaintext secrets on disk.
+- **GrantStore unchanged:** in-memory grants still clear on every lock. Leases are a separate store.
+- **Serve:** `lease.reveal` (and `grant.check` lease fallback) work while the vault is locked when the caller binding matches. Wrong binary / other project / expired / tampered → refuse; expired files are purged.
+- **Ingest:** `POST /v1/remote/lease` on the unlock listener. Verifies hub pin + peerId + expiry; replaces an older lease for the same project+binding.
+- **Hub grant CLI / renewer:** PR 7 (`abra lease grant …`).
 
 ## Wire protocol (PR 3)
 
@@ -116,8 +131,8 @@ Audit: both sides append JSON lines to `<abraDir>/remote/audit.log`
 2. **Enroll** — create `W`, blob, seal `W` to hub; Touch ID on hub
 3. **Wire protocol** — challenge/response, signatures, nonce cache, 30s expiry, tailnet listener
 4. **CLI** — `unlock|lock|status --all|--peers`, `revoke`, `disable`; audit log both sides
-5. **Relock policy** (this PR) — signed policy field, local caps, CLI flags, docs
-6. **(Phase 2) Lease store** — survives lock; serve path bound to `GrantCaller`
+5. **Relock policy** — signed policy field, local caps, CLI flags, docs
+6. **(Phase 2) Lease store** (this PR) — survives lock; serve path bound to `GrantCaller`
 7. **(Phase 2) Hub renewer + revoke** — `abra lease grant … --ttl` (default 7d)
 
 ## Setup

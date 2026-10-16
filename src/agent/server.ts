@@ -47,6 +47,8 @@ import {
   GrantStore,
   grantPublicView,
 } from "./grants.js";
+import { LeaseStore } from "./lease-store.js";
+import { LeaseError } from "../remote/lease.js";
 import {
   startSleepWatch,
   type SleepWatchFactory,
@@ -107,6 +109,7 @@ let running: {
   server: net.Server;
   state: AgentState;
   grants: GrantStore;
+  leases: LeaseStore;
   socketPath: string;
   vaultPath: () => string;
   keystoreBackend: () => string;
@@ -226,6 +229,7 @@ function agentIdentity(): { execPath: string; cliEntrypoint: string } {
 async function handleRequest(
   state: AgentState,
   grants: GrantStore,
+  leases: LeaseStore,
   vaultPath: () => string,
   keystoreBackend: () => string,
   authorize: AuthorizePeerFn,
@@ -440,22 +444,81 @@ async function handleRequest(
         }
       }
       case "grant.check": {
-        if (state.isLocked()) {
-          return fail(id, "locked", "Agent is locked");
+        // In-memory grants require unlock. Bot leases survive lock — check them
+        // when locked, or as a fallback when no grant matches.
+        if (!state.isLocked()) {
+          const result = grants.check(req.project, req.caller);
+          if (result.granted) {
+            logOp("grant.check", `granted=${result.granted}`);
+            return {
+              v: PROTOCOL_VERSION,
+              id,
+              ok: true,
+              op: "grant.check",
+              granted: true,
+              ...(result.grantId ? { grantId: result.grantId } : {}),
+              ...(result.remainingMs !== undefined
+                ? { remainingMs: result.remainingMs }
+                : {}),
+            };
+          }
         }
-        const result = grants.check(req.project, req.caller);
-        logOp("grant.check", `granted=${result.granted}`);
+        const lease = leases.check(req.project, req.caller);
+        logOp("grant.check", `granted=${lease.granted}${lease.granted ? " via=lease" : ""}`);
         return {
           v: PROTOCOL_VERSION,
           id,
           ok: true,
           op: "grant.check",
-          granted: result.granted,
-          ...(result.grantId ? { grantId: result.grantId } : {}),
-          ...(result.remainingMs !== undefined
-            ? { remainingMs: result.remainingMs }
+          granted: lease.granted,
+          ...(lease.leaseId ? { grantId: lease.leaseId } : {}),
+          ...(lease.remainingMs !== undefined
+            ? { remainingMs: lease.remainingMs }
             : {}),
         };
+      }
+      case "lease.reveal": {
+        // Serves leased project secrets even while the vault is locked.
+        try {
+          const revealed = leases.reveal(req.project, req.caller);
+          const keys = req.keys;
+          const vars: Record<string, string> = {};
+          if (keys && keys.length > 0) {
+            for (const k of keys) {
+              const entry = revealed.vars[k];
+              if (!entry) {
+                return fail(id, "bad_request", `var not in lease: ${k}`);
+              }
+              vars[k] = entry.value;
+            }
+          } else {
+            for (const [k, entry] of Object.entries(revealed.vars)) {
+              vars[k] = entry.value;
+            }
+          }
+          logOp("lease.reveal", `project=${req.project} leaseId=${revealed.leaseId}`);
+          return {
+            v: PROTOCOL_VERSION,
+            id,
+            ok: true,
+            op: "lease.reveal",
+            leaseId: revealed.leaseId,
+            project: revealed.project,
+            vars,
+            remainingMs: revealed.remainingMs,
+          };
+        } catch (e) {
+          if (e instanceof LeaseError) {
+            const code =
+              e.reason === "disabled" || e.reason === "not-enrolled"
+                ? "unavailable"
+                : "bad_request";
+            logOp("lease.reveal", `result=${e.reason}`);
+            return fail(id, code, e.message);
+          }
+          const msg = e instanceof Error ? e.message : String(e);
+          return fail(id, "bad_request", msg);
+        }
       }
       case "inbox.status": {
         // Settings + counts only (no vault data) — same-uid like status.
@@ -493,6 +556,7 @@ async function handleRequest(
 function attachConnection(
   state: AgentState,
   grants: GrantStore,
+  leases: LeaseStore,
   vaultPath: () => string,
   keystoreBackend: () => string,
   authorize: AuthorizePeerFn,
@@ -542,6 +606,7 @@ function attachConnection(
       void handleRequest(
         state,
         grants,
+        leases,
         vaultPath,
         keystoreBackend,
         authorize,
@@ -608,15 +673,20 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
   }
 
   const grants = new GrantStore();
+  const vaultPath = opts?.vaultPath ?? (() => vaultFile());
+  const leaseBase = () => path.dirname(vaultPath());
+  const leases = new LeaseStore({
+    base: leaseBase(),
+    log: (line) => logOp(line),
+  });
   const state = new AgentState({
     idleSeconds: opts?.idleSeconds ?? resolveIdleSeconds(),
     maxAgeSeconds: opts?.maxAgeSeconds ?? resolveMaxAgeSeconds(),
     resolveMasterKey: opts?.resolveMasterKey,
     onIdleLock: () => logOp("idle-lock"),
     onMaxAgeLock: () => logOp("max-age-lock"),
-    onLock: () => grants.clear(),
+    onLock: () => grants.clear(), // leases intentionally survive lock
   });
-  const vaultPath = opts?.vaultPath ?? (() => vaultFile());
   const keystoreBackend = opts?.keystoreBackend ?? (() => resolveKeystoreBackend());
   const peerDeps = opts?.peerCheckDeps;
   hintIdentity = {
@@ -631,7 +701,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
   let server: net.Server;
   try {
     server = net.createServer((socket) => {
-      attachConnection(state, grants, vaultPath, keystoreBackend, authorize, socket);
+      attachConnection(state, grants, leases, vaultPath, keystoreBackend, authorize, socket);
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -690,6 +760,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
       state,
       vaultPath,
       log: (detail) => logOp("remote-unlock", detail),
+      leaseStore: leases,
       onUnlocked: () => {
         void running?.inbox?.onUnlock();
       },
@@ -704,6 +775,7 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
     server,
     state,
     grants,
+    leases,
     socketPath,
     vaultPath,
     keystoreBackend,

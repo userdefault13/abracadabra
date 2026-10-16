@@ -18,6 +18,7 @@ export type AgentOp =
   | "grant.list"
   | "grant.revoke"
   | "grant.check"
+  | "lease.reveal"
   | "inbox.status";
 
 /** Sync inbox listener state — settings and counts only, no vault data. */
@@ -42,6 +43,7 @@ export const SENSITIVE_OPS: ReadonlySet<AgentOp> = new Set<AgentOp>([
   "grant.list",
   "grant.revoke",
   "grant.check",
+  "lease.reveal",
 ]);
 
 export interface AgentStatusBody {
@@ -134,6 +136,15 @@ export type AgentRequest =
       project: string;
       caller: GrantCaller;
     }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
+      op: "lease.reveal";
+      project: string;
+      caller: GrantCaller;
+      /** Optional key filter; omit → all vars in the leased project. */
+      keys?: string[];
+    }
   | { v: typeof PROTOCOL_VERSION; id: string; op: "inbox.status" };
 
 export type AgentResponse =
@@ -207,6 +218,16 @@ export type AgentResponse =
       v: typeof PROTOCOL_VERSION;
       id: string;
       ok: true;
+      op: "lease.reveal";
+      leaseId: string;
+      project: string;
+      vars: Record<string, string>;
+      remainingMs: number;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      id: string;
+      ok: true;
       op: "inbox.status";
       inbox: AgentInboxStatusBody;
     }
@@ -265,6 +286,13 @@ export function isAgentRequest(raw: unknown): raw is AgentRequest {
       return r.all === true || typeof r.grantId === "string";
     case "grant.check":
       return typeof r.project === "string" && isGrantCaller(r.caller);
+    case "lease.reveal":
+      return (
+        typeof r.project === "string" &&
+        isGrantCaller(r.caller) &&
+        (r.keys === undefined ||
+          (Array.isArray(r.keys) && r.keys.every((k) => typeof k === "string")))
+      );
     default:
       return false;
   }
