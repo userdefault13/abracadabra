@@ -9,6 +9,7 @@
 #   # Edit ExecStart to absolute paths for node + dist/agent/server.js
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now abra-agent
+#   abra setup launcher   # pin CLI node to match ExecStart (mise / PATH)
 #
 # ExecStart MUST use absolute paths. Do not rely on mise/nvm/fnm PATH in the
 # user manager environment. Examples:
@@ -27,9 +28,19 @@
 # Environment=ABRA_KEYSTORE=passphrase-file
 #
 # Sleep lock: agent spawns /usr/bin/gdbus (or /usr/bin/dbus-monitor) to watch
-# logind PrepareForSleep. RestrictAddressFamilies=AF_UNIX allows that (system
+# logind PrepareForSleep. AF_UNIX in RestrictAddressFamilies allows that (system
 # bus is AF_UNIX). No SystemCallFilter is set — do not add one that blocks
 # execve of /usr/bin/gdbus. Logind inhibitor is NOT taken (best-effort lock).
+#
+# Peer check: sensitive ops (unlock.key, vault.load, …) identify the connecting
+# process with `ss -xpn`, which needs AF_NETLINK (sock_diag / UNIX_DIAG_PEER).
+# Without it every check fails (forbidden_peer reason=ss_failed:netlink or
+# ss_no_peer_info) and `abra unlock` exits 3. Spawned children inherit this
+# restriction, so AF_NETLINK must stay in the list below.
+#
+# Upgrading an installed unit: re-copy this file (keep your ExecStart edits),
+# then: systemctl --user daemon-reload && systemctl --user restart abra-agent
+# `abra doctor` warns when the installed unit lacks AF_NETLINK.
 #
 # Node has no process.setrlimit — LimitCORE=0 is the practical core-dump guard.
 # Do NOT set MemoryDenyWriteExecute=yes — V8 JIT needs writable+executable pages.
@@ -75,8 +86,9 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 # keytar talks to Secret Service over D-Bus (AF_UNIX). Agent protocol is AF_UNIX.
+# AF_NETLINK: `ss` peer lookup (sock_diag) — required, see "Peer check" above.
 # AF_INET/AF_INET6 omitted — agent is local-only.
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 
 # Omitted (incompatible or not for --user without caveats):
 # - MemoryDenyWriteExecute — breaks Node/V8 JIT

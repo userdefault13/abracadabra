@@ -18,6 +18,7 @@ import {
 import {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  SENSITIVE_OPS,
   isAgentRequest,
   type AgentOp,
   type AgentRequest,
@@ -37,6 +38,8 @@ import { vaultFile } from "../core/paths.js";
 import { resolveKeystoreBackend } from "../platform/env.js";
 import {
   authorizePeer as defaultAuthorizePeer,
+  peerFailureHint,
+  resolveAbraCliEntrypoint,
   type PeerAuthResult,
   type PeerCheckDeps,
 } from "./peer.js";
@@ -52,18 +55,6 @@ import {
 import { AgentInbox, type AgentInboxController, type AgentInboxDeps } from "./inbox.js";
 
 export type { AgentStatusBody };
-
-/** Ops that unlock the in-memory master key, return vault plaintext, or manage grants. */
-const SENSITIVE_OPS = new Set<AgentOp>([
-  "unlock",
-  "unlock.key",
-  "vault.load",
-  "vault.save",
-  "grant.add",
-  "grant.list",
-  "grant.revoke",
-  "grant.check",
-]);
 
 export type AuthorizePeerFn = (
   socket: net.Socket,
@@ -130,8 +121,13 @@ function logOp(op: string, detail?: string): void {
   process.stderr.write(`abra-agent: ${op}${extra}\n`);
 }
 
-function fail(id: string, code: AgentErrorCode, error: string): AgentResponse {
-  return { v: PROTOCOL_VERSION, id, ok: false, error, code };
+function fail(
+  id: string,
+  code: AgentErrorCode,
+  error: string,
+  extra?: { reason?: string; hint?: string },
+): AgentResponse {
+  return { v: PROTOCOL_VERSION, id, ok: false, error, code, ...extra };
 }
 
 /** Strict base64 → exactly 32 bytes. Returns null on any violation. */
@@ -190,12 +186,29 @@ async function requireAbraCliPeer(
 ): Promise<AgentResponse | null> {
   const result = await authorize(socket);
   if (result.ok) return null;
+  // Hint uses only the agent's own node path + entrypoint — never peer data.
+  const hint = peerFailureHint(result.reason, agentIdentity());
   // Log op + reason only — never full cmdline or env.
-  logOp(op, `forbidden_peer reason=${result.reason}`);
+  logOp(
+    op,
+    `forbidden_peer reason=${result.reason}${hint ? ` — ${hint}` : ""}`,
+  );
   return fail(
     id,
     "forbidden_peer",
     "Peer is not the abra CLI (client should fall back to direct keystore)",
+    { reason: result.reason, ...(hint ? { hint } : {}) },
+  );
+}
+
+/** This agent's node binary + CLI entrypoint (for exe_mismatch rerun hints). */
+let hintIdentity: { execPath: string; cliEntrypoint: string } | null = null;
+function agentIdentity(): { execPath: string; cliEntrypoint: string } {
+  return (
+    hintIdentity ?? {
+      execPath: process.execPath,
+      cliEntrypoint: resolveAbraCliEntrypoint(),
+    }
   );
 }
 
@@ -217,14 +230,28 @@ async function handleRequest(
 
     switch (op) {
       case "status": {
-        // Same-uid status is safe: locked + remaining timers only (no secrets).
+        // Same-uid status is safe: locked + timers + node/entry paths (no secrets).
         logOp("status");
+        const base = state.status();
+        const ident = agentIdentity();
+        let nodePath: string | undefined;
+        let entryPath: string | undefined;
+        try {
+          nodePath = fs.realpathSync(ident.execPath);
+        } catch {
+          nodePath = ident.execPath;
+        }
+        try {
+          entryPath = fs.realpathSync(ident.cliEntrypoint);
+        } catch {
+          entryPath = ident.cliEntrypoint;
+        }
         return {
           v: PROTOCOL_VERSION,
           id,
           ok: true,
           op: "status",
-          status: state.status(),
+          status: { ...base, nodePath, entryPath },
         };
       }
       case "unlock": {
@@ -578,6 +605,10 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
   const vaultPath = opts?.vaultPath ?? (() => vaultFile());
   const keystoreBackend = opts?.keystoreBackend ?? (() => resolveKeystoreBackend());
   const peerDeps = opts?.peerCheckDeps;
+  hintIdentity = {
+    execPath: peerDeps?.execPath ?? process.execPath,
+    cliEntrypoint: peerDeps?.cliEntrypoint ?? resolveAbraCliEntrypoint(),
+  };
   const authorize: AuthorizePeerFn =
     opts?.authorizePeer ??
     ((socket) => defaultAuthorizePeer(socket, peerDeps));

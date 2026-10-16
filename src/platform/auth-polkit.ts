@@ -101,7 +101,7 @@ export function resolvePolkitSubject(
   return `${pid},${startTime},${getuidFn()}`;
 }
 
-export const POLKIT_INSTALL_HINT = "sudo scripts/install-polkit.sh";
+export const POLKIT_INSTALL_HINT = "abra setup polkit";
 
 export function headlessPolkitHint(reasons: string[]): string {
   return (
@@ -130,7 +130,7 @@ function probeWith(exists: ExistsFn): PolkitProbeResult {
       ok: false,
       pkcheck,
       detail:
-        "polkit policy missing — install with: sudo scripts/install-polkit.sh (places file in /usr/share/polkit-1/actions/)",
+        "polkit policy missing — install with: abra setup polkit (places file in /usr/share/polkit-1/actions/)",
     };
   }
   return { ok: true, pkcheck, policy };

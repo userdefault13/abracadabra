@@ -30,9 +30,33 @@ import {
 } from "./client.js";
 import { emptyVault, loadVault, type Vault } from "../core/vault.js";
 import { VaultLockedError } from "../platform/keystore-passphrase.js";
+import { resolveAbraCliEntrypoint } from "./peer.js";
+import type { AgentStatusBody } from "./protocol.js";
 
 function makeKey(): Buffer {
   return crypto.randomBytes(32);
+}
+
+function realpathOr(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/** Assert status paths, then leak-scan the rest (paths trip base64-like regex on CI). */
+function assertStatusNoKeyMaterial(st: AgentStatusBody): void {
+  const expectedNode = realpathOr(process.execPath);
+  const expectedEntry = realpathOr(resolveAbraCliEntrypoint());
+  expect(st.nodePath).toBe(expectedNode);
+  expect(st.entryPath).toBe(expectedEntry);
+  expect(path.isAbsolute(st.nodePath!)).toBe(true);
+  expect(path.isAbsolute(st.entryPath!)).toBe(true);
+  const rest = JSON.parse(JSON.stringify(st)) as Record<string, unknown>;
+  delete rest.nodePath;
+  delete rest.entryPath;
+  expect(JSON.stringify(rest)).not.toMatch(/[A-Za-z0-9+/]{40,}={0,2}/);
 }
 
 /** Test-only: skip Linux ss+/proc and treat the peer as the abra CLI. */
@@ -94,7 +118,7 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     expect(st0.locked).toBe(true);
     expect(st0.idleRemainingMs).toBeNull();
     expect(st0.maxAgeRemainingMs).toBeNull();
-    expect(JSON.stringify(st0)).not.toMatch(/[A-Za-z0-9+/]{40,}={0,2}/); // no key-like blobs
+    assertStatusNoKeyMaterial(st0);
 
     await agentUnlock({ socketPath });
     const st1 = await agentStatus({ socketPath });
@@ -102,10 +126,13 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     expect(st1.idleRemainingMs).toBeTypeOf("number");
     expect(st1.maxAgeRemainingMs).toBeTypeOf("number");
     expect(Object.keys(st1).sort()).toEqual([
+      "entryPath",
       "idleRemainingMs",
       "locked",
       "maxAgeRemainingMs",
+      "nodePath",
     ]);
+    assertStatusNoKeyMaterial(st1);
 
     const vault: Vault = emptyVault();
     vault.projects.demo = {

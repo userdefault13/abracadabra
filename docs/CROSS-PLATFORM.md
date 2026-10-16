@@ -362,14 +362,16 @@ GotchiBot changes (separate repo, optional until Tier 1 lands):
 
 ## Linux: PolKit approval gate
 
-On Linux, interactive secret reveals (CLI `get`, MCP `get_secrets`, Cloudflare mint, etc.) go through `authenticate()` → `PlatformAuth`. The default backend on Linux is **always `polkit`** (per-reveal system prompt, similar to 1Password on Linux / Touch ID on macOS). If `pkcheck` or the policy file is missing, every reveal is **denied** with an actionable error pointing at `sudo scripts/install-polkit.sh` — there is no automatic fallback to the password prompt.
+On Linux, interactive secret reveals (CLI `get`, MCP `get_secrets`, Cloudflare mint, etc.) go through `authenticate()` → `PlatformAuth`. The default backend on Linux is **always `polkit`** (per-reveal system prompt, similar to 1Password on Linux / Touch ID on macOS). If `pkcheck` or the policy file is missing, every reveal is **denied** with an actionable error pointing at `abra setup polkit` — there is no automatic fallback to the password prompt.
 
 ### Install the policy
 
 ```bash
-sudo scripts/install-polkit.sh
-# installs packaging/linux/dev.abracadabra.policy →
+abra setup polkit
+# runs scripts/install-polkit.sh (via sudo or pkexec) →
+#   packaging/linux/dev.abracadabra.policy →
 #   /usr/share/polkit-1/actions/dev.abracadabra.policy
+abra setup polkit --check   # installed / missing / outdated (no sudo)
 ```
 
 Verify:
@@ -476,7 +478,7 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Dir perms | Runtime dir `0700`, owner must be the agent uid; refuse group/other bits and symlinks |
 | Socket perms | `0600` after listen |
 | Protocol | Newline-delimited JSON (`status`, `unlock`, `unlock.key`, `lock`, `vault.load`, `vault.save`, `grant.add` / `grant.list` / `grant.revoke` / `grant.check`) — **never** sends the master key to clients. `unlock.key` is the only path that carries key material, and only **CLI → agent**. Grants are metadata only (exe path + inode + project + expiry). |
-| Peer check | Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`, `grant.*`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Relative argv[1] is resolved against the peer's `/proc/<pid>/cwd` before realpath. Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cwd,cmdline,environ}`. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
+| Peer check | Sensitive ops (`unlock`, `unlock.key`, `vault.load`, `vault.save`, `grant.*`) require the connecting peer to be the **abra CLI** (same `node` realpath + `dist/index.js` as argv[1], no inject/debug flags in argv or `NODE_OPTIONS`). Relative argv[1] is resolved against the peer's `/proc/<pid>/cwd` before realpath. Resolved on Linux via socket inode + `ss -xpn` + `/proc/<pid>/{exe,cwd,cmdline,environ}`. `ss` gets 5s per attempt and up to 3 attempts (100/300ms backoff, 12s total) on failure or when the client's row is not visible yet; each attempt is resolved from its own snapshot, and a socket held by more than one pid is rejected. Ambiguity / missing `ss` / non-Linux → `forbidden_peer` (fail closed). The refusal carries a static `reason` (`exe_mismatch`, `ss_failed:timeout`, `ss_failed:exit_<n>`, `ss_failed:netlink`, `ss_no_peer_info`, `peer_pid_unresolved:<detail>`, …) and a remediation `hint` built from the agent's own node path only — never the peer's cmdline/env. Why `ss`: Node has no `SO_PEERCRED` without a native addon, and `/proc/net/unix` does not list peer inodes, so only sock_diag (netlink) can pair the two ends. `status` / `lock` stay allowed for any same-uid peer (no secrets returned; lock only reduces access). |
 | Vault binding | `vault.load` / `vault.save` / `unlock.key` include the client's resolved `vaultPath` + `keystoreBackend`; agent refuses (`mismatch`) if they differ from its own — client falls back to direct I/O |
 | Idle lock | Default **15 min** (`ABRA_AGENT_IDLE_SECONDS`); activity = vault ops |
 | Max age | Absolute **8 h** ceiling (`ABRA_AGENT_MAX_AGE_SECONDS`, values > 8h clamped); activity never extends it |
@@ -539,12 +541,60 @@ Unit highlights (`packaging/linux/abra-agent.service`):
 - `ReadWritePaths=-%h/.abracadabra` — leading `-` so a missing vault dir does not fail the unit.
 - `ProtectSystem` / `ProtectHome` / `PrivateTmp` in **user** units rely on unprivileged user namespaces (verify live). Session bus at `%t/bus` must stay connectable for Secret Service / keytar.
 - Sleep lock needs `/usr/bin/gdbus` (or dbus-monitor) executable; no `SystemCallFilter` is set that would block that spawn.
+- `RestrictAddressFamilies=AF_UNIX AF_NETLINK` — `AF_NETLINK` is required for the `ss` peer check (sock_diag). Units installed before this change have `AF_UNIX` only: every `abra unlock` is refused (`ss_failed:netlink` / `ss_no_peer_info`). `abra doctor` warns about it.
+
+**Upgrading an installed unit** (after updating abracadabra):
+
+```bash
+cp packaging/linux/abra-agent.service ~/.config/systemd/user/   # re-apply your ExecStart edit
+systemctl --user daemon-reload && systemctl --user restart abra-agent
+abra doctor    # "abra-agent unit allows AF_NETLINK for ss"
+abra unlock
+```
 
 CLI:
 
 - `abra agent` — foreground agent (signal handlers; sleep watch on Linux)
-- `abra unlock` — passphrase-file: unlock local session + push key to agent when reachable
+- `abra unlock` — passphrase-file: unlock local session + push key to agent when reachable. If the agent refuses or fails to take the key, prints `✗ abra-agent REFUSED unlock (reason: …)` with a hint in red on stderr and **exits 3** (wrong passphrase / other errors exit 1). For `exe_mismatch` the hint recommends `abra setup launcher` (or `<agent node> <…/dist/index.js> unlock`) — typical cause: a `#!/usr/bin/env node` shebang / mise shim picking a different node first on `PATH`. On Linux, `abra unlock` re-execs once under the agent's node (from status `nodePath`) before prompting when safe.
 - `abra lock` — clear local session and lock the agent when present (also clears agent-held grants)
 - `abra grant` — pre-approve a caller binary for headless MCP/API reveals under the passphrase backend
+- `abra setup launcher` — write `~/.local/bin/abra` that `exec`'s the current node + `dist/index.js` (see below)
+- `abra setup polkit` — install the PolKit policy (see above)
 
-See packaging unit comments for hardening notes (`LimitCORE=0`, no `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX` for D-Bus/keytar/gdbus).
+See packaging unit comments for hardening notes (`LimitCORE=0`, no `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX AF_NETLINK` — AF_UNIX for D-Bus/keytar/gdbus, AF_NETLINK for the `ss` peer check).
+
+---
+
+## Linux: launcher, mise, polkit
+
+**Problem:** With [mise](https://mise.jdx.dev/) (or nvm/fnm), the npm global `abra` bin is a `#!/usr/bin/env node` script. Interactive shells often hit a **mise shim** named `abra` that mise rejects (`mise ERROR abra is not a valid shim` even after `mise reshim`). Running the real npm bin by full path can still fail abra-agent peer checks (`forbidden_peer` / `exe_mismatch`) when `env node` resolves to a different realpath than the agent's `ExecStart` node.
+
+**Do not** work around this with a `~/.bashrc` alias that hard-codes node paths — use the launcher:
+
+```bash
+abra setup launcher                  # writes ~/.local/bin/abra (0755)
+abra setup launcher --check          # status only
+# Ensure ~/.local/bin is before mise shims on PATH, then:
+hash -r
+abra doctor                          # flags rejected mise shims / PATH shadow / node mismatch
+```
+
+The launcher is a small POSIX `sh` script:
+
+```sh
+#!/bin/sh
+# generated by abra setup launcher v…
+exec '/abs/realpath/of/node' '/abs/…/dist/index.js' "$@"
+```
+
+It does **not** add node flags and does **not** strip `NODE_OPTIONS` (the agent already rejects dangerous inject/debug flags). Idempotent: identical content is a no-op; a foreign non-generated file requires `--force`. Windows: no-op (`not needed / unsupported`).
+
+Peer checks still allow:
+
+| Launch | argv shape |
+|--------|------------|
+| Launcher | `[node, …/dist/index.js, …]` |
+| npm bin symlink | `[node, …/bin/abra → dist/index.js, …]` (same realpath) |
+| Direct | `node dist/index.js …` |
+
+PolKit policy (graphical reveals): `abra setup polkit` (ships `packaging/` + `scripts/install-polkit.sh` in the npm package).
