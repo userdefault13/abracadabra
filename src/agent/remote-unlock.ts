@@ -198,8 +198,8 @@ export class AgentRemoteUnlock implements AgentRemoteUnlockController {
             return false;
           }
         },
-        unlockWithKey: (masterKey) => {
-          state.unlockWithKey(masterKey);
+        unlockWithKey: (masterKey, policy) => {
+          state.unlockWithKey(masterKey, policy);
           this.deps.onUnlocked?.();
         },
       });

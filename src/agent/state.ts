@@ -14,8 +14,12 @@ export class AgentState {
   private unlockedAt = 0;
   private idleTimer: NodeJS.Timeout | null = null;
   private maxAgeTimer: NodeJS.Timeout | null = null;
-  private readonly idleMs: number;
-  private readonly maxAgeMs: number;
+  /** Constructor / local defaults — restored on lock and on unlock without override. */
+  private readonly defaultIdleMs: number;
+  private readonly defaultMaxAgeMs: number;
+  /** Active session timers (may be shortened by remote-unlock policy). */
+  private idleMs: number;
+  private maxAgeMs: number;
   private readonly onIdleLock: () => void;
   private readonly onMaxAgeLock: () => void;
   /** Fired on every lock() — idle, max-age, sleep, explicit, stopAgent. */
@@ -31,8 +35,10 @@ export class AgentState {
     /** Called whenever lock() runs (clears agent-held grants, etc.). */
     onLock?: () => void;
   }) {
-    this.idleMs = (opts?.idleSeconds ?? resolveIdleSeconds()) * 1000;
-    this.maxAgeMs = (opts?.maxAgeSeconds ?? resolveMaxAgeSeconds()) * 1000;
+    this.defaultIdleMs = (opts?.idleSeconds ?? resolveIdleSeconds()) * 1000;
+    this.defaultMaxAgeMs = (opts?.maxAgeSeconds ?? resolveMaxAgeSeconds()) * 1000;
+    this.idleMs = this.defaultIdleMs;
+    this.maxAgeMs = this.defaultMaxAgeMs;
     this.resolveMasterKey =
       opts?.resolveMasterKey ??
       (async () => {
@@ -90,6 +96,7 @@ export class AgentState {
     if (!Buffer.isBuffer(key) || key.length !== 32) {
       throw new Error("Master key must be a 32-byte Buffer");
     }
+    this.applySessionTimers();
     // Own a copy so callers can't mutate our in-memory key via the returned buffer.
     this.key = Buffer.from(key);
     this.unlockedAt = Date.now();
@@ -98,10 +105,14 @@ export class AgentState {
   }
 
   /**
-   * Store a copy of an externally-supplied master key (CLI `unlock.key`).
+   * Store a copy of an externally-supplied master key (CLI `unlock.key` / remote unlock).
    * Does not extend/reset absolute max age from prior unlock — this is a fresh unlock.
+   * Optional `timers` shorten idle/max-age for this session only (remote-unlock policy).
    */
-  unlockWithKey(key: Buffer): void {
+  unlockWithKey(
+    key: Buffer,
+    timers?: { idleSeconds?: number; maxAgeSeconds?: number },
+  ): void {
     if (!Buffer.isBuffer(key) || key.length !== 32) {
       throw new Error("Master key must be a 32-byte Buffer");
     }
@@ -111,6 +122,7 @@ export class AgentState {
       this.key.fill(0);
       this.key = null;
     }
+    this.applySessionTimers(timers);
     this.key = Buffer.from(key);
     this.unlockedAt = Date.now();
     this.touch();
@@ -126,7 +138,28 @@ export class AgentState {
     }
     this.lastActivityAt = 0;
     this.unlockedAt = 0;
+    this.idleMs = this.defaultIdleMs;
+    this.maxAgeMs = this.defaultMaxAgeMs;
     this.onLock();
+  }
+
+  /** Active session timer lengths (ms) — for tests / remote-unlock inspection. */
+  sessionTimersMsForTests(): { idleMs: number; maxAgeMs: number } {
+    return { idleMs: this.idleMs, maxAgeMs: this.maxAgeMs };
+  }
+
+  private applySessionTimers(timers?: {
+    idleSeconds?: number;
+    maxAgeSeconds?: number;
+  }): void {
+    this.idleMs =
+      timers?.idleSeconds !== undefined
+        ? timers.idleSeconds * 1000
+        : this.defaultIdleMs;
+    this.maxAgeMs =
+      timers?.maxAgeSeconds !== undefined
+        ? timers.maxAgeSeconds * 1000
+        : this.defaultMaxAgeMs;
   }
 
   /** Reset idle timer — call on vault ops (and after unlock). Does NOT extend max age. */

@@ -167,7 +167,10 @@ export async function remoteUnlockViaHttp(
   }
 
   if (unlockRes.json.status === "unlocked") {
-    return { ok: true, policy: response.policy };
+    return {
+      ok: true,
+      policy: unlockRes.json.policy ?? response.policy,
+    };
   }
   return {
     ok: false,
@@ -213,7 +216,10 @@ export async function remoteUnlockLoopback(opts: {
 
   const out = await opts.session.acceptResponse(response);
   if (out.response.status === "unlocked") {
-    return { ok: true, policy: response.policy };
+    return {
+      ok: true,
+      policy: out.response.policy ?? response.policy,
+    };
   }
   return { ok: false, reason: out.response.reason ?? out.reason ?? "unlock-failed" };
 }

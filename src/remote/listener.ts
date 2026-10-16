@@ -11,6 +11,12 @@ import type { EnrollOffer } from "./enroll-seal.js";
 import { isRemoteUnlockEnabled } from "./feature.js";
 import { getHubPin } from "./hub-pin.js";
 import { NonceCache } from "./nonce-cache.js";
+import {
+  clampUnlockPolicy,
+  localUnlockCaps,
+  type AppliedUnlockPolicy,
+  type UnlockPolicyCaps,
+} from "./policy.js";
 import { ensureRemoteDir, remoteDir, writePrivateFile, assertPrivatePath } from "./private-fs.js";
 import { readUnlockBlob, unwrapMasterKey } from "./unlock-blob.js";
 import {
@@ -99,6 +105,8 @@ export interface UnlockHttpResponse {
   enrolled?: boolean;
   locked?: boolean;
   deviceId?: string;
+  /** Applied idle/max-age after local clamp (unlocked only). */
+  policy?: AppliedUnlockPolicy;
 }
 
 export interface UnlockOutcome {
@@ -158,8 +166,14 @@ export function loadOrCreateRemoteUnlockTls(
 
 export interface UnlockSessionDeps {
   base: string;
-  /** Apply master key in-process (agent unlockWithKey). Must zero the buffer. */
-  unlockWithKey: (masterKey: Buffer) => void | Promise<void>;
+  /**
+   * Apply master key in-process (agent unlockWithKey). Must zero the buffer.
+   * `policy` is already clamped to local caps (idle/max-age seconds).
+   */
+  unlockWithKey: (
+    masterKey: Buffer,
+    policy: AppliedUnlockPolicy,
+  ) => void | Promise<void>;
   /** Lock the in-process vault (remote lock). */
   lockVault?: () => void | Promise<void>;
   /** Optional: refuse unlock if already unlocked; used by status/lock. */
@@ -181,6 +195,8 @@ export interface UnlockSessionDeps {
   nonceCache?: NonceCache;
   /** Called when enroll artifacts disappear mid-flight (disable). */
   onNotEnrolled?: () => void;
+  /** Override local idle/max-age caps (tests). Default: agent env caps. */
+  localCaps?: () => UnlockPolicyCaps;
 }
 
 /**
@@ -309,11 +325,24 @@ export class UnlockSession {
         this.log("response", peer, "unlock-failed");
         return rejectOutcome("unlock-failed", peer, "response");
       }
-      await this.deps.unlockWithKey(masterKey);
+      let applied: AppliedUnlockPolicy;
+      try {
+        applied = clampUnlockPolicy(
+          response.policy,
+          (this.deps.localCaps ?? localUnlockCaps)(),
+        );
+      } catch {
+        this.log("response", peer, "malformed");
+        return rejectOutcome("malformed", peer, "response");
+      }
+      await this.deps.unlockWithKey(masterKey, applied);
       this.nonces.markUsed(response.nonce, now);
       this.log("response", peer, "unlocked");
       return {
-        response: { status: "unlocked" },
+        response: {
+          status: "unlocked",
+          policy: applied,
+        },
         httpStatus: 200,
         peer,
         op: "response",

@@ -45,8 +45,16 @@ const SEAL_NONCE_BYTES = 12;
 const WRAP_KEY_BYTES = 32;
 
 export interface UnlockPolicy {
-  /** Hint only in PR 3; local caps applied in PR 5. */
+  /**
+   * Hub-requested idle lock (seconds). Receiver applies min(requested, local cap);
+   * local default 15m (`ABRA_AGENT_IDLE_SECONDS`). Omitted → local cap.
+   */
   idleSeconds?: number;
+  /**
+   * Hub-requested absolute max unlock age (seconds). Receiver applies
+   * min(requested, local cap); local default 8h (`ABRA_AGENT_MAX_AGE_SECONDS`).
+   * Omitted → local cap.
+   */
   maxAgeSeconds?: number;
 }
 
@@ -248,7 +256,11 @@ function parsePolicy(raw: unknown): UnlockPolicy {
   }
   const out: UnlockPolicy = {};
   if (p.idleSeconds !== undefined) {
-    if (typeof p.idleSeconds !== "number" || !Number.isSafeInteger(p.idleSeconds) || p.idleSeconds < 0) {
+    if (
+      typeof p.idleSeconds !== "number" ||
+      !Number.isSafeInteger(p.idleSeconds) ||
+      p.idleSeconds <= 0
+    ) {
       throw new UnlockWireError("malformed", "malformed unlock policy");
     }
     out.idleSeconds = p.idleSeconds;
@@ -257,7 +269,7 @@ function parsePolicy(raw: unknown): UnlockPolicy {
     if (
       typeof p.maxAgeSeconds !== "number" ||
       !Number.isSafeInteger(p.maxAgeSeconds) ||
-      p.maxAgeSeconds < 0
+      p.maxAgeSeconds <= 0
     ) {
       throw new UnlockWireError("malformed", "malformed unlock policy");
     }
