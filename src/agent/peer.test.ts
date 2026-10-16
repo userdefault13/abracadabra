@@ -255,6 +255,79 @@ describe("isAllowedAbraCliPeer", () => {
     });
     expect(r).toEqual({ allowed: true });
   });
+
+  it("allows launcher / npm-bin / direct node argv shapes", () => {
+    const miseNode = "/home/u/.local/share/mise/installs/node/26.8.2/bin/node";
+    const pkgCli =
+      "/home/u/.local/lib/node_modules/@userdefault/abracadabra/dist/index.js";
+    const npmBin =
+      "/home/u/.local/share/mise/installs/node/26.8.2/bin/abra";
+    const rp = (p: string) => {
+      if (p === npmBin) return pkgCli;
+      if (p === pkgCli || p === miseNode) return p;
+      return p;
+    };
+    // launcher script: exec node dist/index.js → argv = [node, abs index, …]
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: miseNode,
+        agentExecRealpath: miseNode,
+        peerArgv: [miseNode, pkgCli, "unlock"],
+        cliEntrypointRealpath: pkgCli,
+        realpathSync: rp,
+      }),
+    ).toEqual({ allowed: true });
+    // npm bin symlink …/bin/abra → …/dist/index.js
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: miseNode,
+        agentExecRealpath: miseNode,
+        peerArgv: [miseNode, npmBin, "unlock"],
+        cliEntrypointRealpath: pkgCli,
+        realpathSync: rp,
+      }),
+    ).toEqual({ allowed: true });
+    // direct node dist/index.js
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: miseNode,
+        agentExecRealpath: miseNode,
+        peerArgv: [miseNode, pkgCli, "ls"],
+        cliEntrypointRealpath: pkgCli,
+        realpathSync: rp,
+      }),
+    ).toEqual({ allowed: true });
+  });
+
+  it("still rejects wrong node, copied script, or --require before script", () => {
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: "/other/node",
+        agentExecRealpath: node,
+        peerArgv: [node, cli],
+        cliEntrypointRealpath: cli,
+        realpathSync,
+      }).allowed,
+    ).toBe(false);
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: node,
+        agentExecRealpath: node,
+        peerArgv: [node, "/tmp/copy-of-index.js"],
+        cliEntrypointRealpath: cli,
+        realpathSync,
+      }),
+    ).toEqual({ allowed: false, reason: "argv_script_mismatch" });
+    expect(
+      isAllowedAbraCliPeer({
+        peerExeRealpath: node,
+        agentExecRealpath: node,
+        peerArgv: [node, "--require", "x", cli],
+        cliEntrypointRealpath: cli,
+        realpathSync,
+      }),
+    ).toEqual({ allowed: false, reason: "node_flags_in_argv" });
+  });
 });
 
 describe("authorizePeer (injected, no real /proc or ss)", () => {
@@ -466,11 +539,12 @@ describe("peerFailureHint", () => {
     expect(peerFailureHint("ss_failed:maxbuffer", agent)).toMatch(/retry/);
   });
 
-  it("exe_mismatch names the agent's node and the exact rerun form", () => {
+  it("exe_mismatch names the agent's node and setup launcher / rerun form", () => {
     const h = peerFailureHint("exe_mismatch", agent)!;
     expect(h).toContain("/usr/bin/node");
+    expect(h).toContain("abra setup launcher");
     expect(h).toContain(
-      "Rerun: /usr/bin/node /usr/lib/abracadabra/dist/index.js unlock",
+      "/usr/bin/node /usr/lib/abracadabra/dist/index.js unlock",
     );
   });
 

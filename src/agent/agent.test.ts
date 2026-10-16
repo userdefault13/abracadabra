@@ -100,10 +100,14 @@ describe.skipIf(process.platform === "win32")("abra agent", () => {
     expect(st1.idleRemainingMs).toBeTypeOf("number");
     expect(st1.maxAgeRemainingMs).toBeTypeOf("number");
     expect(Object.keys(st1).sort()).toEqual([
+      "entryPath",
       "idleRemainingMs",
       "locked",
       "maxAgeRemainingMs",
+      "nodePath",
     ]);
+    expect(st1.nodePath).toBeTruthy();
+    expect(st1.entryPath).toBeTruthy();
 
     const vault: Vault = emptyVault();
     vault.projects.demo = {

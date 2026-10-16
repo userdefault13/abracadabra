@@ -508,7 +508,8 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
     }
     const out = errs.join("\n");
     expect(out).toContain("REFUSED unlock (reason: exe_mismatch)");
-    expect(out).toContain(`Rerun: ${agentNode} ${agentCli} unlock`);
+    expect(out).toContain("abra setup launcher");
+    expect(out).toContain(`${agentNode} ${agentCli} unlock`);
     // The test runner's own argv/env (the "peer") never leaks into output.
     expect(out).not.toContain(process.argv[1]);
     const agentLog = stderrWrites.join("");

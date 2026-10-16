@@ -79,7 +79,7 @@ describe("PolkitAuth", () => {
     const auth = authWith(execFile, (p) => p.endsWith("dev.abracadabra.policy"));
     const err = auth.authenticate({ reason: "reveal" });
     await expect(err).rejects.toThrow(/PolKit approval denied — reveal\. PolKit is not set up \(pkcheck not found/);
-    await expect(err).rejects.toThrow(/sudo scripts\/install-polkit\.sh/);
+    await expect(err).rejects.toThrow(/abra setup polkit/);
     await expect(err).rejects.toThrow(/ABRA_AUTH=password/);
     expect(execFile).not.toHaveBeenCalled();
   });
@@ -89,7 +89,7 @@ describe("PolkitAuth", () => {
     const auth = authWith(execFile, (p) => p === "/usr/bin/pkcheck");
     const err = auth.authenticate({ reason: "reveal" });
     await expect(err).rejects.toThrow(/PolKit is not set up \(polkit policy missing/);
-    await expect(err).rejects.toThrow(/sudo scripts\/install-polkit\.sh/);
+    await expect(err).rejects.toThrow(/abra setup polkit/);
     expect(execFile).not.toHaveBeenCalled();
   });
 
@@ -97,7 +97,7 @@ describe("PolkitAuth", () => {
     const execFile = vi.fn<ExecFileFn>();
     const auth = authWith(execFile, () => false);
     await expect(auth.authenticate({ reason: "reveal" })).rejects.toThrow(
-      /sudo scripts\/install-polkit\.sh/,
+      /abra setup polkit/,
     );
     expect(execFile).not.toHaveBeenCalled();
   });
@@ -255,7 +255,7 @@ describe("probePolkit", () => {
     const r = probePolkit({ existsSync: (p) => p === "/usr/bin/pkcheck" });
     expect(r.ok).toBe(false);
     expect(r.pkcheck).toBe("/usr/bin/pkcheck");
-    expect(r.detail).toMatch(/install-polkit/);
+    expect(r.detail).toMatch(/abra setup polkit/);
   });
 
   it("honors test override", () => {

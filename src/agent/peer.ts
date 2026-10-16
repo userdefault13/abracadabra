@@ -155,7 +155,7 @@ export function peerFailureHint(
     return (
       `abra-agent runs under node ${agent.execPath}; the CLI must use the same node binary ` +
       `(a #!/usr/bin/env node shebang picks the first node on PATH). ` +
-      `Rerun: ${agent.execPath} ${agent.cliEntrypoint} unlock`
+      `Fix: abra setup launcher   (or: ${agent.execPath} ${agent.cliEntrypoint} unlock)`
     );
   }
   if (reason === "ss_failed:netlink" || reason === "ss_no_peer_info") {

@@ -19,12 +19,14 @@
     "web/dist",
     "assets",
     "skills",
+    "packaging",
     "README.md",
     "README.agents.md",
     "AGENTS.md",
     "LICENSE",
     "COMMERCIAL.md",
     "scripts/postinstall.js",
+    "scripts/install-polkit.sh",
     "src/auth/auth-helper.swift"
   ],
   "scripts": {

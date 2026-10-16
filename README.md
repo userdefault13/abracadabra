@@ -198,6 +198,11 @@ Agent skill file: [`skills/abra/SKILL.md`](skills/abra/SKILL.md).
 | `abra safe status [--json]` | Owners, threshold, nonce, Base USDC + ETH, pending proposals |
 | `abra safe pay --to 0x… --amount 0.008 --reason "…"` | Touch ID gated USDC spend from the Safe (1-of-N executes, else proposes) |
 | `abra safe pending` / `confirm <safeTxHash> [--exec]` / `exec <safeTxHash>` | Multisig queue: list / co-sign / execute (Touch ID) |
+| `abra setup launcher [--dir] [--force] [--check]` | Linux/macOS: write `~/.local/bin/abra` pinning this node + `dist/index.js` (fixes mise shims / agent peer `exe_mismatch`) |
+| `abra setup polkit [--check]` | Linux: install PolKit policy (`packaging/linux/dev.abracadabra.policy`) |
+| `abra doctor` | Platform / keystore / agent / PATH checklist |
+
+**Linux + mise:** if `abra` fails with `mise ERROR abra is not a valid shim`, run `abra setup launcher`, put `~/.local/bin` before mise shims on `PATH`, then `hash -r`. Details: [docs/CROSS-PLATFORM.md](docs/CROSS-PLATFORM.md#linux-launcher-mise-polkit).
 
 ### Injecting secrets into a deploy
 

@@ -208,14 +208,28 @@ async function handleRequest(
 
     switch (op) {
       case "status": {
-        // Same-uid status is safe: locked + remaining timers only (no secrets).
+        // Same-uid status is safe: locked + timers + node/entry paths (no secrets).
         logOp("status");
+        const base = state.status();
+        const ident = agentIdentity();
+        let nodePath: string | undefined;
+        let entryPath: string | undefined;
+        try {
+          nodePath = fs.realpathSync(ident.execPath);
+        } catch {
+          nodePath = ident.execPath;
+        }
+        try {
+          entryPath = fs.realpathSync(ident.cliEntrypoint);
+        } catch {
+          entryPath = ident.cliEntrypoint;
+        }
         return {
           v: PROTOCOL_VERSION,
           id,
           ok: true,
           op: "status",
-          status: state.status(),
+          status: { ...base, nodePath, entryPath },
         };
       }
       case "unlock": {
