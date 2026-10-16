@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { loadVault, saveVault, assertProject, assertConnection } from "../core/vault.js";
+import { loadVault, updateVault, assertProject, assertConnection } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { prompt, promptHidden } from "../core/prompt.js";
 import { authenticate } from "../platform/index.js";
@@ -88,15 +88,16 @@ export async function connect(providerId?: string, opts?: ConnectOptions): Promi
         };
       }
 
-      vault.connections ??= {};
-      vault.connections[provider.id] = {
-        provider: provider.id,
-        label: "imported",
-        createdAt: Date.now(),
-        meta: { importedFrom: source },
-        vars: importedVars,
-      };
-      await saveVault(vault);
+      await updateVault((fresh) => {
+        fresh.connections ??= {};
+        fresh.connections[provider.id] = {
+          provider: provider.id,
+          label: "imported",
+          createdAt: Date.now(),
+          meta: { importedFrom: source },
+          vars: importedVars,
+        };
+      });
       console.log(green(`✓ Connected ${bold(provider.label)} from ${source}`));
       for (const name of Object.keys(importedVars).sort()) {
         console.log(`  ${name}${importedVars[name].secret ? dim(" (secret)") : ""}`);
@@ -157,15 +158,16 @@ export async function connect(providerId?: string, opts?: ConnectOptions): Promi
       vars[field.varName] = { value, secret: field.secret, updatedAt: Date.now() };
     }
 
-    vault.connections ??= {};
-    vault.connections[provider.id] = {
-      provider: provider.id,
-      label: meta.keyName,
-      createdAt: Date.now(),
-      meta,
-      vars,
-    };
-    await saveVault(vault);
+    await updateVault((fresh) => {
+      fresh.connections ??= {};
+      fresh.connections[provider.id] = {
+        provider: provider.id,
+        label: meta.keyName,
+        createdAt: Date.now(),
+        meta,
+        vars,
+      };
+    });
     console.log(green(`✓ Connected ${bold(provider.label)} — stored encrypted in your vault`));
     console.log(dim(`Issue into a project with: abra issue ${provider.id} --project <name>`));
   } catch (err) {
@@ -197,8 +199,10 @@ export async function removeConnection(providerId: string): Promise<void> {
     assertConnection(vault, providerId);
     const answer = await prompt(`Disconnect "${providerId}"? [y/N] `);
     if (answer.trim().toLowerCase() !== "y") return;
-    delete vault.connections![providerId];
-    await saveVault(vault);
+    await updateVault((fresh) => {
+      assertConnection(fresh, providerId);
+      delete fresh.connections![providerId];
+    });
     console.log(green(`✓ Disconnected ${providerId}`));
   } catch (err) {
     fail(err);
@@ -219,18 +223,21 @@ export async function issueCreds(
   try {
     const vault: Vault = await loadVault();
     const provider = getProvider(providerId);
-    const conn = assertConnection(vault, providerId);
-    const project = assertProject(vault, targetProject);
+    assertConnection(vault, providerId);
+    assertProject(vault, targetProject);
 
     // materializing provider secrets into a project is Touch ID gated
     await authenticate(`abracadabra: issue ${providerId} credentials to "${targetProject}"`);
 
-    const issued = provider.issueVars(conn);
-    const now = Date.now();
-    for (const [key, value] of Object.entries(issued)) {
-      project.vars[key] = { value, secret: true, updatedAt: now };
-    }
-    await saveVault(vault);
+    let issued!: Record<string, string>;
+    await updateVault((fresh) => {
+      const project = assertProject(fresh, targetProject);
+      issued = provider.issueVars(assertConnection(fresh, providerId));
+      const now = Date.now();
+      for (const [key, value] of Object.entries(issued)) {
+        project.vars[key] = { value, secret: true, updatedAt: now };
+      }
+    });
 
     console.log(green(`✓ Issued ${Object.keys(issued).length} var(s) from ${providerId} to ${bold(targetProject)}:`));
     for (const key of Object.keys(issued).sort()) console.log(`  ${key}`);

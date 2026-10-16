@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import type net from "node:net";
 import tls from "node:tls";
-import type { Vault } from "../core/vault.js";
+import { VAULT_UNCHANGED, type Vault } from "../core/vault.js";
 import { createEphemeralTls, type EphemeralTls } from "../core/tls-ephemeral.js";
 import { NoTerminalError } from "../core/prompt.js";
 import { generateSyncIdentity, getOrCreateSyncIdentity, identityFingerprint } from "./identity.js";
@@ -38,12 +38,17 @@ function side(host: string, opts: { confirm?: () => Promise<boolean>; pin?: stri
   let stored: Vault | null = opts.initial ? structuredClone(opts.initial) : null;
   const saves: Vault[] = [];
   const lines: string[] = [];
+  const load = async () => structuredClone(stored ?? { version: 1, projects: {}, connections: {} });
   const deps: PairDeps = {
     authenticate: vi.fn(async () => {}),
-    loadVault: async () => structuredClone(stored ?? { version: 1, projects: {}, connections: {} }),
-    saveVault: vi.fn(async (v: Vault) => {
-      stored = structuredClone(v);
-      saves.push(structuredClone(v));
+    loadVault: load,
+    updateVault: vi.fn(async (mutator) => {
+      const draft = await load();
+      const out = await mutator(draft);
+      if (out === VAULT_UNCHANGED) return draft;
+      stored = structuredClone(out ?? draft);
+      saves.push(structuredClone(stored));
+      return structuredClone(stored);
     }),
     confirm: vi.fn(opts.confirm ?? (async () => true)),
     promptPin: vi.fn(async () => opts.pin ?? PIN),

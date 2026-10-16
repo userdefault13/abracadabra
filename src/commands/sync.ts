@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import type { Command } from "commander";
-import { loadVault, saveVault } from "../core/vault.js";
+import { loadVault, updateVault, VAULT_UNCHANGED } from "../core/vault.js";
 import type { SyncAcceptRule, Vault } from "../core/vault.js";
 import { abraDir } from "../core/paths.js";
 import { authenticate } from "../platform/index.js";
@@ -71,7 +71,7 @@ export function defaultSyncDeps(): SyncDeps {
     },
     authenticate: (reason) => authenticate(reason),
     loadVault,
-    saveVault,
+    updateVault: (mutator) => updateVault(mutator),
     confirm: ttyConfirm,
     // allowHeadless:false — the CI vault passphrase must never stand in for a PIN.
     promptPin: (q) => promptHidden(q, process.stderr, { allowHeadless: false }),
@@ -103,8 +103,12 @@ export async function cmdSyncWhoami(opts: { json?: boolean }, deps: SyncDeps = d
     return;
   }
   await deps.authenticate("abracadabra: create this vault's sync identity");
-  const { vault, created } = getOrCreateSyncIdentity(await deps.loadVault(), { now: deps.now() });
-  if (created) await deps.saveVault(vault);
+  let created = false;
+  const vault = await deps.updateVault((fresh) => {
+    const r = getOrCreateSyncIdentity(fresh, { now: deps.now() });
+    created = r.created;
+    return r.created ? r.vault : VAULT_UNCHANGED;
+  });
   printIdentity(vault, deps, { json: opts.json, created });
 }
 
@@ -157,8 +161,12 @@ export async function cmdSyncUnpair(
     }
   }
   await deps.authenticate(`abracadabra: remove sync peer ${found.peer.name}`);
-  const { vault, removed } = removePeer(await deps.loadVault(), found.id);
-  await deps.saveVault(vault);
+  let removed!: ReturnType<typeof removePeer>["removed"];
+  const vault = await deps.updateVault((fresh) => {
+    const r = removePeer(fresh, found.id);
+    removed = r.removed;
+    return r.vault;
+  });
   refreshInboxAnchors(vault, deps);
   deps.log(green(`✓ unpaired "${removed.peer.name}" (${removed.peer.idFingerprint})`));
 }
@@ -323,18 +331,26 @@ export async function cmdSyncAccept(opts: SyncAcceptCliOptions, deps: SyncDeps =
   resolveAcceptFrom(await deps.loadVault(), opts.from);
 
   await deps.authenticate("abracadabra: change the sync accept policy");
-  const fresh = await deps.loadVault();
-  const from = resolveAcceptFrom(fresh, opts.from);
   if (opts.remove) {
-    const { vault, removed } = removeAcceptRules(fresh, { from, projects });
-    if (removed === 0) throw new Error("no accept rule with that --from / -p selector — see: abra sync accept --list");
-    await deps.saveVault(vault);
+    let removed = 0;
+    await deps.updateVault((fresh) => {
+      const from = resolveAcceptFrom(fresh, opts.from);
+      const r = removeAcceptRules(fresh, { from, projects });
+      if (r.removed === 0) throw new Error("no accept rule with that --from / -p selector — see: abra sync accept --list");
+      removed = r.removed;
+      return r.vault;
+    });
     deps.log(green(`✓ removed ${removed} accept rule${removed === 1 ? "" : "s"}`));
     return;
   }
-  const rule: SyncAcceptRule = { from, projects, auto: opts.auto === true };
-  const { vault, action } = upsertAcceptRule(fresh, rule);
-  await deps.saveVault(vault);
+  let rule!: SyncAcceptRule;
+  let action!: ReturnType<typeof upsertAcceptRule>["action"];
+  const vault = await deps.updateVault((fresh) => {
+    rule = { from: resolveAcceptFrom(fresh, opts.from), projects, auto: opts.auto === true };
+    const r = upsertAcceptRule(fresh, rule);
+    action = r.action;
+    return r.vault;
+  });
   deps.log(green(`✓ ${action} rule: ${describeAcceptRule(vault, rule)}`));
 }
 
@@ -407,22 +423,24 @@ async function inboxApply(target: string, deps: SyncDeps): Promise<void> {
     return;
   }
   await deps.authenticate(`abracadabra: apply ${ids.length} queued sync bundle${ids.length === 1 ? "" : "s"} to this vault`);
-  let vault = await deps.loadVault();
-  let changed = false;
   const applied: { id: string; createdAt: number; result: ApplyResult }[] = [];
   const failed: { id: string; why: string }[] = [];
-  for (const id of ids) {
-    try {
-      const { envelope } = queue.read(id);
-      const result = applyEnvelope(vault, envelope);
-      vault = result.vault;
-      changed ||= result.changed;
-      applied.push({ id, createdAt: envelope.createdAt, result });
-    } catch (err) {
-      failed.push({ id, why: err instanceof EnvelopeError ? err.reason : "unreadable" });
+  await deps.updateVault((fresh) => {
+    let vault = fresh;
+    let changed = false;
+    for (const id of ids) {
+      try {
+        const { envelope } = queue.read(id);
+        const result = applyEnvelope(vault, envelope);
+        vault = result.vault;
+        changed ||= result.changed;
+        applied.push({ id, createdAt: envelope.createdAt, result });
+      } catch (err) {
+        failed.push({ id, why: err instanceof EnvelopeError ? err.reason : "unreadable" });
+      }
     }
-  }
-  if (changed) await deps.saveVault(vault);
+    return changed ? vault : VAULT_UNCHANGED;
+  });
   const seen = new ReplayCache(base);
   for (const a of applied) {
     queue.remove(a.id);
@@ -475,12 +493,10 @@ async function inboxEnable(opts: SyncInboxCliOptions, deps: SyncDeps): Promise<v
     bindNote = `${ts} (Tailscale, re-detected when the listener starts)`;
   }
   await deps.authenticate("abracadabra: enable the sync inbox");
-  const fresh = await deps.loadVault();
-  const vault: Vault = {
+  const vault = await deps.updateVault((fresh) => ({
     ...fresh,
     syncInbox: { enabled: true, port, ...(opts.bind !== undefined ? { bind: opts.bind } : {}) },
-  };
-  await deps.saveVault(vault);
+  }));
   syncAnchorsFromVault(deps.abraDir(), vault);
   deps.log(green("✓ sync inbox enabled"));
   deps.log(`  listen:  ${bindNote}:${port}`);
@@ -494,9 +510,10 @@ async function inboxEnable(opts: SyncInboxCliOptions, deps: SyncDeps): Promise<v
 
 async function inboxDisable(deps: SyncDeps): Promise<void> {
   await deps.authenticate("abracadabra: disable the sync inbox");
-  const fresh = await deps.loadVault();
-  const vault: Vault = { ...fresh, syncInbox: { ...(fresh.syncInbox ?? { port: INBOX_DEFAULT_PORT }), enabled: false } };
-  await deps.saveVault(vault);
+  const vault = await deps.updateVault((fresh) => ({
+    ...fresh,
+    syncInbox: { ...(fresh.syncInbox ?? { port: INBOX_DEFAULT_PORT }), enabled: false },
+  }));
   syncAnchorsFromVault(deps.abraDir(), vault);
   deps.log(green("✓ sync inbox disabled"));
 }

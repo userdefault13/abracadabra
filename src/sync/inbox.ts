@@ -1,6 +1,6 @@
 import https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Project, Vault } from "../core/vault.js";
+import { VAULT_UNCHANGED, type Project, type Vault, type VaultMutator } from "../core/vault.js";
 import { mergeScopedProjects, type ScopedMergeReport } from "../core/sync-scope.js";
 import { decideAccept } from "./accept.js";
 import {
@@ -145,7 +145,8 @@ export interface SyncInboxDeps {
   base: string;
   /** Decrypted vault while unlocked; null when locked. */
   loadUnlockedVault: () => Promise<Vault | null>;
-  saveVault: (vault: Vault) => Promise<void>;
+  /** Locked read-modify-write: the mutator gets the vault re-loaded under the vault lock. */
+  updateVault: (mutator: VaultMutator) => Promise<Vault>;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -215,8 +216,7 @@ export class SyncInbox {
 
     if (vault && decideAccept(vault.syncAccept, peerId, env.projects).action === "auto") {
       try {
-        const applied = applyEnvelope(vault, env);
-        if (applied.changed) await this.deps.saveVault(applied.vault);
+        const applied = await this.applyLocked(env);
         this.seen.add(env.bundleId, env.createdAt, now);
         this.log(`applied bundle=${env.bundleId} from=${peerName} projects=${env.projects.length}`);
         return {
@@ -248,32 +248,47 @@ export class SyncInbox {
     return { response: { status: "queued" }, httpStatus: 202, bundleId: env.bundleId, peerName };
   }
 
+  /** Merge into the vault as re-loaded under the vault lock; the accept rule is re-checked there too. */
+  private async applyLocked(env: SealedEnvelope): Promise<ApplyResult> {
+    let applied!: ApplyResult;
+    await this.deps.updateVault((fresh) => {
+      applied = applyEnvelope(fresh, env);
+      if (decideAccept(fresh.syncAccept, applied.peerId, env.projects).action !== "auto") {
+        throw new Error("accept rule changed");
+      }
+      return applied.changed ? applied.vault : VAULT_UNCHANGED;
+    });
+    return applied;
+  }
+
   /**
    * Apply queued bundles that match an auto rule (called after unlock).
    * Anything that no longer verifies or isn't auto stays queued for the user.
    */
   async processQueue(): Promise<{ applied: number; remaining: number }> {
     return this.exclusive(async () => {
-      let vault = await this.deps.loadUnlockedVault();
-      if (!vault) return { applied: 0, remaining: this.queue.ids().length };
-      let changed = false;
+      if (!(await this.deps.loadUnlockedVault())) return { applied: 0, remaining: this.queue.ids().length };
       const done: string[] = [];
-      for (const id of this.queue.ids()) {
-        try {
-          const { envelope } = this.queue.read(id);
-          const trust = trustFromVault(vault);
-          if (!trust) break;
-          const { peerId } = verifyEnvelope(envelope, trust);
-          if (decideAccept(vault.syncAccept, peerId, envelope.projects).action !== "auto") continue;
-          const r = applyEnvelope(vault, envelope);
-          vault = r.vault;
-          changed ||= r.changed;
-          done.push(id);
-        } catch {
-          /* leave it for `abra sync inbox` */
+      await this.deps.updateVault((fresh) => {
+        let vault = fresh;
+        let changed = false;
+        for (const id of this.queue.ids()) {
+          try {
+            const { envelope } = this.queue.read(id);
+            const trust = trustFromVault(vault);
+            if (!trust) break;
+            const { peerId } = verifyEnvelope(envelope, trust);
+            if (decideAccept(vault.syncAccept, peerId, envelope.projects).action !== "auto") continue;
+            const r = applyEnvelope(vault, envelope);
+            vault = r.vault;
+            changed ||= r.changed;
+            done.push(id);
+          } catch {
+            /* leave it for `abra sync inbox` */
+          }
         }
-      }
-      if (changed) await this.deps.saveVault(vault);
+        return changed ? vault : VAULT_UNCHANGED;
+      });
       for (const id of done) this.queue.remove(id);
       if (done.length > 0) this.log(`applied ${done.length} queued bundle(s) on unlock`);
       return { applied: done.length, remaining: this.queue.ids().length };

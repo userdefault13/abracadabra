@@ -1,15 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { vaultFile, ensureDir } from "./paths.js";
+import { vaultFile } from "./paths.js";
+import {
+  assertVaultLockHeld,
+  currentVaultLockToken,
+  isVaultLockHeld,
+  withVaultLock,
+  type VaultLockOptions,
+} from "./vault-lock.js";
 import { getKeystore } from "../platform/index.js";
 import { resolveMasterKey } from "./masterKey.js";
 import {
+  AgentClientError,
   isAgentUnavailable,
   loadVaultViaAgent,
   saveVaultViaAgent,
   shouldTryAgent,
 } from "../agent/client.js";
+
+export {
+  withVaultLock,
+  VaultLockNotHeldError,
+  VaultLockTimeoutError,
+  type VaultLockOptions,
+} from "./vault-lock.js";
 
 export interface VarEntry {
   value: string;
@@ -214,25 +229,71 @@ export function decryptVault(file: unknown, key: Buffer): Vault {
   return JSON.parse(plaintext.toString("utf8")) as Vault;
 }
 
-/** Atomically persist an EncryptedFile to vault.enc (mode 0600). */
+const RENAME_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Windows refuses to replace a file another process has open — retry briefly. */
+function renameWithRetry(from: string, to: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (process.platform !== "win32" || !RENAME_RETRY_CODES.has(code) || attempt >= 20) {
+        fs.rmSync(from, { force: true });
+        throw err;
+      }
+      sleepSync(Math.min(10 * 2 ** attempt, 200));
+    }
+  }
+}
+
+/**
+ * Atomically persist an EncryptedFile to vault.enc (mode 0600). Throws
+ * VaultLockNotHeldError unless the vault lock is held by this async call chain
+ * or, for abra-agent writes on a client's behalf, by `opts.lockToken`.
+ */
 export function writeEncryptedVaultFile(
   enc: EncryptedFile,
   file = vaultFile(),
+  opts: { lockToken?: string } = {},
 ): void {
-  ensureDir();
-  const tmp = `${file}.tmp`;
+  assertVaultLockHeld(path.dirname(file), opts.lockToken);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(enc, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  renameWithRetry(tmp, file);
+}
+
+/** Windows: a reader can hit a sharing error while another process replaces the file. */
+function readWithRetry(file: string): string {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fs.readFileSync(file, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (process.platform !== "win32" || !RENAME_RETRY_CODES.has(code) || attempt >= 20) throw err;
+      sleepSync(Math.min(10 * 2 ** attempt, 200));
+    }
+  }
+}
+
+/** Decrypt vault.enc at `file`; null when it does not exist yet. */
+export function readVaultFile(file: string, key: Buffer): Vault | null {
+  if (!fs.existsSync(file)) return null;
+  const vault = decryptVault(JSON.parse(readWithRetry(file)), key);
+  vault.connections ??= {};
+  vault.apiKeys ??= {};
+  return vault;
 }
 
 async function loadVaultDirect(): Promise<Vault> {
   const key = await resolveMasterKey(getKeystore());
-  if (!fs.existsSync(vaultFile())) return emptyVault();
-  const raw = JSON.parse(fs.readFileSync(vaultFile(), "utf8"));
-  const vault = decryptVault(raw, key);
-  vault.connections ??= {};
-  vault.apiKeys ??= {};
-  return vault;
+  return readVaultFile(vaultFile(), key) ?? emptyVault();
 }
 
 async function saveVaultDirect(vault: Vault): Promise<void> {
@@ -242,10 +303,16 @@ async function saveVaultDirect(vault: Vault): Promise<void> {
 }
 
 export async function loadVault(): Promise<Vault> {
+  // Under the vault write lock we must not unlock the agent (may prompt) or
+  // fall through to a cold keystore read that prompts — fail fast instead.
+  const underLock = isVaultLockHeld();
   if (shouldTryAgent()) {
     try {
-      return await loadVaultViaAgent();
+      return await loadVaultViaAgent({ allowUnlock: !underLock });
     } catch (e) {
+      if (underLock && e instanceof AgentClientError && e.code === "locked") {
+        throw new AgentClientError("agent locked during save — rerun", "locked");
+      }
       if (!isAgentUnavailable(e)) throw e;
       // no socket / no answer / connect timeout → direct keystore path
     }
@@ -253,16 +320,102 @@ export async function loadVault(): Promise<Vault> {
   return loadVaultDirect();
 }
 
+/**
+ * Persist `vault` as-is. Asserts (does not acquire) the vault lock: callers
+ * must be inside updateVault()/withVaultLock(), and should prefer updateVault
+ * so the vault they write was loaded under the same lock. When abra-agent does
+ * the write, the lock token travels with the request and the agent re-checks it.
+ */
 export async function saveVault(vault: Vault): Promise<void> {
+  assertVaultLockHeld();
   if (shouldTryAgent()) {
     try {
-      await saveVaultViaAgent(vault);
+      await saveVaultViaAgent(vault, { lockToken: currentVaultLockToken() });
       return;
     } catch (e) {
+      // Idle-lock under vault.lock: do not unlock or fall back to the keystore
+      // (both can prompt). Fail fast — unlock and rerun outside the lock.
+      if (e instanceof AgentClientError && e.code === "locked") throw e;
       if (!isAgentUnavailable(e)) throw e;
     }
   }
   await saveVaultDirect(vault);
+}
+
+/** Return from a VaultMutator to skip the write (nothing changed). */
+export const VAULT_UNCHANGED: unique symbol = Symbol("vault-unchanged");
+
+/**
+ * Receives the vault freshly loaded under the lock. Mutate it in place and
+ * return nothing, return a replacement, or return VAULT_UNCHANGED to skip the
+ * save. Throwing aborts without writing. Must not prompt or touch the network.
+ */
+export type VaultMutator = (
+  vault: Vault,
+) => Vault | void | typeof VAULT_UNCHANGED | Promise<Vault | void | typeof VAULT_UNCHANGED>;
+
+export type UpdateVaultOptions = VaultLockOptions;
+
+/**
+ * Read-modify-write vault.enc under the cross-process vault lock: acquire,
+ * re-load from disk, apply `mutator`, save atomically, release. Returns the
+ * vault as saved (or as loaded, for VAULT_UNCHANGED).
+ *
+ * Keystore / agent unlock (which may prompt) is resolved by a load before the
+ * lock is taken, so the lock is never held across user interaction. If the
+ * agent idle-locks between that warm load and the locked save, load/save fail
+ * fast with "agent locked during save — rerun" instead of prompting under the
+ * lock.
+ */
+export async function updateVault(mutator: VaultMutator, opts: UpdateVaultOptions = {}): Promise<Vault> {
+  if (!isVaultLockHeld(opts.dir)) await loadVault();
+  return withVaultLock(async () => {
+    const current = await loadVault();
+    const out = await mutator(current);
+    if (out === VAULT_UNCHANGED) return current;
+    const next = out ?? current;
+    await saveVault(next);
+    return next;
+  }, opts);
+}
+
+/**
+ * abra-agent: read-modify-write `file` with the agent's in-memory key, under
+ * the same lock CLI processes use (lockfile beside `file`).
+ */
+export async function updateVaultFile(
+  file: string,
+  key: () => Buffer,
+  mutator: VaultMutator,
+  opts: Omit<VaultLockOptions, "dir"> = {},
+): Promise<Vault> {
+  return withVaultLock(
+    async () => {
+      const current = readVaultFile(file, key()) ?? emptyVault();
+      const out = await mutator(current);
+      if (out === VAULT_UNCHANGED) return current;
+      const next = out ?? current;
+      writeEncryptedVaultFile(encryptVault(next, key()), file);
+      return next;
+    },
+    { ...opts, dir: path.dirname(file) },
+  );
+}
+
+/**
+ * abra-agent `vault.save`: the client already holds the lock and sent its
+ * token, which is verified against the lockfile before writing. Clients that
+ * predate the lock send no token; the agent takes the lock for them.
+ */
+export async function saveVaultFileForClient(
+  vault: Vault,
+  key: Buffer,
+  file: string,
+  lockToken: string | undefined,
+): Promise<void> {
+  const write = () => writeEncryptedVaultFile(encryptVault(vault, key), file, { lockToken });
+  if (lockToken !== undefined) write();
+  else await withVaultLock(write, { dir: path.dirname(file) });
 }
 
 export function assertProject(vault: Vault, name: string): Project {
@@ -294,6 +447,8 @@ export function decryptEnvelope(
  * Device-local sync identity, peers, accept policy and inbox settings are
  * dropped so a cloned vault never shares an identity with its origin — the
  * user re-pairs after restore. The inbox's public-key mirror goes with them.
+ * Must run inside withVaultLock() (asserted); hold it across the master-key
+ * swap too, so no writer re-encrypts under the old key in between.
  */
 export function writeRestoredVault(vault: Vault, masterKey: Buffer): { droppedSyncPairing: boolean } {
   writeEncryptedVaultFile(encryptVault(withoutDeviceLocal(vault), masterKey));

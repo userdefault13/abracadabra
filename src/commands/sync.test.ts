@@ -5,21 +5,20 @@ import { NoTerminalError, promptHidden, setOpenTtyForTests, type TtyHandles } fr
 import { generateSyncIdentity, getOrCreateSyncIdentity } from "../sync/identity.js";
 import { planPeerUpsert } from "../sync/peers.js";
 import { cmdSyncPeers, cmdSyncUnpair, cmdSyncWhoami, defaultSyncDeps, ttyConfirm, type SyncDeps } from "./sync.js";
+import { memVault } from "../../test/fixtures/mem-vault.js";
 
 function memDeps(initial?: Vault, confirm = true) {
-  let stored: Vault = initial ?? { version: 1, projects: {}, connections: {} };
+  const mem = memVault(initial);
   const lines: string[] = [];
   const deps: SyncDeps = {
     ...defaultSyncDeps(),
     authenticate: vi.fn(async () => {}),
-    loadVault: async () => structuredClone(stored),
-    saveVault: vi.fn(async (v: Vault) => {
-      stored = structuredClone(v);
-    }),
+    loadVault: mem.loadVault,
+    updateVault: mem.updateVault,
     confirm: vi.fn(async () => confirm),
     log: (l) => lines.push(l),
   };
-  return { deps, lines, stored: () => stored };
+  return { deps, lines, writes: mem.writes, stored: mem.stored };
 }
 
 function pairedVault(): Vault {
@@ -51,11 +50,11 @@ describe("abra sync whoami", () => {
     const m = memDeps();
     await cmdSyncWhoami({}, m.deps);
     expect(m.deps.authenticate).toHaveBeenCalledTimes(1);
-    expect(m.deps.saveVault).toHaveBeenCalledTimes(1);
+    expect(m.writes).toHaveBeenCalledTimes(1);
     const id = m.stored().syncIdentity!;
     await cmdSyncWhoami({ json: true }, m.deps);
     expect(m.deps.authenticate).toHaveBeenCalledTimes(1);
-    expect(m.deps.saveVault).toHaveBeenCalledTimes(1);
+    expect(m.writes).toHaveBeenCalledTimes(1);
     const out = m.lines.join("\n");
     expect(out).toContain(id.id);
     expect(out).not.toContain(id.ed25519.privateKey);
@@ -89,7 +88,7 @@ describe("abra sync unpair", () => {
     const m = memDeps(pairedVault(), false);
     await cmdSyncUnpair("mini", {}, m.deps);
     expect(m.deps.authenticate).not.toHaveBeenCalled();
-    expect(m.deps.saveVault).not.toHaveBeenCalled();
+    expect(m.writes).not.toHaveBeenCalled();
   });
 
   it("--yes → approval then removal", async () => {

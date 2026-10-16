@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { abraDir, ensureDir } from "../core/paths.js";
@@ -45,9 +46,18 @@ export function loadUnlockAttempts(): UnlockAttemptsState {
 function saveUnlockAttempts(state: UnlockAttemptsState): void {
   ensureDir();
   const file = attemptsPath();
-  const tmp = `${file}.tmp`;
+  // Unique per writer: concurrent abra processes unlock at the same time.
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    // Windows: another process is replacing it right now; the counter is a speed bump.
+    if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) return;
+    throw err;
+  }
 }
 
 /** Seconds of backoff required before the next attempt, given current failure count. */
@@ -85,5 +95,7 @@ export function recordUnlockFailure(): void {
 
 /** Reset counter after a successful unlock. */
 export function resetUnlockAttempts(): void {
+  const state = loadUnlockAttempts();
+  if (state.failures === 0 && state.lastFailureAt === 0 && fs.existsSync(attemptsPath())) return;
   saveUnlockAttempts({ failures: 0, lastFailureAt: 0 });
 }

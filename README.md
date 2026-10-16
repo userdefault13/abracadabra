@@ -699,6 +699,10 @@ secret payloads.
 - Vault is a single file at `~/.abracadabra/vault.enc`, AES-256-GCM encrypted;
   master key lives in the macOS Keychain (`abracadabra-master-key`)
 - Vault writes are atomic (tmp + rename) with `0600` perms; directory is `0700`
+- Concurrency: every vault write is a read-modify-write under a cross-process
+  lock (`~/.abracadabra/vault.lock`), so concurrent abra processes (CLI, agent,
+  dash, MCP, sync) never drop each other's changes; prompts happen before the
+  lock is taken. Details: [docs/SYNC.md § Concurrency](docs/SYNC.md#concurrency)
 - `sync-state.json` is encrypted with the same master key (legacy plaintext files are migrated on next sync)
 - `abra get`, `abra env`, and unauthenticated `POST /secret` require per-use biometric approval
 - API keys skip Touch ID on `POST /secret` but are scoped to specific projects

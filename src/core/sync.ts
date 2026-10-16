@@ -330,6 +330,50 @@ export function threeWayMerge(
   };
 }
 
+export class VaultChangedDuringSyncError extends Error {
+  constructor() {
+    super("the vault changed while this sync was waiting for approval (conflicts or project deletions differ) — nothing written; re-run the sync");
+    this.name = "VaultChangedDuringSyncError";
+  }
+}
+
+function conflictKey(c: Conflict): string {
+  return `${c.scope}/${c.key}\0${JSON.stringify(c.ours ?? null)}\0${JSON.stringify(c.theirs ?? null)}`;
+}
+
+function sameSet(a: string[], b: string[]): boolean {
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.length === sb.length && sa.every((v, i) => v === sb[i]);
+}
+
+/**
+ * Redo a previewed merge against `fresh` (the vault re-loaded under the vault
+ * lock, with the base re-read there too). Resolutions and deletion approvals
+ * were given for the preview, so if the unresolved conflict set or the project
+ * deletions differ now, refuse instead of applying stale choices.
+ */
+export function remergeUnderLock(
+  fresh: Vault,
+  theirs: Vault,
+  base: Vault | null,
+  preview: { conflicts: Conflict[]; projectDeletions: ProjectDeletion[] },
+  resolutions: Resolutions,
+  peerLabel = "peer",
+): ReturnType<typeof threeWayMerge> {
+  const probe = threeWayMerge(fresh, theirs, base, new Map(), peerLabel);
+  if (
+    !sameSet(probe.conflicts.map(conflictKey), preview.conflicts.map(conflictKey)) ||
+    !sameSet(
+      probe.projectDeletions.map((d) => `${d.side}:${d.project}`),
+      preview.projectDeletions.map((d) => `${d.side}:${d.project}`),
+    )
+  ) {
+    throw new VaultChangedDuringSyncError();
+  }
+  return resolutions.size === 0 ? probe : threeWayMerge(fresh, theirs, base, resolutions, peerLabel);
+}
+
 /** Red dry-run lines for whole-project deletions (shown at top of report). */
 export function formatProjectDeletionLines(
   deletions: ProjectDeletion[],

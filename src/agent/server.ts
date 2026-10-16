@@ -28,8 +28,9 @@ import {
 } from "./protocol.js";
 import {
   decryptVault,
-  encryptVault,
-  writeEncryptedVaultFile,
+  readVaultFile,
+  saveVaultFileForClient,
+  updateVaultFile,
   type Vault,
 } from "../core/vault.js";
 import { vaultFile } from "../core/paths.js";
@@ -329,8 +330,7 @@ async function handleRequest(
         state.touch();
         logOp("vault.save");
         const vault = req.vault as Vault;
-        const enc = encryptVault(vault, state.requireKey());
-        writeEncryptedVaultFile(enc, vaultPath());
+        await saveVaultFileForClient(vault, state.requireKey(), vaultPath(), req.lockToken);
         void running?.inbox?.onVaultSaved(vault);
         return { v: PROTOCOL_VERSION, id, ok: true, op: "vault.save" };
       }
@@ -630,16 +630,9 @@ export async function startAgent(opts?: StartAgentOpts): Promise<{
       base: path.dirname(vaultPath()),
       loadUnlockedVault: async () => {
         if (state.isLocked()) return null;
-        const file = vaultPath();
-        if (!fs.existsSync(file)) return null;
-        const vault = decryptVault(JSON.parse(fs.readFileSync(file, "utf8")), state.requireKey());
-        vault.connections ??= {};
-        vault.apiKeys ??= {};
-        return vault;
+        return readVaultFile(vaultPath(), state.requireKey());
       },
-      saveVault: async (vault) => {
-        writeEncryptedVaultFile(encryptVault(vault, state.requireKey()), vaultPath());
-      },
+      updateVault: (mutator) => updateVaultFile(vaultPath(), () => state.requireKey(), mutator),
       log: (detail) => logOp("sync-inbox", detail),
     };
     inbox = typeof opts?.syncInbox === "function" ? opts.syncInbox(defaults) : new AgentInbox(defaults);

@@ -12,8 +12,10 @@ vi.mock("../core/vault.js", async (importOriginal) => {
   return {
     ...actual,
     loadVault: vi.fn(async () => vault),
-    saveVault: vi.fn(async (v: typeof vault) => {
-      vault = v;
+    updateVault: vi.fn(async (mutator: import("../core/vault.js").VaultMutator) => {
+      const out = await mutator(vault);
+      if (out && out !== actual.VAULT_UNCHANGED) vault = out;
+      return vault;
     }),
     __setVault(v: typeof vault) {
       vault = v;

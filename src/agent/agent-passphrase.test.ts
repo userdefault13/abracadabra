@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { seedVaultFile } from "../../test/fixtures/seed-vault.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -30,7 +31,6 @@ import {
   emptyVault,
   loadVault,
   encryptVault,
-  writeEncryptedVaultFile,
 } from "../core/vault.js";
 import { VaultLockedError } from "../platform/keystore-passphrase.js";
 import { setDefaultKdfForTests, writeMasterKeyFile } from "../platform/master-key-file.js";
@@ -155,7 +155,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
   });
 
   it("unlock.key allowed peer → unlocked; vault.load works; status has no key", async () => {
-    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    await seedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     const { state } = await startAgent({
       socketPath,
       vaultPath: () => path.resolve(vaultPath),
@@ -264,7 +264,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
   });
 
   it("unlock.key that does not decrypt vault.enc → rejected; still locked", async () => {
-    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    await seedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     const { state } = await startAgent({
       socketPath,
       vaultPath: () => path.resolve(vaultPath),
@@ -389,7 +389,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
 
   it("cmdUnlock passphrase backend: one prompt, pushes unlock.key", async () => {
     writeMasterKeyFile(masterKey, PASS);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    await seedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     await startAgent({
       socketPath,
       vaultPath: () => path.resolve(vaultPath),
@@ -447,7 +447,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
 
   it("cmdUnlock agent forbidden_peer → warning, exit ok", async () => {
     writeMasterKeyFile(masterKey, PASS);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    await seedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     await startAgent({
       socketPath,
       vaultPath: () => path.resolve(vaultPath),
@@ -492,7 +492,7 @@ describe.skipIf(process.platform === "win32")("abra agent passphrase-file", () =
 
   it("PassphraseAuth still prompts while agent unlocked", async () => {
     writeMasterKeyFile(masterKey, PASS);
-    writeEncryptedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
+    await seedVaultFile(encryptVault(emptyVault(), masterKey), vaultPath);
     await startAgent({
       socketPath,
       vaultPath: () => path.resolve(vaultPath),

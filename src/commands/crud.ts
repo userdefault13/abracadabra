@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { loadVault, saveVault, assertProject, isReservedProjectName } from "../core/vault.js";
+import { loadVault, updateVault, assertProject, isReservedProjectName } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { prompt, promptHidden } from "../core/prompt.js";
 import { authenticate, biometricsSkipped } from "../platform/index.js";
@@ -50,10 +50,10 @@ export function registerProjectCommands(program: Command): void {
         if (isReservedProjectName(name)) {
           fail(`"${name}" is reserved (system project). Use: abra treasury init`);
         }
-        const vault = await loadVault();
-        if (vault.projects[name]) fail(`Project already exists: ${name}`);
-        vault.projects[name] = { createdAt: Date.now(), vars: {} };
-        await saveVault(vault);
+        await updateVault((vault) => {
+          if (vault.projects[name]) throw new Error(`Project already exists: ${name}`);
+          vault.projects[name] = { createdAt: Date.now(), vars: {} };
+        });
         console.log(green(`✓ Created project ${bold(name)}`));
       } catch (err) {
         fail(err);
@@ -77,8 +77,10 @@ export function registerProjectCommands(program: Command): void {
           console.log(dim("Aborted"));
           return;
         }
-        delete vault.projects[name];
-        await saveVault(vault);
+        await updateVault((fresh) => {
+          assertProject(fresh, name);
+          delete fresh.projects[name];
+        });
         console.log(green(`✓ Deleted project ${name}`));
       } catch (err) {
         fail(err);
@@ -133,23 +135,30 @@ function readStdin(): Promise<string> {
 export async function setVar(projectName: string, key: string, opts: SetOptions): Promise<void> {
   try {
     const vault: Vault = await loadVault();
-    let project = vault.projects[projectName];
-    if (!project) {
-      project = { createdAt: Date.now(), vars: {} };
-      vault.projects[projectName] = project;
-      console.log(green(`✓ Created project ${bold(projectName)}`));
-    }
-    const existing = project.vars[key];
-    const isSecret = existing ? existing.secret : opts.secret !== false;
+    const before = vault.projects[projectName]?.vars[key];
+    const askSecret = before ? before.secret : opts.secret !== false;
     const value = opts.stdin
       ? await readStdin()
-      : isSecret && !opts.visible
+      : askSecret && !opts.visible
         ? await promptHidden(`Value for ${key} ${dim("(hidden input)")}: `)
         : await prompt(`Value for ${key}: `);
     if (!value) fail("Empty value");
-    project.vars[key] = { value, secret: isSecret, updatedAt: Date.now() };
-    await saveVault(vault);
-    console.log(green(`✓ ${existing ? "Updated" : "Added"} ${key} in ${projectName}`));
+    let createdProject = false;
+    let existed = false;
+    await updateVault((fresh) => {
+      let project = fresh.projects[projectName];
+      if (!project) {
+        project = { createdAt: Date.now(), vars: {} };
+        fresh.projects[projectName] = project;
+        createdProject = true;
+      }
+      const existing = project.vars[key];
+      existed = existing !== undefined;
+      const isSecret = existing ? existing.secret : opts.secret !== false;
+      project.vars[key] = { value, secret: isSecret, updatedAt: Date.now() };
+    });
+    if (createdProject) console.log(green(`✓ Created project ${bold(projectName)}`));
+    console.log(green(`✓ ${existed ? "Updated" : "Added"} ${key} in ${projectName}`));
   } catch (err) {
     fail(err);
   }
@@ -171,11 +180,11 @@ export async function getVar(projectName: string, key: string): Promise<void> {
 
 export async function removeVar(projectName: string, key: string): Promise<void> {
   try {
-    const vault = await loadVault();
-    const project = assertProject(vault, projectName);
-    if (!project.vars[key]) fail(`Var not found: ${key} in ${projectName}`);
-    delete project.vars[key];
-    await saveVault(vault);
+    await updateVault((vault) => {
+      const project = assertProject(vault, projectName);
+      if (!project.vars[key]) throw new Error(`Var not found: ${key} in ${projectName}`);
+      delete project.vars[key];
+    });
     console.log(green(`✓ Deleted ${key} from ${projectName}`));
   } catch (err) {
     fail(err);

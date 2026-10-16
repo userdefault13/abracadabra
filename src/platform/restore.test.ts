@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sealBundle, openBundle } from "../core/backup.js";
-import { encryptVault, loadVault, writeEncryptedFile } from "../core/vault.js";
+import { encryptVault, loadVault, withVaultLock, writeEncryptedFile } from "../core/vault.js";
 import { restoreMasterKey, resetPlatformForTests, getMasterKey } from "./index.js";
 import { setDefaultKdfForTests } from "./master-key-file.js";
 
@@ -54,7 +54,7 @@ describe("restoreMasterKey (G2)", () => {
     resetPlatformForTests();
 
     await restoreMasterKey(Buffer.from(payload.masterKey, "base64"), bundlePass);
-    writeEncryptedFile(payload.vaultEnc);
+    await withVaultLock(() => writeEncryptedFile(payload.vaultEnc));
 
     const loaded = await loadVault();
     expect(loaded.projects.gotest.vars.TOKEN.value).toBe("secret-value");

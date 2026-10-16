@@ -48,6 +48,7 @@ This doc defines platform abstractions, a phased rollout, and a Tier 1 task list
 | `src/auth/touchid.ts` | compiles `auth-helper.swift` with `swiftc` | **Yes** — Swift/LAContext is Darwin-only |
 | `scripts/postinstall.js` | runs `npm run setup` (swiftc) on `darwin` only | Warn-only on other platforms |
 | `src/core/vault.ts` | AES-256-GCM, `~/.abracadabra/vault.enc` | **No** — portable |
+| `src/core/vault-lock.ts` | `vault.lock` beside `vault.enc` (exclusive create, rename-then-recheck stale break, pid/age staleness) | **No** — portable; Windows rename/read sharing errors are retried |
 | `src/core/backup.ts` | scrypt + AES bundle with vault + master key | **No** — portable |
 | Web dash passkeys | `@simplewebauthn/server` | Partial — server still calls `authenticate()` for sensitive actions |
 
@@ -481,6 +482,7 @@ Modelled on 1Password’s Linux design: a **background user agent** holds the un
 | Max age | Absolute **8 h** ceiling (`ABRA_AGENT_MAX_AGE_SECONDS`, values > 8h clamped); activity never extends it |
 | Sleep lock | Linux: subprocess watches logind `PrepareForSleep(true)` via `/usr/bin/gdbus` (preferred) or `/usr/bin/dbus-monitor`; locks the agent. Best-effort (no logind inhibitor). Graceful no-op if binaries missing |
 | Crypto | Agent encrypts/decrypts `vault.enc` with the same AES-256-GCM helpers as `core/vault.ts` |
+| Concurrency | `vault.save` carries the client's vault-lock token (the CLI holds `vault.lock` around its read-modify-write); the agent re-checks the token against the lockfile before writing, or takes the lock itself for clients that send none. Inbox auto-apply re-loads and writes under the same lock. If the agent idle-locks under `vault.lock`, save fails fast (`agent locked during save — rerun`) instead of unlocking/prompting while holding the lock. See [SYNC.md § Concurrency](SYNC.md#concurrency) |
 | Fresh process | Always starts **locked**; no key file on disk for agent state — after reboot everything stays locked until `abra unlock` |
 
 **Enabled by default** only on Linux when `XDG_RUNTIME_DIR` is set. Elsewhere opt-in with `ABRA_AGENT=1` (+ socket path). `ABRA_AGENT=0` disables. macOS default behavior is unchanged (no agent). **Windows is unsupported** — `isAgentEnabled()` always returns false on win32 (even with `ABRA_AGENT=1`). **Sensitive agent ops are Linux-only** (no `/proc` / `ss` peer check elsewhere); on macOS with `ABRA_AGENT=1`, unlock/vault I/O return `forbidden_peer` and the client falls back to the direct keystore.

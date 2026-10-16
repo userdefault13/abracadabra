@@ -3,8 +3,8 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadVault, saveVault, assertProject, assertConnection } from "../core/vault.js";
-import type { Vault } from "../core/vault.js";
+import { loadVault, updateVault, assertProject, assertConnection } from "../core/vault.js";
+import type { Vault, VarEntry } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
 
 const execFileAsync = promisify(execFile);
@@ -66,36 +66,45 @@ export interface GeneratedWallet {
   setPayTo: boolean;
 }
 
+/** Write generated vars into the project, re-loaded under the vault lock. */
+async function storeProjectVars(projectName: string, vars: Record<string, VarEntry>): Promise<void> {
+  await updateVault((fresh) => {
+    Object.assign(assertProject(fresh, projectName).vars, vars);
+  });
+}
+
 /**
  * Core wallet generation: writes to the vault and RETURNS results.
  * No printing — safe for reuse inside the MCP stdio server.
+ * `vault` is only read (project check); keys are generated before the vault lock is taken.
  */
 export async function generateWalletsIntoProject(
-  vault: import("../core/vault.js").Vault,
+  vault: Vault,
   projectName: string,
   opts: KeygenOptions,
 ): Promise<GeneratedWallet[]> {
-  const project = assertProject(vault, projectName);
+  assertProject(vault, projectName);
   const count = Math.max(1, Math.min(Number(opts.count ?? 1) || 1, 20));
   const results: GeneratedWallet[] = [];
+  const vars: Record<string, VarEntry> = {};
   const now = Date.now();
 
   for (let i = 0; i < count; i++) {
     const wallet = await castNewWallet();
     const suffix = count > 1 ? `_${i + 1}` : "";
-    project.vars[`EVM_ADDRESS${suffix}`] = {
+    vars[`EVM_ADDRESS${suffix}`] = {
       value: wallet.address,
       secret: false,
       updatedAt: now,
     };
-    project.vars[`EVM_PRIVATE_KEY${suffix}`] = {
+    vars[`EVM_PRIVATE_KEY${suffix}`] = {
       value: wallet.private_key,
       secret: true,
       updatedAt: now,
     };
     const setPayTo = opts.payTo === true && i === 0;
     if (setPayTo) {
-      project.vars.PAY_TO_ADDRESS = {
+      vars.PAY_TO_ADDRESS = {
         value: wallet.address,
         secret: false,
         updatedAt: now,
@@ -104,7 +113,7 @@ export async function generateWalletsIntoProject(
     results.push({ varSuffix: suffix, address: wallet.address, setPayTo });
   }
 
-  await saveVault(vault);
+  await storeProjectVars(projectName, vars);
   return results;
 }
 
@@ -141,21 +150,22 @@ export async function generateSshKeysIntoProject(
   projectName: string,
   opts: KeygenOptions,
 ): Promise<GeneratedSshKey[]> {
-  const project = assertProject(vault, projectName);
+  assertProject(vault, projectName);
   const count = Math.max(1, Math.min(Number(opts.count ?? 1) || 1, 20));
   const results: GeneratedSshKey[] = [];
+  const vars: Record<string, VarEntry> = {};
   const now = Date.now();
 
   for (let i = 0; i < count; i++) {
     const suffix = count > 1 ? `_${i + 1}` : "";
     const comment = opts.comment ?? `${projectName}${suffix}@${os.hostname()}`;
     const { publicKey, privateKey } = await sshKeygenPair(comment);
-    project.vars[`SSH_PRIVATE_KEY${suffix}`] = { value: privateKey, secret: true, updatedAt: now };
-    project.vars[`SSH_PUBLIC_KEY${suffix}`] = { value: publicKey, secret: false, updatedAt: now };
+    vars[`SSH_PRIVATE_KEY${suffix}`] = { value: privateKey, secret: true, updatedAt: now };
+    vars[`SSH_PUBLIC_KEY${suffix}`] = { value: publicKey, secret: false, updatedAt: now };
     results.push({ varSuffix: suffix, publicKey, comment });
   }
 
-  await saveVault(vault);
+  await storeProjectVars(projectName, vars);
   return results;
 }
 
@@ -218,7 +228,7 @@ export async function mintCloudflareTokenIntoProject(
   projectName: string,
   opts: { perms?: string; expiresIn?: string; account?: string },
 ): Promise<CloudflareTokenResult> {
-  const project = assertProject(vault, projectName);
+  assertProject(vault, projectName);
   const conn = assertConnection(vault, "cloudflare");
   const adminToken = conn.vars.CLOUDFLARE_API_TOKEN?.value;
   if (!adminToken) throw new Error("cloudflare connection has no CLOUDFLARE_API_TOKEN stored");
@@ -289,9 +299,10 @@ export async function mintCloudflareTokenIntoProject(
   }
 
   const now = Date.now();
-  project.vars.CLOUDFLARE_API_TOKEN = { value: data.result.value, secret: true, updatedAt: now };
-  project.vars.CLOUDFLARE_ACCOUNT_ID = { value: accountId, secret: false, updatedAt: now };
-  await saveVault(vault);
+  await storeProjectVars(projectName, {
+    CLOUDFLARE_API_TOKEN: { value: data.result.value, secret: true, updatedAt: now },
+    CLOUDFLARE_ACCOUNT_ID: { value: accountId, secret: false, updatedAt: now },
+  });
   return {
     tokenId: data.result.id,
     tokenName: `abra-${projectName}`,

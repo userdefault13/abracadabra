@@ -8,6 +8,7 @@ import { SyncInbox } from "../sync/inbox.js";
 import { ReplayCache, anchorsFile, readAnchors, syncInboxDir, writeAnchors, anchorsFromVault } from "../core/sync-inbox-store.js";
 import { cmdSyncAccept, cmdSyncInbox, cmdSyncUnpair, defaultSyncDeps, type SyncDeps } from "./sync.js";
 import { makePair } from "../../test/fixtures/sync-vaults.js";
+import { memVault } from "../../test/fixtures/mem-vault.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -17,28 +18,26 @@ afterEach(() => {
 function memDeps(initial: Vault, opts: { tailscale?: string | null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "abra-cli-inbox-"));
   dirs.push(base);
-  let stored = structuredClone(initial);
+  const mem = memVault(initial);
   const lines: string[] = [];
   const deps: SyncDeps = {
     ...defaultSyncDeps(),
     abraDir: () => base,
     authenticate: vi.fn(async () => {}),
-    loadVault: async () => structuredClone(stored),
-    saveVault: vi.fn(async (v: Vault) => {
-      stored = structuredClone(v);
-    }),
+    loadVault: mem.loadVault,
+    updateVault: mem.updateVault,
     confirm: vi.fn(async () => true),
     detectTailscale: vi.fn(async () => (opts.tailscale === undefined ? "100.64.7.8" : opts.tailscale)),
     agentInboxStatus: async () => null,
     log: (l) => lines.push(l),
   };
-  return { deps, base, lines, stored: () => stored };
+  return { deps, base, lines, writes: mem.writes, stored: mem.stored };
 }
 
 /** Queue envelopes the way a locked agent would. */
 async function queueLocked(base: string, receiver: Vault, envs: unknown[]) {
   writeAnchors(base, anchorsFromVault({ ...receiver, syncInbox: { enabled: true, port: 0 } }));
-  const inbox = new SyncInbox({ base, loadUnlockedVault: async () => null, saveVault: async () => {} });
+  const inbox = new SyncInbox({ base, loadUnlockedVault: async () => null, updateVault: memVault().updateVault });
   for (const e of envs) expect((await inbox.receive(e)).response.status).toBe("queued");
 }
 
@@ -185,7 +184,7 @@ describe("abra sync inbox list / --apply / --reject", () => {
     const env = sealForPeer(source, "mini", ["app"]);
     await queueLocked(m.base, receiver, [env]);
     await expect(cmdSyncInbox({ apply: "all" }, m.deps)).rejects.toThrow(/could not be applied/);
-    expect(m.deps.saveVault).not.toHaveBeenCalled();
+    expect(m.writes).not.toHaveBeenCalled();
     expect(m.lines.join("\n")).toContain("unknown-sender");
     expect(fs.existsSync(path.join(syncInboxDir(m.base), "queue", env.bundleId))).toBe(true);
   });
@@ -200,7 +199,7 @@ describe("abra sync inbox list / --apply / --reject", () => {
     await expect(cmdSyncInbox({ apply: a.bundleId, reject: "all" }, m.deps)).rejects.toThrow(/only one/);
     await cmdSyncInbox({ reject: "all" }, m.deps);
     expect(fs.readdirSync(path.join(syncInboxDir(m.base), "queue"))).toEqual([]);
-    expect(m.deps.saveVault).not.toHaveBeenCalled();
+    expect(m.writes).not.toHaveBeenCalled();
     expect(fs.existsSync(anchorsFile(m.base))).toBe(true);
   });
 });

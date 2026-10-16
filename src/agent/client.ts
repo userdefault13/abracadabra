@@ -83,6 +83,7 @@ export async function agentRequest(
         vault: Vault;
         vaultPath?: string;
         keystoreBackend?: string;
+        lockToken?: string;
       }
     | {
         op: "grant.add";
@@ -253,10 +254,14 @@ export async function agentVaultLoad(opts?: AgentClientOpts): Promise<VaultLoadR
 
 export async function agentVaultSave(
   vault: Vault,
-  opts?: AgentClientOpts,
+  opts?: AgentClientOpts & { lockToken?: string },
 ): Promise<void> {
   const binding = clientVaultBinding();
-  const res = await agentRequest({ op: "vault.save", vault, ...binding }, opts);
+  const { lockToken, ...clientOpts } = opts ?? {};
+  const res = await agentRequest(
+    { op: "vault.save", vault, ...binding, ...(lockToken ? { lockToken } : {}) },
+    clientOpts,
+  );
   if (!res.ok) {
     throw new AgentClientError(res.error, res.code);
   }
@@ -348,20 +353,27 @@ export async function agentGrantCheck(
 }
 
 /**
- * Load vault via agent: unlock if locked, then vault.load.
- * Throws AgentClientError — caller should fall back on unavailable/connect/timeout/locked.
+ * Load vault via agent: unlock if locked (unless `allowUnlock: false`), then
+ * vault.load. Throws AgentClientError — caller should fall back on
+ * unavailable/connect/timeout/locked.
  *
  * For passphrase-file agents, bare `unlock` returns `locked` (no prompt). That
  * surfaces as AgentClientError(locked), which isAgentUnavailable treats as
  * fallback-to-direct (caller gets VaultLockedError from the keystore).
+ *
+ * Callers holding the vault write lock must pass `allowUnlock: false` — unlock
+ * may prompt, and the lock must never be held across a prompt.
  */
-export async function loadVaultViaAgent(opts?: AgentClientOpts): Promise<Vault> {
+export async function loadVaultViaAgent(
+  opts?: AgentClientOpts & { allowUnlock?: boolean },
+): Promise<Vault> {
+  const { allowUnlock = true, ...clientOpts } = opts ?? {};
   const empty = async (): Promise<Vault> => {
     const { emptyVault } = await import("../core/vault.js");
     return emptyVault();
   };
 
-  const tryLoad = async (): Promise<VaultLoadResult> => agentVaultLoad(opts);
+  const tryLoad = async (): Promise<VaultLoadResult> => agentVaultLoad(clientOpts);
 
   const unwrap = async (result: VaultLoadResult): Promise<Vault> => {
     if ("vault" in result) return result.vault;
@@ -371,25 +383,30 @@ export async function loadVaultViaAgent(opts?: AgentClientOpts): Promise<Vault> 
   try {
     return await unwrap(await tryLoad());
   } catch (e) {
-    if (e instanceof AgentClientError && e.code === "locked") {
-      await agentUnlock(opts);
+    if (allowUnlock && e instanceof AgentClientError && e.code === "locked") {
+      await agentUnlock(clientOpts);
       return unwrap(await tryLoad());
     }
     throw e;
   }
 }
 
+/**
+ * Save via agent. Never unlocks: `saveVault` runs under vault.lock, and
+ * `agentUnlock` may prompt (Touch ID / passphrase). `updateVault` warms the
+ * unlock before taking the lock; if the agent idle-locks between that load and
+ * this save, fail fast so the caller unlocks and retries without holding the
+ * lock across a prompt.
+ */
 export async function saveVaultViaAgent(
   vault: Vault,
-  opts?: AgentClientOpts,
+  opts?: AgentClientOpts & { lockToken?: string },
 ): Promise<void> {
   try {
     await agentVaultSave(vault, opts);
   } catch (e) {
     if (e instanceof AgentClientError && e.code === "locked") {
-      await agentUnlock(opts);
-      await agentVaultSave(vault, opts);
-      return;
+      throw new AgentClientError("agent locked during save — rerun", "locked");
     }
     throw e;
   }

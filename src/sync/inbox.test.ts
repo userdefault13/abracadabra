@@ -5,7 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { Vault } from "../core/vault.js";
+import { VAULT_UNCHANGED, type Vault } from "../core/vault.js";
 import { generateSyncIdentity } from "./identity.js";
 import { sealForPeer, sealProjects } from "./envelope.js";
 import { upsertAcceptRule } from "./accept.js";
@@ -59,10 +59,14 @@ function harness(initial: Vault, opts: { locked?: boolean; mirror?: boolean } = 
     base,
     now: () => state.now,
     loadUnlockedVault: async () => (state.locked ? null : structuredClone(state.vault)),
-    saveVault: async (v) => {
+    updateVault: async (mutator) => {
       if (state.locked) throw new Error("Agent is locked");
-      state.vault = structuredClone(v);
-      saves.push(v);
+      const draft = structuredClone(state.vault);
+      const out = await mutator(draft);
+      if (out === VAULT_UNCHANGED) return draft;
+      state.vault = structuredClone(out ?? draft);
+      saves.push(state.vault);
+      return state.vault;
     },
     log: (l) => logs.push(l),
   });
@@ -401,7 +405,9 @@ describe("AgentInbox controller (listener lifecycle)", () => {
     const c = new AgentInbox({
       base,
       loadUnlockedVault: async () => vault(),
-      saveVault: async () => {},
+      updateVault: async () => {
+        throw new Error("unexpected vault write");
+      },
       log: (l) => logs.push(l),
       detectTailscale: async () => ts,
       loadTls: () => ({ key: "k", cert: "c" }),
@@ -482,8 +488,11 @@ describe("AgentInbox controller (listener lifecycle)", () => {
     const c = new AgentInbox({
       base,
       loadUnlockedVault: async () => (locked ? null : structuredClone(vault)),
-      saveVault: async (v) => {
-        vault = v;
+      updateVault: async (mutator) => {
+        const draft = structuredClone(vault);
+        const out = await mutator(draft);
+        if (out !== VAULT_UNCHANGED) vault = out ?? draft;
+        return vault;
       },
       log: () => {},
       loadTls: () => ({ key: "k", cert: "c" }),

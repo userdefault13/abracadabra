@@ -6,7 +6,7 @@ import {
   verifyAuthenticationResponse,
 } from "@simplewebauthn/server";
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from "@simplewebauthn/server";
-import { loadVault, saveVault } from "../core/vault.js";
+import { loadVault, updateVault } from "../core/vault.js";
 import type { Vault, PasskeyCredential } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
 import { send } from "./http-utils.js";
@@ -105,16 +105,16 @@ export async function registerVerify(
       return;
     }
     const { credential } = verification.registrationInfo;
-    const vault = await loadVault();
-    vault.passkeys ??= [];
-    vault.passkeys.push({
-      id: credential.id,
-      publicKey: Buffer.from(credential.publicKey).toString("base64"),
-      counter: credential.counter,
-      rpId,
-      createdAt: Date.now(),
+    await updateVault((vault) => {
+      vault.passkeys ??= [];
+      vault.passkeys.push({
+        id: credential.id,
+        publicKey: Buffer.from(credential.publicKey).toString("base64"),
+        counter: credential.counter,
+        rpId,
+        createdAt: Date.now(),
+      });
     });
-    await saveVault(vault);
     console.log(`✓ passkey registered for web dash (rp: ${rpId})`);
     issueSession(res);
     send(res, 200, { ok: true });
@@ -180,8 +180,12 @@ export async function authVerify(
       send(res, 401, { error: "passkey verification failed" });
       return;
     }
-    cred.counter = verification.authenticationInfo.newCounter;
-    await saveVault(vault);
+    const newCounter = verification.authenticationInfo.newCounter;
+    await updateVault((fresh) => {
+      const stored = (fresh.passkeys ?? []).find((p) => p.id === cred.id);
+      if (!stored) throw new Error("passkey was removed");
+      stored.counter = Math.max(stored.counter, newCounter);
+    });
     console.log("✓ web dash session opened (passkey)");
     issueSession(res);
     send(res, 200, { ok: true });

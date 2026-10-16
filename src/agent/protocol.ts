@@ -85,6 +85,8 @@ export type AgentRequest =
       vault: Vault;
       vaultPath?: string;
       keystoreBackend?: string;
+      /** Token of the vault.lock the client holds; absent from pre-lock clients. */
+      lockToken?: string;
     }
   | {
       v: typeof PROTOCOL_VERSION;
@@ -222,7 +224,11 @@ export function isAgentRequest(raw: unknown): raw is AgentRequest {
     case "unlock.key":
       return typeof r.key === "string";
     case "vault.save":
-      return r.vault !== undefined && typeof r.vault === "object";
+      return (
+        r.vault !== undefined &&
+        typeof r.vault === "object" &&
+        (r.lockToken === undefined || typeof r.lockToken === "string")
+      );
     case "grant.add":
       return (
         typeof r.project === "string" &&

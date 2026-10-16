@@ -2,7 +2,7 @@ import fs from "node:fs";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadVault, saveVault, assertProject } from "../core/vault.js";
+import { loadVault, updateVault, assertProject } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import { authenticate } from "../platform/index.js";
 import { send } from "./http-utils.js";
@@ -63,8 +63,10 @@ export async function createProject(body: { name?: string }, res: ServerResponse
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  vault.projects[name] = { createdAt: Date.now(), vars: {} };
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    if (fresh.projects[name]) throw new Error(`project already exists: ${name}`);
+    fresh.projects[name] = { createdAt: Date.now(), vars: {} };
+  });
   console.log(`✓ dash: created project "${name}"`);
   send(res, 200, { ok: true, name });
 }
@@ -80,8 +82,9 @@ export async function deleteProject(name: string, res: ServerResponse): Promise<
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  delete vault.projects[name];
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    delete fresh.projects[name];
+  });
   console.log(`✓ dash: deleted project "${name}"`);
   send(res, 200, { ok: true });
 }
@@ -112,12 +115,12 @@ export async function createVar(projectName: string, body: { key?: string; value
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  project.vars[key] = {
-    value: body.value,
-    secret: body.secret !== false,
-    updatedAt: Date.now(),
-  };
-  await saveVault(vault);
+  const value = body.value;
+  await updateVault((fresh) => {
+    const p = assertProject(fresh, projectName);
+    if (key in p.vars) throw new Error(`var already exists: ${key} (use PUT)`);
+    p.vars[key] = { value, secret: body.secret !== false, updatedAt: Date.now() };
+  });
   console.log(`✓ dash: added ${key} to "${projectName}"`);
   send(res, 200, { ok: true });
 }
@@ -141,12 +144,13 @@ export async function updateVar(projectName: string, key: string, body: { value?
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  project.vars[key] = {
-    value: body.value,
-    secret: body.secret ?? project.vars[key].secret,
-    updatedAt: Date.now(),
-  };
-  await saveVault(vault);
+  const value = body.value;
+  await updateVault((fresh) => {
+    const p = assertProject(fresh, projectName);
+    const existing = p.vars[key];
+    if (!existing) throw new Error(`var not found: ${key}`);
+    p.vars[key] = { value, secret: body.secret ?? existing.secret, updatedAt: Date.now() };
+  });
   console.log(`✓ dash: updated ${key} in "${projectName}"`);
   send(res, 200, { ok: true });
 }
@@ -170,8 +174,10 @@ export async function deleteVar(projectName: string, key: string, res: ServerRes
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  delete project.vars[key];
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    const p = fresh.projects[projectName];
+    if (p) delete p.vars[key];
+  });
   console.log(`✓ dash: deleted ${key} from "${projectName}"`);
   send(res, 200, { ok: true });
 }
@@ -224,8 +230,9 @@ export async function deleteConnection(provider: string, res: ServerResponse): P
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  delete vault.connections[provider];
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    delete fresh.connections?.[provider];
+  });
   console.log(`✓ dash: disconnected ${provider}`);
   send(res, 200, { ok: true });
 }
@@ -464,8 +471,10 @@ export async function createApiKey(body: { name?: string; projects?: unknown; ex
   const { record, fullKey } = generateApiKey(name, projects, {
     expiresInDays: expiresInDays > 0 ? expiresInDays : undefined,
   });
-  vault.apiKeys![record.id] = record;
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    fresh.apiKeys ??= {};
+    fresh.apiKeys[record.id] = record;
+  });
   console.log(`✓ dash: issued API key "${name}" (${record.id})`);
   send(res, 200, { ok: true, key: { ...record }, fullKey }); // fullKey shown exactly once
 }
@@ -481,8 +490,9 @@ export async function revokeApiKey(id: string, res: ServerResponse): Promise<voi
     send(res, 403, { error: "biometric approval denied" });
     return;
   }
-  delete vault.apiKeys[id];
-  await saveVault(vault);
+  await updateVault((fresh) => {
+    delete fresh.apiKeys?.[id];
+  });
   console.log(`✓ dash: revoked API key ${id}`);
   send(res, 200, { ok: true });
 }

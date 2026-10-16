@@ -268,6 +268,31 @@ X25519 key. A sender doesn't need to trust the certificate for safety.
   and removes the inbox trust mirror, so a cloned vault never shares an identity
   with its origin. **Re-pair (and re-enable the inbox) after a restore.**
 
+## Concurrency
+
+Every write to `vault.enc` — CLI commands, the TUI, the web dash, MCP tools, LAN
+host pushes, USB/LAN/cartridge restores and merges, and abra-agent's inbox
+auto-apply — is a read-modify-write under one cross-process lock,
+`~/.abracadabra/vault.lock`. The vault is re-loaded *inside* the lock and saved
+atomically (tmp file + rename), so an inbox auto-apply that races
+`abra set` (or two CLI commands) can't drop either change.
+
+- Prompts (Touch ID, passphrase, PIN, conflict choices, safety codes) and network
+  waits happen **before** the lock is taken; it is held for milliseconds.
+- If abra-agent idle-locks between the warm unlock and the locked save, the save
+  path fails fast with `agent locked during save — rerun` (it does **not** unlock
+  or fall back to the keystore while holding `vault.lock`). Unlock and retry.
+- Merges (`abra usb sync`, LAN sync, inbox `--apply`) are recomputed on the
+  freshly loaded vault. If the conflicts or project deletions you approved no
+  longer match, the sync stops without writing — re-run it.
+- A LAN host merges a peer's push with edits made on the host since the peer
+  pulled, and refuses the push (409) if they conflict.
+- A waiter gives up after ~10 s with an error naming the holder's pid and the
+  lock's age. A lock whose process died, or that is older than 30 s, is broken
+  automatically (rename aside, re-check token, then discard — so two waiters
+  cannot both break the same lock and both proceed). A holder that lost its lock
+  that way refuses to write.
+
 ## Threat notes
 
 - The safety-code comparison is what defeats a man-in-the-middle; the TLS

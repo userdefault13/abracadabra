@@ -5,6 +5,7 @@ import {
   createInboxRequestHandler,
   startInboxListener,
   type InboxListener,
+  type SyncInboxDeps,
 } from "../sync/inbox.js";
 import {
   anchorsFile,
@@ -36,7 +37,8 @@ export interface AgentInboxDeps {
   /** abra dir (holds vault.enc and sync-inbox/). */
   base: string;
   loadUnlockedVault: () => Promise<Vault | null>;
-  saveVault: (vault: Vault) => Promise<void>;
+  /** Locked read-modify-write of vault.enc (re-loads inside the lock). */
+  updateVault: SyncInboxDeps["updateVault"];
   log: (detail: string) => void;
   detectTailscale?: () => Promise<string | null>;
   loadTls?: (base: string) => { key: string; cert: string };
@@ -56,7 +58,7 @@ export class AgentInbox implements AgentInboxController {
     this.inbox = new SyncInbox({
       base: deps.base,
       loadUnlockedVault: deps.loadUnlockedVault,
-      saveVault: deps.saveVault,
+      updateVault: deps.updateVault,
       now: deps.now,
       log: deps.log,
     });

@@ -4,9 +4,10 @@ import type { BackupBundle } from "../core/backup.js";
 import { openBundle, openAnyBundle, sealBundle, ScopedBundleError } from "../core/backup.js";
 import {
   loadVault,
-  saveVault,
+  updateVault,
   encryptVaultForExport,
   decryptEnvelope,
+  VAULT_UNCHANGED,
 } from "../core/vault.js";
 import type { Vault } from "../core/vault.js";
 import {
@@ -21,6 +22,7 @@ import {
   saveSyncState,
   lanPeerId,
   formatProjectDeletionLines,
+  remergeUnderLock,
   type Resolutions,
   type ProjectDeletion,
 } from "../core/sync.js";
@@ -360,20 +362,16 @@ export async function applyLanSync(
   const local = await loadVault();
   const peerId = lanPeerId(deviceId);
   const base = (await loadSyncState(peerId))?.base ?? null;
+  const probe = threeWayMerge(local, remote, base, new Map(), "LAN peer");
   const resolutions: Resolutions = new Map();
   if (force) {
-    const probe = threeWayMerge(local, remote, base, new Map(), "LAN peer");
     for (const c of probe.conflicts) {
       resolutions.set(`${c.scope}/${c.key}`, force === "theirs" ? c.theirs : c.ours);
     }
   }
-  const { merged, conflicts, report, projectDeletions } = threeWayMerge(
-    local,
-    remote,
-    base,
-    resolutions,
-    "LAN peer",
-  );
+  const { conflicts, report, projectDeletions } = force
+    ? threeWayMerge(local, remote, base, resolutions, "LAN peer")
+    : probe;
   if (conflicts.length > 0 && !force) throw new LanConflictError(conflicts.map(toConflictInfo));
   if (projectDeletions.length > 0 && !opts?.allowDeletes) {
     throw new LanProjectDeleteError(projectDeletions.map((d) => d.project));
@@ -390,7 +388,18 @@ export async function applyLanSync(
     return { changed: false, report: [] };
   }
 
-  await saveVault(merged);
+  // Base, local and merge are redone under the vault lock; the push happens after it is released.
+  const merged = await updateVault(async (fresh) => {
+    const lockedBase = (await loadSyncState(peerId))?.base ?? null;
+    return remergeUnderLock(
+      fresh,
+      remote,
+      lockedBase,
+      { conflicts: probe.conflicts, projectDeletions },
+      resolutions,
+      "LAN peer",
+    ).merged;
+  });
   const masterKey = await getMasterKey();
   const out = sealBundle(encryptVaultForExport(merged, masterKey), masterKey, pin);
   await pushBundle(target, pin, out, fp);
@@ -472,7 +481,7 @@ export async function scopedLanSync(
   const approved = { value: false };
   const local = await loadVaultForScoped(opts.dryRun === true, approved);
 
-  const { merged, report, changed } = mergeScopedProjects(local, payload.projects, {
+  const { report, changed } = mergeScopedProjects(local, payload.projects, {
     theirs: opts.theirs === true,
   });
   const lines = formatScopedReport(report);
@@ -492,9 +501,14 @@ export async function scopedLanSync(
       Object.keys(payload.projects).join(", ");
     await authenticate(`abracadabra: merge LAN project(s) ${names} into this vault`);
   }
-  await saveVault(merged);
+  let applied: { changed: boolean; lines: string[] } = { changed, lines };
+  await updateVault((fresh) => {
+    const r = mergeScopedProjects(fresh, payload.projects, { theirs: opts.theirs === true });
+    applied = { changed: r.changed, lines: formatScopedReport(r.report) };
+    return r.changed ? r.merged : VAULT_UNCHANGED;
+  });
   // NEVER push, NEVER sync-state, NEVER getMasterKey.
-  return { changed: true, report: lines, dryRun: false };
+  return { changed: applied.changed, report: applied.lines, dryRun: false };
 }
 
 /** Browse mDNS for LAN sync hosts (waits briefly for announcements). */

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Command } from "commander";
-import { loadVault, saveVault, TREASURY_PROJECT, type Vault } from "../core/vault.js";
+import { loadVault, updateVault, TREASURY_PROJECT, type Vault } from "../core/vault.js";
 import { runCastWithKeystore, type CastExecFn } from "../core/castWithKeystore.js";
 import { authenticate } from "../platform/index.js";
 import { isEthAddress } from "../license/config.js";
@@ -332,17 +332,18 @@ function readSafeApiKey(vault: Vault): string | undefined {
   );
 }
 
-async function storeSafeAddress(vault: Vault, address: string): Promise<void> {
-  const now = Date.now();
-  if (!vault.projects[TREASURY_PROJECT]) {
-    vault.projects[TREASURY_PROJECT] = { createdAt: now, vars: {} };
-  }
-  vault.projects[TREASURY_PROJECT].vars[SAFE_ADDRESS_VAR] = {
-    value: address,
-    secret: false,
-    updatedAt: now,
-  };
-  await saveVault(vault);
+async function storeSafeAddress(address: string): Promise<void> {
+  await updateVault((vault) => {
+    const now = Date.now();
+    if (!vault.projects[TREASURY_PROJECT]) {
+      vault.projects[TREASURY_PROJECT] = { createdAt: now, vars: {} };
+    }
+    vault.projects[TREASURY_PROJECT].vars[SAFE_ADDRESS_VAR] = {
+      value: address,
+      secret: false,
+      updatedAt: now,
+    };
+  });
 }
 
 // ── Safe Transaction Service ────────────────────────────────────────────────
@@ -555,7 +556,7 @@ export async function linkSafe(addressRaw: string): Promise<LinkResult> {
   const signer = readTreasuryAddress(vault);
   const address = await checksum(addressRaw);
   const info = await getSafeInfo(address);
-  await storeSafeAddress(vault, address);
+  await storeSafeAddress(address);
   return {
     address,
     info,
@@ -565,10 +566,11 @@ export async function linkSafe(addressRaw: string): Promise<LinkResult> {
 }
 
 export async function unlinkSafe(): Promise<string> {
-  const vault = await loadVault();
-  const address = readSafeAddress(vault);
-  delete vault.projects[TREASURY_PROJECT]?.vars[SAFE_ADDRESS_VAR];
-  await saveVault(vault);
+  let address!: string;
+  await updateVault((vault) => {
+    address = readSafeAddress(vault);
+    delete vault.projects[TREASURY_PROJECT]?.vars[SAFE_ADDRESS_VAR];
+  });
   return address;
 }
 
@@ -673,7 +675,7 @@ export async function createSafe(args: {
   if ((await codeSize(predicted)) === 0) {
     throw new Error(`deploy tx ${txHash} mined but no code at ${predicted}`);
   }
-  await storeSafeAddress(fresh, predicted);
+  await storeSafeAddress(predicted);
   return { ...base, txHash };
 }
 

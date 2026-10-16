@@ -4,7 +4,7 @@ import fs from "node:fs";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
-import type { Vault } from "../core/vault.js";
+import { VAULT_UNCHANGED, type Vault } from "../core/vault.js";
 import { AgentInbox } from "../agent/inbox.js";
 import { upsertAcceptRule } from "./accept.js";
 import { sealForPeer, sealProjects } from "./envelope.js";
@@ -69,8 +69,11 @@ describe.skipIf(!hasOpenssl)("sync inbox — loopback HTTPS", () => {
     const ctl = new AgentInbox({
       base,
       loadUnlockedVault: async () => (locked ? null : structuredClone(vault)),
-      saveVault: async (v) => {
-        vault = structuredClone(v);
+      updateVault: async (mutator) => {
+        const draft = structuredClone(vault);
+        const out = await mutator(draft);
+        if (out !== VAULT_UNCHANGED) vault = structuredClone(out ?? draft);
+        return vault;
       },
       log: () => {},
     });

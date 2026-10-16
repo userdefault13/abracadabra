@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { seedVault } from "../../test/fixtures/seed-vault.js";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -11,7 +12,7 @@ import {
   encryptVault,
   encryptVaultForExport,
   loadVault,
-  saveVault,
+  withVaultLock,
   withoutDeviceLocal,
   writeRestoredVault,
 } from "../core/vault.js";
@@ -85,7 +86,7 @@ async function setupTempVault(v: Vault): Promise<Buffer> {
   platform.resetPlatformForTests();
   const masterKey = crypto.randomBytes(32);
   await platform.restoreMasterKey(masterKey, PASS);
-  await saveVault(v);
+  await seedVault(v);
   return masterKey;
 }
 
@@ -149,13 +150,13 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
     expect(v.syncIdentity).toBeDefined(); // not mutated
   });
 
-  it("restore drops identity/peers/policy/inbox and the inbox trust mirror (cloned vaults must re-pair)", () => {
+  it("restore drops identity/peers/policy/inbox and the inbox trust mirror (cloned vaults must re-pair)", async () => {
     const dir = useTempDir();
     const v = pairedVault({ a: { createdAt: 1, vars: { K: entry("1") } } });
     writeAnchors(dir, anchorsFromVault(v));
     expect(fs.existsSync(anchorsFile(dir))).toBe(true);
     const key = crypto.randomBytes(32);
-    const res = writeRestoredVault(v, key);
+    const res = await withVaultLock(() => writeRestoredVault(v, key));
     expect(res.droppedSyncPairing).toBe(true);
     expect(fs.existsSync(anchorsFile(dir))).toBe(false);
     const restored = decryptVault(JSON.parse(fs.readFileSync(vaultFile(), "utf8")), key);
@@ -164,7 +165,7 @@ describe("device-local vault fields (syncIdentity / syncPeers)", () => {
     expect(restored.syncAccept).toBeUndefined();
     expect(restored.syncInbox).toBeUndefined();
     expect(restored.projects.a.vars.K.value).toBe("1");
-    expect(writeRestoredVault({ version: 1, projects: {} }, key).droppedSyncPairing).toBe(false);
+    expect((await withVaultLock(() => writeRestoredVault({ version: 1, projects: {} }, key))).droppedSyncPairing).toBe(false);
   });
 
   it("sync-state bases never store identity/peers", async () => {

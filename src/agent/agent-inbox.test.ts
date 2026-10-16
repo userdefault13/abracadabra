@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { seedVaultFile } from "../../test/fixtures/seed-vault.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -81,8 +82,8 @@ describe.skipIf(process.platform === "win32")("abra agent ↔ sync inbox lifecyc
       { ...receiver, syncInbox: { enabled: true, port: 0, bind: "127.0.0.1" } },
       { from: "*", projects: "*", auto: true },
     ).vault;
-    const { encryptVault, writeEncryptedVaultFile, decryptVault } = await import("../core/vault.js");
-    writeEncryptedVaultFile(encryptVault(local, masterKey), vaultPath);
+    const { encryptVault, decryptVault } = await import("../core/vault.js");
+    await seedVaultFile(encryptVault(local, masterKey), vaultPath);
     writeAnchors(tmpDir, anchorsFromVault(local));
 
     let controller: AgentInbox | null = null;

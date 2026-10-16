@@ -129,7 +129,7 @@ function isValidIdentity(identity: SyncIdentity | undefined): identity is SyncId
 
 /**
  * Pure: returns the vault (a new object when an identity was minted) plus the
- * identity. Callers persist with saveVault only after approval.
+ * identity. Callers persist with updateVault only after approval.
  * A present-but-corrupt identity throws rather than being silently replaced.
  */
 export function getOrCreateSyncIdentity(
